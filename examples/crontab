@@ -1,0 +1,5 @@
+# Scheduled runs (the collector image or a venv). Secrets via an env file, never in the crontab.
+# Hourly snapshot + triage of each target; nightly digest comes from the same snapshots.
+0 * * * *  cd /opt/dbtriage && set -a && . ./.env && set +a && dbtriage run -t prod-db-3 --mode scheduled --window 60 >> /var/log/dbtriage.log 2>&1
+# Same, as a container:
+# 0 * * * * docker run --rm --env-file /opt/dbtriage/.env -v /opt/dbtriage/targets.toml:/app/targets.toml:ro dbtriage:dev run -t prod-db-3 --mode scheduled

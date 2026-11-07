@@ -1,0 +1,20 @@
+<div class="pagehead"><div class="lead"><div class="crumbs"><a href="/">Targets</a><span aria-hidden="true">/</span><a href="/settings">Settings</a><span aria-hidden="true">/</span><span>$tname</span></div><div class="titlerow"><h1>$heading</h1></div></div></div>
+$notice
+<form method="post" action="/targets/save" class="card grid">
+<label>Name <input name="name" value="$tname" $name_ro required maxlength="64" pattern="[A-Za-z0-9](?:[A-Za-z0-9._\-]{0,62}[A-Za-z0-9_\-])?" title="letters, digits, '.', '_' and '-'; starts with a letter or digit, does not end in '.'"></label>
+<label>Engine <select name="engine">$engine_opts</select></label>
+<label>DSN <input name="dsn" type="password" value="$dsn" placeholder="$dsn_placeholder" autocomplete="off"></label>
+<label>…or DSN from env var <input name="dsn_env" value="$dsn_env" placeholder="ORACLE_DSN"></label>
+<label>Oracle user <input name="user" value="$user" placeholder="C##DBTRIAGE (if not in the DSN)"></label>
+<label>Oracle password <input name="password" type="password" value="$password" autocomplete="off"></label>
+<label>Top N SQL <input name="top_n" type="number" min="5" max="200" value="$top_n"></label>
+<label><input type="checkbox" name="diagnostics_pack" $diagnostics_pack> Oracle Diagnostics Pack licensed (AWR/ASH/ADDM)</label>
+<label>Snapshot on the database before collecting <select name="create_snapshot">$snapshot_opts</select><small class="mut">Oracle: an AWR snapshot (Diagnostics Pack); other engines with a plugin. $snapshot_note</small></label>
+<label>Baseline policy <select name="baseline_policy">$baseline_opts</select></label>
+<label>Pinned baseline snapshot id <input name="baseline" value="$baseline" placeholder="oracle/ora-lab/2026-11-05/20261105T152933Z (for policy 'pinned baseline')"></label>
+<label>Changes file <input name="changes_file" value="$changes_file" placeholder="examples/changes.json"></label>
+<label>Links (one per line: label url) <textarea name="links" rows="3">$links</textarea></label>
+<label>Notes for the reviewer <textarea name="notes" rows="2" placeholder="e.g. batch window 02:00-04:00; owned by team X">$notes</textarea></label>
+<div class="row">$buttons</div>
+</form>
+<p class="mut">Prefer <b>DSN from env var</b> in locked-down environments: the value then never touches disk here. A DSN typed above is saved to the settings file (mode 0600) and masked afterwards.</p>

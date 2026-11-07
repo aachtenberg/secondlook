@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300" role="img" aria-labelledby="t d">
+<title id="t">What happens when the store goes away</title>
+<desc id="d">Time runs left to right across three lanes: dbtriage, the local spool and the store. dbtriage saves a snapshot; the store gives no answer in time. The snapshot is kept in the local spool instead, pages show a banner and the store is left alone for 30 seconds so nothing waits on it. A health check, the next write or a scheduler tick finds the store answering again, and everything that waited is pushed: the snapshot files first and the manifest last, so a snapshot only appears once it is complete.</desc>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif}
+.t{font-size:14px;font-weight:600;fill:#1f2328}.p{font-size:12px;fill:#1f2328}.s{font-size:12px;fill:#59636e}
+.h{font-size:11px;font-weight:600;letter-spacing:.06em;fill:#59636e}.w{font-size:12px;fill:#cf222e}
+.box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1.5}.acc{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.5}
+.down{fill:#ffebe9;stroke:#cf222e;stroke-width:1}.lane{fill:none;stroke:#d0d7de;stroke-width:1.5}
+.ln{fill:none;stroke:#59636e;stroke-width:1.5}.dash{stroke-dasharray:5 4}.ah{fill:#59636e}
+.nox{fill:none;stroke:#cf222e;stroke-width:2.5}
+@media (prefers-color-scheme:dark){.t,.p{fill:#e6edf3}.s,.h{fill:#9198a1}.w{fill:#f85149}.box{fill:#151b23;stroke:#3d444d}
+.acc{fill:#0f2a1a;stroke:#3fb950}.down{fill:#2d1517;stroke:#f85149}.lane{stroke:#3d444d}.ln{stroke:#9198a1}.ah{fill:#9198a1}.nox{stroke:#f85149}}
+</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+
+<path class="ln" marker-end="url(#a)" d="M130,24 H884"/>
+<text class="h" x="130" y="16">TIME</text>
+
+<text class="t" x="16" y="75">dbtriage</text>
+<text class="t" x="16" y="165">local spool</text>
+<text class="t" x="16" y="255">store</text>
+<path class="lane" d="M130,70 H884 M130,160 H884 M130,250 H884"/>
+
+<rect class="down" x="196" y="236" width="408" height="28" rx="6"/>
+<text class="w" x="400" y="255" text-anchor="middle">not answering</text>
+
+<path class="ln" marker-end="url(#a)" d="M180,74 V214"/>
+<text class="s" x="170" y="100" text-anchor="end">save</text>
+<path class="nox" d="M172,220 l16,16 M188,220 l-16,16"/>
+<text class="w" x="198" y="226">no answer in time</text>
+
+<path class="ln" marker-end="url(#a)" d="M246,74 V156"/>
+<text class="s" x="256" y="122">kept here instead</text>
+<rect class="acc" x="236" y="150" width="20" height="20" rx="4"/>
+
+<rect class="box" x="300" y="56" width="290" height="28" rx="6"/>
+<text class="p" x="445" y="75" text-anchor="middle">banner on pages · store left alone for 30 s</text>
+
+<path class="ln dash" marker-end="url(#a)" d="M630,74 V246"/>
+<text class="s" x="620" y="118" text-anchor="end">health check, the next</text>
+<text class="s" x="620" y="134" text-anchor="end">write or a scheduler tick</text>
+<path class="ln" marker-end="url(#a)" d="M656,246 V76"/>
+<text class="s" x="666" y="206">answers again</text>
+
+<path class="ln" marker-end="url(#a)" d="M770,164 V246"/>
+<text class="s" x="780" y="188">push what waited:</text>
+<text class="s" x="780" y="204">files first,</text>
+<text class="s" x="780" y="220">manifest last</text>
+<rect class="acc" x="760" y="150" width="20" height="20" rx="4"/>
+</svg>

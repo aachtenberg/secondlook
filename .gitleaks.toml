@@ -1,0 +1,8 @@
+# gitleaks: the default rules, plus the lab's and the docs' made-up credentials, which are public on purpose.
+# A real secret never belongs here: rotate it and take it out of the history instead.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "lab defaults and documentation placeholders"
+stopwords = ["dbtriage", "CHANGE_ME", "PASSWORD", "example", "placeholder", "fake", "dummy"]

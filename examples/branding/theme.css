@@ -1,0 +1,4 @@
+/* Appended after the built-in stylesheet. Override anything; the variables are the quick wins. */
+:root { --accent: #3dd68c; }
+/* e.g. a brand colour for the badge and primary buttons only, keeping the dark surfaces: */
+/* :root[data-theme=dark] { --accent: #d97757; --on-accent: #0f1115; } */

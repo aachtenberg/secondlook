@@ -1,0 +1,65 @@
+# dbtriage configuration. Secrets come from environment variables, never from this file.
+
+# [collect]
+# allow_db_writes = true         # dbtriage only reads until this is on: then ora-lab's create_snapshot takes AWR snapshots
+
+[storage]
+url = "file://./data"            # or s3://bucket/prefix (set AWS_ENDPOINT_URL for MinIO/Ceph/versitygw)
+
+[agent]
+provider = "anthropic"           # anthropic | bedrock | vertex | foundry | openai | openrouter | groq | ollama | ollama-cloud | vllm | azure-openai
+model = "claude-opus-5-5"        # bedrock: "anthropic.claude-opus-5-5"; ollama: "qwen3:8b"; azure-openai: the deployment name
+# region = "us-east-1"           # bedrock / vertex       project_id = "my-gcp-project"   (vertex)
+# base_url = "https://<resource>.cognitiveservices.azure.com/openai/v1/"   api_key_env = "AZURE_OPENAI_API_KEY"
+
+[web]                             # dbtriage web: branding and behaviour (paths relative to this file)
+title = "DB Review"
+brand = "Acme SRE"
+logo = "examples/branding/logo.svg"       # local file served at /brand/logo, or an https:// URL
+accent = "#3dd68c"
+theme = "dark"                    # auto | light | dark
+refresh_seconds = 30              # 0 disables auto refresh on list pages
+page_size = 50
+footer = "dbtriage lab · advisory only"
+custom_css = "examples/branding/theme.css"        # optional, appended after the built-in CSS
+# templates_dir = "branding/templates"   # optional: replace page templates; copy them from src/dbtriage/templates first
+files = ["triage.md", "compare.json", "summary.json", "manifest.json", "awr.txt", "addm.txt"]   # exposed stored files; "*" = all
+[web.severity_colors]
+high = "#d73a49"
+medium = "#e36209"
+low = "#b08800"
+info = "#22863a"
+
+[delivery]
+channels = ["stdout"]            # add: ntfy, slack, teams, email, jira, plane, webhook, pushgateway
+min_severity = "low"
+
+[delivery.ntfy]
+url = "https://ntfy.sh/dbtriage-demo"
+
+[targets.pg-lab]
+engine = "postgres"
+dsn_env = "PG_DSN"               # postgresql://dbtriage:dbtriage@localhost:5432/app
+top_n = 25
+changes_file = "examples/changes.json"
+# links = [{label = "Grafana", url = "https://grafana.example.com/d/abc"}]   # shown next to the database in the web view
+
+[targets.mysql-lab]
+engine = "mysql"
+dsn_env = "MYSQL_DSN"            # mysql://dbtriage:dbtriage@localhost:3306/app
+
+[targets.mariadb-lab]
+engine = "mysql"                 # MariaDB is read by the MySQL collector
+dsn_env = "MARIADB_DSN"          # mysql://dbtriage:dbtriage@localhost:3307/app
+
+[targets.mssql-lab]
+engine = "sqlserver"             # SQL Server 2022 on k3s (compose/sqlserver/k8s.yaml); needs uv sync --extra sqlserver
+dsn_env = "MSSQL_DSN"            # mssql://dbtriage:...@127.0.0.1:14330/app via kubectl -n dbtriage-lab port-forward svc/mssql 14330:1433
+
+[targets.ora-lab]
+engine = "oracle"
+dsn_env = "ORACLE_DSN"           # C##DBTRIAGE/dbtriage@localhost:1521/FREE
+diagnostics_pack = true          # false on Standard Edition / unlicensed: V$ views only, no DBA_HIST*
+create_snapshot = "incident"     # take an AWR snapshot on incident runs, once [collect] at the top allows it
+# baseline_policy = "same-time-last-week"   # previous (default) | same-time-yesterday | same-time-last-week | pinned
+# baseline = "oracle/ora-lab/2026-11-05/20261105T152933Z"   # the pinned known-good snapshot for policy "pinned"

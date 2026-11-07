@@ -1,0 +1,14 @@
+<div class="pagehead">
+  <div class="lead">
+    <div class="crumbs"><a href="/">Targets</a><span aria-hidden="true">/</span><a href="/t/$target">$target</a><span aria-hidden="true">/</span><span>SQL</span></div>
+    <div class="titlerow"><h1><code>$sql_id</code></h1><span class="chip">$target</span></div>
+    <div class="meta"><span>seen in $seen snapshots</span><span>·</span><span>$plans distinct plan(s)</span><span>·</span><span>diamond = plan changed</span></div>
+  </div>
+</div>
+<pre class="sqltext">$text</pre>
+<figure class="chart"><figcaption>Mean time per execution (ms)</figcaption>$chart</figure>
+<section class="card flush"><div class="cardhead"><h2>History</h2></div><div class="scroll">
+<table class="list">
+<thead><tr><th>captured</th><th>mode</th><th>share</th><th class="r">calls</th><th class="r">total ms</th>$cpu_th<th class="r">mean ms</th><th class="r">rows</th><th class="r">blocks read</th><th>plan</th><th>review</th></tr></thead>
+<tbody>$rows</tbody>
+</table></div></section>

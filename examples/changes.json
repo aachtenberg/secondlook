@@ -1,0 +1,4 @@
+[
+  {"time": "2026-11-05T09:30:00+00:00", "kind": "deploy", "description": "orders-api v2.14.0 (adds order search by note)", "link": "https://gitlab.example.com/orders-api/-/pipelines/1234"},
+  {"time": "2026-11-04T22:00:00+00:00", "kind": "maintenance", "description": "nightly stats job skipped (disk full on jump host)"}
+]

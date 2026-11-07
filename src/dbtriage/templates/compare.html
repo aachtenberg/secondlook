@@ -1,0 +1,17 @@
+<div class="pagehead">
+  <div class="lead">
+    <div class="crumbs"><a href="/">Targets</a><span aria-hidden="true">/</span><a href="/t/$target">$target</a><span aria-hidden="true">/</span><span>Compare</span></div>
+    <div class="titlerow"><h1>Compare</h1><span class="chip">$engine</span></div>
+  </div>
+  <form method="get" action="/t/$target/compare" class="actions">
+    <label class="pill"><select name="a" aria-label="current snapshot">$a_opts</select></label>
+    <span class="mut">vs</span>
+    <label class="pill"><select name="b" aria-label="baseline snapshot">$b_opts</select></label>
+    <button class="primary">Compare</button>
+  </form>
+</div>
+$notice
+<div class="tiles">$tiles</div>
+<div class="charts">$charts</div>
+$findings
+$sql

@@ -1,0 +1,83 @@
+# SQL Server 2022 Developer edition (free for dev and test) as a dbtriage lab on k3s, cluster-internal (see the
+# Service). In this order, so each step finds the namespace (passwords never in this file):
+#   kubectl create namespace dbtriage-lab
+#   kubectl -n dbtriage-lab create secret generic mssql --from-literal=sa-password=... --from-literal=dbtriage-password=...
+#   kubectl -n dbtriage-lab create configmap mssql-init --from-file=01-init.sql
+#   kubectl apply -f k8s.yaml      # the Job runs 01-init.sql once the server is up
+# The image is amd64 only. To keep it on one machine, add kubernetes.io/hostname: <node> to the nodeSelector; its
+# local-path volume then stays there too.
+apiVersion: v1
+kind: Namespace
+metadata: {name: dbtriage-lab, labels: {app.kubernetes.io/part-of: dbtriage}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: mssql-data, namespace: dbtriage-lab}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 10Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: mssql, namespace: dbtriage-lab, labels: {app: mssql}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: mssql}}
+  template:
+    metadata: {labels: {app: mssql}}
+    spec:
+      nodeSelector: {kubernetes.io/arch: amd64}
+      securityContext: {fsGroup: 10001}
+      containers:
+        - name: mssql
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          env:
+            - {name: ACCEPT_EULA, value: "Y"}
+            - {name: MSSQL_PID, value: Developer}
+            - {name: MSSQL_MEMORY_LIMIT_MB, value: "4096"}
+            - name: MSSQL_SA_PASSWORD
+              valueFrom: {secretKeyRef: {name: mssql, key: sa-password}}
+          ports: [{containerPort: 1433}]
+          resources: {requests: {memory: 2Gi, cpu: 500m}, limits: {memory: 6Gi}}
+          readinessProbe: {tcpSocket: {port: 1433}, initialDelaySeconds: 15, periodSeconds: 5}
+          volumeMounts: [{name: data, mountPath: /var/opt/mssql}]
+      volumes: [{name: data, persistentVolumeClaim: {claimName: mssql-data}}]
+---
+# Cluster-internal only. From a workstation: kubectl -n dbtriage-lab port-forward svc/mssql 14330:1433 (local only).
+# To let a dbtriage outside the cluster poll it, change it to type: NodePort (nodePort: 31433, externalTrafficPolicy:
+# Local), which opens it on the node's network: that is a decision for whoever owns the cluster.
+apiVersion: v1
+kind: Service
+metadata: {name: mssql, namespace: dbtriage-lab}
+spec:
+  type: ClusterIP
+  selector: {app: mssql}
+  ports: [{name: tds, port: 1433, targetPort: 1433}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: mssql-init, namespace: dbtriage-lab}
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector: {kubernetes.io/arch: amd64}  # the SQL Server image (and its sqlcmd) is amd64 only
+      containers:
+        - name: init
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 60); do
+                /opt/mssql-tools18/bin/sqlcmd -C -S mssql -U sa -P "$SA" -Q "SELECT 1" >/dev/null 2>&1 && break; sleep 5
+              done
+              /opt/mssql-tools18/bin/sqlcmd -C -b -S mssql -U sa -P "$SA" -v DBTRIAGE_PASSWORD="$DBTRIAGE_PW" -i /init/01-init.sql
+          env:
+            - name: SA
+              valueFrom: {secretKeyRef: {name: mssql, key: sa-password}}
+            - name: DBTRIAGE_PW
+              valueFrom: {secretKeyRef: {name: mssql, key: dbtriage-password}}
+          volumeMounts: [{name: init, mountPath: /init}]
+      volumes: [{name: init, configMap: {name: mssql-init}}]

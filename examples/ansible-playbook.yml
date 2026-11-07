@@ -1,0 +1,15 @@
+# AWX / Ansible job template: on-demand or scheduled triage from a jump host that can reach the database.
+- hosts: dbtriage_runner
+  gather_facts: false
+  vars:
+    target: "{{ target | default('prod-db-3') }}"
+    mode: "{{ mode | default('adhoc') }}"
+  tasks:
+    - name: run db triage
+      ansible.builtin.command:
+        cmd: >
+          docker run --rm --env-file /opt/dbtriage/.env
+          -v /opt/dbtriage/targets.toml:/app/targets.toml:ro
+          dbtriage:dev run -t {{ target }} --mode {{ mode }} --window 60 --reason "awx job {{ awx_job_id | default('manual') }}"
+      register: out
+    - ansible.builtin.debug: {var: out.stdout_lines}

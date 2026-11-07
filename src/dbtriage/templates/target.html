@@ -1,0 +1,23 @@
+<div class="pagehead">
+  <div class="lead">
+    <div class="crumbs"><a href="/">Targets</a><span aria-hidden="true">/</span><span>$target</span></div>
+    <div class="titlerow"><h1>$target</h1><span class="chip">$engine</span>$status</div>
+    <div class="meta">$links</div>
+  </div>
+  <div class="actions">$actions</div>
+</div>
+<div class="tiles">$tiles</div>
+$strip
+<section class="card flush" aria-labelledby="snaps-h">
+  <div class="cardhead"><h2 id="snaps-h">Snapshots</h2><div class="chips">$chips</div></div>
+  <div class="scroll">
+  <table class="list">
+  <thead><tr><th>captured</th><th>mode</th><th>trigger</th><th>severity</th><th>finding</th><th class="r">by</th></tr></thead>
+  <tbody>
+  $rows
+  </tbody>
+  </table>
+  </div>
+  $pager
+</section>
+$run_dialog

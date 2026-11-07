@@ -1,0 +1,39 @@
+# Recipe: several servers, one shared setup. Snapshots and Settings-page changes both live in one Postgres
+# database, so any number of web servers and schedulers see the same thing. Typical layout:
+#   - a scheduler on a host that can reach the databases:  dbtriage scheduler
+#   - one or more web views behind your single sign-on:   dbtriage web --allow-run --allow-edit --allow-chat
+# If the shared database is down, every server keeps running: captures wait in a local spool and sync later,
+# and settings run on the last good copy (docs/storage.md).
+# Also set DBTRIAGE_SETTINGS (see .env.example) so Settings-page changes go to the same database.
+
+[storage]
+url = "postgres://dbtriage@ops-db.internal:5432/ops?schema=dbtriage&sslmode=require"
+
+[agent]
+provider = "bedrock"                   # Claude inside your own cloud tenant: SQL text never leaves it
+model = "anthropic.claude-opus-5-5"
+region = "us-east-1"
+
+[delivery]
+channels = ["stdout", "teams", "jira"]
+
+[delivery.teams]
+webhook_url_env = "TEAMS_WEBHOOK_URL"
+
+[delivery.jira]
+base_url = "https://jira.acme.example"
+project_key = "DBA"
+user_env = "JIRA_USER"
+token_env = "JIRA_TOKEN"
+
+[web]
+brand = "Acme DB Review"
+footer = "Questions: #dba on Teams"
+
+[targets.payments]
+engine = "oracle"
+dsn_env = "PAYMENTS_DSN"
+diagnostics_pack = true
+schedule = "0 * * * *"
+baseline_policy = "same-time-last-week"
+notes = "Month-end close runs on the last business day; heavy batch load then is expected."

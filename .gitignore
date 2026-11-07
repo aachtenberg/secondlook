@@ -1,0 +1,13 @@
+data/
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+dbtriage-settings.json
+dbtriage-settings.cache.json
+spool/
+*.swp
+*.swo
+*~
+data.bak-*/

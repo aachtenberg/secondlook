@@ -1,0 +1,72 @@
+# Local lab: Postgres, MySQL, MariaDB and an S3-compatible store. Use `--profile oracle` for Oracle Free
+# (about 2 GB image, a few minutes to start). The lab comes back after a reboot (restart: unless-stopped);
+# `docker compose stop` keeps it down until the next `up`. Nothing here is for production.
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "track_io_timing=on",
+              "-c", "pg_stat_statements.track=all"]
+    environment: {POSTGRES_PASSWORD: postgres, POSTGRES_DB: app}
+    ports: ["5432:5432"]
+    volumes: ["./compose/postgres:/docker-entrypoint-initdb.d:ro"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U postgres"], interval: 5s, retries: 20}
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment: {MYSQL_ROOT_PASSWORD: root, MYSQL_DATABASE: app}
+    ports: ["3306:3306"]
+    volumes: ["./compose/mysql:/docker-entrypoint-initdb.d:ro"]
+    healthcheck: {test: ["CMD", "mysqladmin", "ping", "-uroot", "-proot"], interval: 5s, retries: 30}
+
+  mariadb:
+    # read by the MySQL collector (engine = "mysql"); performance_schema is off by default in MariaDB
+    image: mariadb:11.4
+    restart: unless-stopped
+    command: ["--performance-schema=ON"]
+    environment: {MARIADB_ROOT_PASSWORD: root, MARIADB_DATABASE: app}
+    ports: ["3307:3306"]
+    volumes: ["./compose/mariadb:/docker-entrypoint-initdb.d:ro"]
+    healthcheck: {test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"], interval: 5s, retries: 30}
+
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    restart: unless-stopped
+    profiles: ["oracle"]
+    environment: {ORACLE_PASSWORD: oracle}
+    ports: ["1521:1521"]
+    volumes: ["./compose/oracle:/container-entrypoint-initdb.d:ro"]
+    healthcheck: {test: ["CMD", "healthcheck.sh"], interval: 10s, retries: 60, start_period: 60s}
+
+  s3:
+    # S3-compatible object store (MinIO's images now need a login). Buckets are directories under /data.
+    image: versity/versitygw:latest
+    restart: unless-stopped
+    command: ["posix", "/data"]
+    environment: {ROOT_ACCESS_KEY: dbtriage, ROOT_SECRET_KEY: dbtriage-secret, VGW_PORT: ":9000"}
+    ports: ["9000:9000"]
+    volumes: ["s3data:/data"]
+
+  # The collector itself, for running the pipeline as a container (cron / AWX / k8s CronJob use the same image).
+  dbtriage:
+    build: .
+    profiles: ["app"]
+    environment:
+      DBTRIAGE_CONFIG: /app/targets.toml
+      DBTRIAGE_STORAGE: file:///var/lib/dbtriage   # or s3://dbtriage/snapshots (the s3 service below), az://container/prefix
+      AWS_ENDPOINT_URL: http://s3:9000
+      AWS_ACCESS_KEY_ID: dbtriage
+      AWS_SECRET_ACCESS_KEY: dbtriage-secret
+      AWS_DEFAULT_REGION: us-east-1
+      PG_DSN: postgresql://dbtriage:dbtriage@postgres:5432/app
+      MYSQL_DSN: mysql://dbtriage:dbtriage@mysql:3306/app
+      MARIADB_DSN: mysql://dbtriage:dbtriage@mariadb:3306/app
+      ORACLE_DSN: C##DBTRIAGE/dbtriage@oracle:1521/FREE
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes: ["./targets.toml:/app/targets.toml:ro", "dbtriage-data:/var/lib/dbtriage"]
+    depends_on: {postgres: {condition: service_healthy}, s3: {condition: service_started}}
+
+volumes:
+  s3data: {}
+  dbtriage-data: {}

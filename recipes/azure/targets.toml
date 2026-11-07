@@ -1,0 +1,44 @@
+# Recipe: databases on Azure. Snapshots in Blob Storage, the model on Azure OpenAI, reviews to Teams and email.
+# Run it on a VM or Container App with a managed identity that has "Storage Blob Data Contributor" on the account;
+# then no storage key is needed. To put a hard cap on model spend, see examples/azure-budget-cap.md.
+
+[storage]
+url = "az://dbtriage/snapshots"        # uv sync --extra azure
+
+[agent]
+provider = "azure-openai"
+model = "gpt-5-mini"                   # your *deployment* name, which may differ from the model name
+base_url = "https://acme-ai.cognitiveservices.azure.com/openai/v1/"
+
+[delivery]
+channels = ["stdout", "teams", "email"]
+min_severity = "low"
+
+[delivery.teams]                       # a Teams "Workflows" (Power Automate) URL or a classic incoming webhook
+webhook_url_env = "TEAMS_WEBHOOK_URL"
+
+[delivery.email]
+smtp_host = "smtp.office365.com"
+smtp_port = 587
+from = "dbtriage@acme.example"
+to = ["dba-oncall@acme.example"]
+user_env = "SMTP_USER"
+password_env = "SMTP_PASSWORD"
+min_severity = "medium"                # email only for things worth reading
+
+[targets.crm-flex]                     # Azure Database for PostgreSQL flexible server
+engine = "postgres"
+dsn_env = "CRM_DSN"
+schedule = "0 * * * *"
+
+[targets.erp-oracle]                   # Oracle on an Azure VM
+engine = "oracle"
+dsn_env = "ERP_DSN"
+diagnostics_pack = true
+create_snapshot = "incident"           # incident runs take a fresh AWR snapshot, once [collect] below allows it
+schedule = "30 * * * *"
+
+# dbtriage only reads until this allows writes: uncomment it to let erp-oracle take the AWR snapshot above
+# (create_snapshot) on incident runs. Only targets.toml can turn it on; the web view cannot.
+# [collect]
+# allow_db_writes = true

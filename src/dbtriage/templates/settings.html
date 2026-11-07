@@ -1,0 +1,110 @@
+<div class="pagehead"><div class="lead"><div class="crumbs"><a href="/">Targets</a><span aria-hidden="true">/</span><span>Settings</span></div><div class="titlerow"><h1>Settings</h1></div></div></div>
+$notice
+<div class="card">
+<h2>Targets</h2>
+<div class="scroll">
+<table class="list">
+<thead><tr><th>name</th><th>engine</th><th>dsn</th><th>origin</th><th></th></tr></thead>
+<tbody>$target_rows</tbody>
+</table>
+</div>
+<p>$add_link</p>
+<p class="mut">$db_writes_note</p>
+<p class="mut">$mcp_note</p>
+</div>
+<div class="card">
+<h2>Schedule</h2>
+$schedule_card
+<p class="mut">Times are the server's local time. Each run collects the last <i>window</i> minutes, compares with the target's baseline, reviews and delivers, like <code>dbtriage run --mode scheduled</code>. A slot is skipped while the previous run is still going.</p>
+</div>
+<script>
+document.addEventListener('change', function (e) {  // delegated: schedule rows are replaced after an in-place save
+  var s = e.target; if (!s.matches || !s.matches('select.sched')) return;
+  var c = s.closest('tr').querySelector('input.cron'); c.hidden = s.value !== 'custom'; if (!c.hidden) c.focus();
+});
+</script>
+<div class="card">
+<h2>Look and feel</h2>
+<form method="post" action="/settings/save" class="grid" data-ajax="reload">
+<label>Title <input name="title" value="$web_title"></label>
+<label>Brand <input name="brand" value="$brand"></label>
+<label>Logo URL <input name="logo" value="$logo" placeholder="https://… or a file path"></label>
+<label>Accent <input name="accent" type="color" value="$accent"></label>
+<label>Theme <select name="theme">$theme_opts</select></label>
+<label>Refresh (s) <input name="refresh_seconds" type="number" min="0" value="$refresh_seconds"></label>
+<label>Page size <input name="page_size" type="number" min="1" value="$page_size"></label>
+<label>Footer <input name="footer" value="$footer"></label>
+<div>$save_button</div>
+</form>
+<p class="mut">Stored in <code>$settings_file</code>; values here override <code>[web]</code> in targets.toml. Logo files, custom CSS and template overrides stay in the file.</p>
+</div>
+<div class="card">
+<h2>Agent (model that writes the review)</h2>
+<form method="post" action="/settings/agent" class="grid" data-ajax>
+<label>Provider <select name="provider" id="a-provider">$provider_opts</select></label>
+<label>Model <input name="model" id="a-model" list="model-list" autocomplete="off" value="$a_model" placeholder="pick from the list, or type an id">
+<datalist id="model-list"></datalist><span class="hint" id="model-status" aria-live="polite"></span></label>
+<label>Region <input name="region" value="$a_region" placeholder="us-east-1 · global"></label>
+<label>Project (Vertex) <input name="project_id" value="$a_project_id"></label>
+<label>Resource (Foundry / Azure OpenAI) <input name="resource" value="$a_resource"></label>
+<label>Base URL (OpenAI-compatible) <input name="base_url" value="$a_base_url" placeholder="http://ollama.lan:11434/v1"></label>
+<label>API key env var <input name="api_key_env" value="$a_api_key_env" placeholder="OPENROUTER_API_KEY (the name, never the key)"></label>
+<label>Effort (Claude) <select name="effort">$effort_opts</select></label>
+<label>Max iterations <input name="max_iterations" type="number" min="1" max="100" value="$a_max_iterations"></label>
+<label>Token budget per review <input name="token_budget" type="number" min="0" step="10000" value="$a_token_budget" title="Input and output tokens one review (or one discussion answer) may use, all model calls together. Near the limit the model is asked to finish with what it has. 0 = no limit."></label>
+<fieldset class="chan"><legend>Scheduled runs (optional: a cheaper or local model for the schedule)</legend>
+<label>Provider <select name="scheduled_provider">$sched_provider_opts</select></label>
+<label>Model <input name="scheduled_model" value="$a_scheduled_model" placeholder="blank: the model above" autocomplete="off"></label>
+<label>Base URL <input name="scheduled_base_url" value="$a_scheduled_base_url" placeholder="http://ollama.lan:11434/v1"></label>
+<label>API key env var <input name="scheduled_api_key_env" value="$a_scheduled_api_key_env" placeholder="the name, never the key"></label>
+</fieldset>
+<div class="row">$agent_buttons</div>
+</form>
+<p class="mut">Only runs the schedule starts use the scheduled model; Run, webhooks and discussion use the one above. Keys and tokens are read from the environment of the process at run time; this page only stores their variable names. Values here override <code>[agent]</code> in targets.toml for the UI, cron and webhook runs alike.</p>
+</div>
+<div class="card">
+<h2>Delivery (where reviews are posted)</h2>
+<form method="post" action="/settings/delivery" class="grid" data-ajax>
+<label>Below this severity only stdout fires <select name="min_severity">$min_sev_opts</select></label>
+<div class="row"><span class="mut">Enabled channels:</span> $channel_toggles</div>
+$channel_blocks
+<div class="row">$delivery_buttons</div>
+</form>
+<p class="mut">"Send test" posts the latest stored review to that channel regardless of severity. Webhook URLs and tokens typed here are kept in the settings file (mode 0600) and masked afterwards; leave a masked field blank to keep it.</p>
+</div>
+<script>
+(function () {
+  var prov = document.getElementById('a-provider'), model = document.getElementById('a-model'),
+      list = document.getElementById('model-list'), status = document.getElementById('model-status');
+  if (!prov || !model || prov.disabled) return;
+  var form = prov.form, seq = 0;
+  function load() {
+    var mine = ++seq, q = new URLSearchParams({ provider: prov.value });
+    ['base_url', 'region', 'api_key_env', 'project_id', 'resource'].forEach(function (k) {
+      var el = form.elements[k]; if (el && el.value) q.set(k, el.value);
+    });
+    status.textContent = 'looking up ' + prov.value + ' models…'; status.className = 'hint';
+    fetch('/api/settings/agent/models?' + q, { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (d) {
+      if (mine !== seq) return;
+      list.innerHTML = '';
+      (d.models || []).forEach(function (id) { var o = document.createElement('option'); o.value = id; list.appendChild(o); });
+      var n = (d.models || []).length;
+      if (n) {
+        var known = d.models.indexOf(model.value) >= 0;
+        status.textContent = n + ' models available' + (model.value && !known ? ' · "' + model.value + '" is not one of them' : '') + (d.note ? ' · ' + d.note : '');
+        status.className = 'hint' + (model.value && !known ? ' warn' : ' ok');
+      } else {
+        status.textContent = d.note || d.error || 'this provider did not list any models; type an id';
+        status.className = 'hint warn';
+      }
+    }).catch(function (e) { if (mine === seq) { status.textContent = 'could not list models: ' + e.message; status.className = 'hint warn'; } });
+  }
+  prov.addEventListener('change', function () { model.value = ''; load(); });
+  ['base_url', 'region', 'api_key_env', 'project_id'].forEach(function (k) { var el = form.elements[k]; if (el) el.addEventListener('change', load); });
+  model.addEventListener('change', function () {
+    var ids = [].map.call(list.options, function (o) { return o.value; });
+    if (ids.length) { var ok = ids.indexOf(model.value) >= 0; status.textContent = ok ? ids.length + ' models available' : '"' + model.value + '" is not in the list ' + prov.value + ' returned'; status.className = 'hint' + (ok ? ' ok' : ' warn'); }
+  });
+  load();
+})();
+</script>

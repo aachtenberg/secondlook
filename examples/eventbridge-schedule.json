@@ -1,0 +1,9 @@
+{
+  "_comment": "EventBridge Scheduler -> Lambda (handler dbtriage.triggers.lambda_handler). The event is the request.",
+  "ScheduleExpression": "rate(1 hour)",
+  "Target": {
+    "Arn": "arn:aws:lambda:us-east-1:123456789012:function:dbtriage",
+    "RoleArn": "arn:aws:iam::123456789012:role/dbtriage-scheduler",
+    "Input": "{\"target\": \"prod-db-3\", \"mode\": \"scheduled\", \"window_minutes\": 60, \"source\": \"eventbridge\"}"
+  }
+}

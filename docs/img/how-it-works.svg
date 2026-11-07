@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 964 236" width="964" height="236" role="img" aria-labelledby="t d">
+<title id="t">How dbtriage works</title>
+<desc id="d">A schedule, an alert or webhook, the Run button or the command line starts a run. dbtriage reads a snapshot from your database with a read-only user, keeps it in the store, compares it with a baseline, has an AI model or the rules write the review, and delivers it to Slack, Teams, email, ntfy, Jira, Plane or the web view.</desc>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif}
+.t{font-size:14px;font-weight:600;fill:#1f2328}.p{font-size:12px;fill:#1f2328}.s{font-size:12px;fill:#59636e}
+.h{font-size:11px;font-weight:600;letter-spacing:.06em;fill:#59636e}
+.box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1.5}.acc{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.5}
+.ln{fill:none;stroke:#59636e;stroke-width:1.5}.ah{fill:#59636e}
+@media (prefers-color-scheme:dark){.t,.p{fill:#e6edf3}.s,.h{fill:#9198a1}.box{fill:#151b23;stroke:#3d444d}
+.acc{fill:#0f2a1a;stroke:#3fb950}.ln{stroke:#9198a1}.ah{fill:#9198a1}}
+</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+
+<text class="h" x="76" y="32" text-anchor="middle">STARTS A RUN</text>
+<rect class="box" x="16" y="44" width="120" height="26" rx="13"/><text class="p" x="76" y="61" text-anchor="middle">schedule</text>
+<rect class="box" x="16" y="78" width="120" height="26" rx="13"/><text class="p" x="76" y="95" text-anchor="middle">alert or webhook</text>
+<rect class="box" x="16" y="112" width="120" height="26" rx="13"/><text class="p" x="76" y="129" text-anchor="middle">Run button</text>
+<rect class="box" x="16" y="146" width="120" height="26" rx="13"/><text class="p" x="76" y="163" text-anchor="middle">command line</text>
+<path class="ln" marker-end="url(#a)" d="M136,57 C154,57 152,108 170,108"/>
+<path class="ln" marker-end="url(#a)" d="M136,91 C154,91 152,108 170,108"/>
+<path class="ln" marker-end="url(#a)" d="M136,125 C154,125 152,108 170,108"/>
+<path class="ln" marker-end="url(#a)" d="M136,159 C154,159 152,108 170,108"/>
+
+<rect class="box" x="172" y="70" width="128" height="76" rx="10"/>
+<text class="t" x="236" y="99" text-anchor="middle">Collect</text>
+<text class="s" x="236" y="118" text-anchor="middle">a read-only</text>
+<text class="s" x="236" y="133" text-anchor="middle">snapshot</text>
+
+<path class="ln" marker-end="url(#a)" d="M236,176 V150"/>
+<text class="s" x="246" y="167">read-only user</text>
+<path class="box" d="M192,186 V214 A44,8 0 0 0 280,214 V186 Z"/><ellipse class="box" cx="236" cy="186" rx="44" ry="8"/>
+<text class="p" x="236" y="209" text-anchor="middle">your database</text>
+
+<path class="ln" marker-end="url(#a)" d="M300,108 H334"/>
+<path class="box" d="M336,78 V140 A64,9 0 0 0 464,140 V78 Z"/><ellipse class="box" cx="400" cy="78" rx="64" ry="9"/>
+<text class="t" x="400" y="108" text-anchor="middle">Store</text>
+<text class="s" x="400" y="126" text-anchor="middle">every snapshot</text>
+<text class="s" x="400" y="141" text-anchor="middle">is kept</text>
+
+<path class="ln" marker-end="url(#a)" d="M464,108 H498"/>
+<rect class="box" x="500" y="70" width="128" height="76" rx="10"/>
+<text class="t" x="564" y="99" text-anchor="middle">Compare</text>
+<text class="s" x="564" y="118" text-anchor="middle">this snapshot</text>
+<text class="s" x="564" y="133" text-anchor="middle">with a baseline</text>
+
+<path class="ln" marker-end="url(#a)" d="M628,108 H662"/>
+<rect class="acc" x="664" y="70" width="128" height="76" rx="10"/>
+<text class="t" x="728" y="99" text-anchor="middle">Review</text>
+<text class="s" x="728" y="118" text-anchor="middle">an AI model,</text>
+<text class="s" x="728" y="133" text-anchor="middle">or the rules</text>
+
+<text class="h" x="888" y="32" text-anchor="middle">DELIVERED TO</text>
+<path class="ln" marker-end="url(#a)" d="M792,108 C810,108 810,57 826,57"/>
+<path class="ln" marker-end="url(#a)" d="M792,108 C810,108 810,91 826,91"/>
+<path class="ln" marker-end="url(#a)" d="M792,108 C810,108 810,125 826,125"/>
+<path class="ln" marker-end="url(#a)" d="M792,108 C810,108 810,159 826,159"/>
+<rect class="box" x="828" y="44" width="120" height="26" rx="13"/><text class="p" x="888" y="61" text-anchor="middle">Slack · Teams</text>
+<rect class="box" x="828" y="78" width="120" height="26" rx="13"/><text class="p" x="888" y="95" text-anchor="middle">email · ntfy</text>
+<rect class="box" x="828" y="112" width="120" height="26" rx="13"/><text class="p" x="888" y="129" text-anchor="middle">Jira · Plane</text>
+<rect class="box" x="828" y="146" width="120" height="26" rx="13"/><text class="p" x="888" y="163" text-anchor="middle">web view</text>
+</svg>

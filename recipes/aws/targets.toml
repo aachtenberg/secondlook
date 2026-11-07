@@ -1,0 +1,51 @@
+# Recipe: databases on AWS (RDS, Aurora, EC2). Snapshots in S3, the model on Bedrock, reviews to Slack, high
+# severity as Jira tickets, and a Prometheus metric for alerting.
+# Run it on a small EC2 instance or ECS task with an IAM role that can use the S3 bucket (s3:GetObject, s3:PutObject,
+# s3:ListBucket; s3:CreateBucket only if dbtriage should create it) and call Bedrock (bedrock:InvokeModel);
+# then no AWS keys are needed at all. Schedules can come from the built-in scheduler or from EventBridge
+# (examples/eventbridge-schedule.json).
+
+[storage]
+url = "s3://acme-dbtriage/snapshots"   # create the bucket first, or let dbtriage create it on the first write
+
+[agent]
+provider = "bedrock-converse"          # any Bedrock model; Amazon Nova needs no marketplace agreement
+model = "us.amazon.nova-pro-v1:0"
+region = "us-east-1"
+# Claude on Bedrock once its model agreement is accepted in your account:
+# provider = "bedrock"
+# model = "anthropic.claude-opus-5-5"
+
+[delivery]
+channels = ["stdout", "slack", "jira", "pushgateway"]
+min_severity = "low"
+
+[delivery.slack]
+webhook_url_env = "SLACK_WEBHOOK_URL"
+
+[delivery.jira]                        # tickets for high severity only (the default for ticket channels)
+base_url = "https://acme.atlassian.net"
+project_key = "DBA"
+user_env = "JIRA_USER"
+token_env = "JIRA_TOKEN"
+
+[delivery.pushgateway]
+url = "http://pushgateway.monitoring:9091"
+
+[targets.orders-aurora]
+engine = "postgres"
+dsn_env = "ORDERS_DSN"
+schedule = "0 * * * *"
+baseline_policy = "same-time-last-week"    # weekly traffic pattern: compare Monday 10:00 with last Monday 10:00
+links = [{label = "CloudWatch", url = "https://console.aws.amazon.com/cloudwatch/home#dashboards:name=orders"}]
+
+[targets.catalog-mysql]
+engine = "mysql"
+dsn_env = "CATALOG_DSN"
+schedule = "every 2h"
+
+[targets.billing-oracle]               # Oracle on RDS: set diagnostics_pack to match your licence
+engine = "oracle"
+dsn_env = "BILLING_DSN"
+diagnostics_pack = true
+schedule = "15 * * * *"

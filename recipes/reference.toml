@@ -1,0 +1,178 @@
+# dbtriage: every option, explained. Not meant to be used as is: start from a recipe in this folder, or copy the
+# sections you need from here into your targets.toml. Lines starting with '#' are optional; the value shown is the
+# default unless it says "example". Secrets never go in this file: name an environment variable instead (*_env).
+#
+# Anything set here can also be changed on the web view's Settings page; those changes are saved on top of this
+# file (dbtriage-settings.json next to it, or a Postgres table) and win over it.
+
+# ------------------------------------------------------------------------------------------------ storage
+[storage]
+url = "file://./data"
+# Where every snapshot, review and discussion is kept. Pick one:
+#   file://./data                                 local disk or an NFS/SMB mount (relative to this file; DBTRIAGE_STORAGE paths to the working directory)
+#   s3://bucket/prefix                            AWS S3 or S3-compatible (AWS_ENDPOINT_URL for MinIO, Ceph, versitygw)
+#   az://container/prefix                         Azure Blob Storage (uv sync --extra azure)
+#   postgres://user@host:5432/db?schema=dbtriage  any Postgres-compatible database
+# The DBTRIAGE_STORAGE environment variable overrides this. Remote stores keep working through an outage (see
+# docs/storage.md); DBTRIAGE_SPOOL sets where writes wait meanwhile.
+
+# ------------------------------------------------------------------------------------------------ the AI reviewer
+[agent]
+provider = "anthropic"
+# anthropic | bedrock | vertex | foundry                      Claude, directly or on a cloud platform
+# openai | openrouter | groq | ollama | ollama-cloud | vllm | azure-openai | vertex-gemini   OpenAI-style APIs
+# bedrock-converse                                            any Bedrock model (Amazon Nova needs no agreement)
+model = "claude-opus-5-5"
+# The Settings page lists the models your account can use once the provider is chosen.
+# region = "us-east-1"                 bedrock, bedrock-converse, vertex, vertex-gemini ("global", the Vertex default, works for most models)
+# project_id = "my-gcp-project"        vertex, vertex-gemini (else GOOGLE_CLOUD_PROJECT)
+# resource = "my-foundry-resource"     foundry
+# aws_profile = "dbtriage"             bedrock: a named AWS profile instead of the default chain
+# base_url = "http://ollama.lan:11434/v1"   OpenAI-style providers: point at another endpoint
+# api_key_env = "MY_KEY_VAR"           which environment variable holds the key (default: <PROVIDER>_API_KEY)
+# api_key_cmd = "gcloud auth print-access-token"   a command that prints a short-lived token (vertex-gemini default);
+#                                      it runs on the server, so it can only be set here, never in the web view
+# effort = "high"                      Claude only: low | medium | high; "" leaves it out for older models
+# max_tokens = 16000                   longest answer per model call: Claude providers (default 16000) and
+#                                      bedrock-converse (default 4096); OpenAI-style providers use their own limit
+# max_iterations = 25                  most model turns one review may take (a turn can make several tool calls)
+# token_budget = 300000                tokens one review (or one discussion answer) may use, input and output of all its
+#                                      model calls together, cached input included. When the next call would pass it, the
+#                                      model is asked to finish with what it has; a review it never submits falls back to
+#                                      the rules. 0 = no limit
+# scheduled_provider = "ollama"         runs the schedule starts use this provider and model instead (Run, webhooks and
+# scheduled_model = "gemma4:26b"       discussion keep the main one): a cheap or local model for routine snapshots.
+# scheduled_base_url = "http://ollama.lan:11434/v1"   With a different provider, none of the main provider's
+# scheduled_api_key_env = ""           model, URL, key or region carry over; scheduled_model is then required
+# fallback_models = ["claude-opus-4-8"]     vertex/foundry default; bedrock's is "anthropic.claude-opus-4-8". Retry a
+#                                      declined request on these models ([] turns it off)
+# [agent.extra]                        OpenAI-style providers: extra request fields, passed through unchanged
+# temperature = 0.2
+
+# ------------------------------------------------------------------------------------------------ where reviews go
+[delivery]
+channels = ["stdout"]
+# Any of: stdout ntfy slack teams email jira plane webhook pushgateway. Each has a "Send test" button in Settings.
+# min_severity = "info"                below this, only stdout fires: info | low | medium | high
+
+# [delivery.ntfy]                      push notifications (ntfy.sh or your own server)
+# url = "https://ntfy.sh"
+# topic = "dbtriage-oncall"
+# token_env = "NTFY_TOKEN"             for a protected topic
+# min_severity = "low"                 every channel accepts its own min_severity
+
+# [delivery.slack]
+# webhook_url_env = "SLACK_WEBHOOK_URL"     preferred: the URL stays in your secret store
+# webhook_url = "https://hooks.slack.com/services/..."   or inline (masked in the web view)
+
+# [delivery.teams]                     classic incoming webhook or a Power Automate "Workflows" URL
+# webhook_url_env = "TEAMS_WEBHOOK_URL"
+
+# [delivery.email]
+# smtp_host = "smtp.example.com"
+# smtp_port = 587
+# starttls = true
+# from = "dbtriage@example.com"
+# to = ["dba-oncall@example.com"]
+# user_env = "SMTP_USER"
+# password_env = "SMTP_PASSWORD"
+
+# [delivery.jira]                      opens an issue; defaults to high severity only
+# base_url = "https://example.atlassian.net"
+# project_key = "DBA"
+# issue_type = "Task"
+# user_env = "JIRA_USER"
+# token_env = "JIRA_TOKEN"
+# min_severity = "high"
+
+# [delivery.plane]                     opens an issue; defaults to high severity only
+# base_url = "https://plane.example.com"
+# workspace = "ops"
+# project_id = "..."
+# api_key_env = "PLANE_API_KEY"
+# min_severity = "high"
+
+# [delivery.webhook]                   posts {"triage": {...}, "markdown": "..."} anywhere: Datadog or Dynatrace events, your own service
+# url = "https://events.example.com/dbtriage"
+# [delivery.webhook.headers]           values may use $VARIABLES from the environment
+# Authorization = "Bearer $EVENTS_TOKEN"
+
+# [delivery.pushgateway]               exposes dbtriage_severity{target,engine} for Prometheus alerting
+# url = "http://pushgateway:9091"
+# job = "dbtriage"
+
+# ------------------------------------------------------------------------------------------------ the web view
+[web]
+# title = "dbtriage"                   browser tab title
+# brand = "dbtriage"                   name in the header
+# logo = "branding/logo.svg"           a file (relative to this file) or an https:// URL
+# accent = "#3dd68c"                   buttons, links, the badge
+# theme = "auto"                       auto | dark | light (people can still flip it in the header)
+# refresh_seconds = 30                 overview and target pages reload this often; 0 turns it off
+# page_size = 50                       snapshots per page
+# footer = "Internal tool: questions to #dba"
+# custom_css = "branding/theme.css"    appended after the built-in styles
+# templates_dir = "branding/templates" replace any page template, file by file
+# files = ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "awr.txt", "addm.txt"]   files shown on a snapshot page; "*" exposes every stored file
+# settings_file = "dbtriage-settings.json"   where Settings-page changes go; or a postgres:// URL to share them (DBTRIAGE_SETTINGS overrides)
+# [web.severity_colors]
+# high = "#c42f2f"
+# medium = "#a8540a"
+# low = "#8a6a00"
+# info = "#17804a"
+
+# ------------------------------------------------------------------------------------------------ writing to databases
+# [collect]
+# allow_db_writes = false              dbtriage only reads. true lets the databases that set create_snapshot take a
+#                                      snapshot on the database before each collection (on Oracle, an AWR snapshot).
+#                                      Only here: the web view and its API cannot change it. Plugins add other engines
+#                                      (entry point group "dbtriage.db_snapshot"; see docs/configuration.md)
+
+# ------------------------------------------------------------------------------------------------ MCP clients
+# [mcp]
+# enabled = false                      true lets `dbtriage mcp` start: an MCP server over stdio for clients such as
+#                                      Claude Code or Claude Desktop, reading the stored snapshots and reviews with the
+#                                      reviewer's own tools (no live database access). Only here: the web view cannot
+# allow_run = false                    true adds run_review: collect and review a database now (spends model credit and
+#                                      posts to your channels, like the Run button)
+# tools = ["list_targets", "get_review"]    offer only these (default: every read tool). See docs/mcp.md
+
+# ------------------------------------------------------------------------------------------------ databases
+# One [targets.<name>] block per database. The name is what you see in the web view and type on the command line.
+[targets.example-postgres]
+engine = "postgres"                    # postgres | mysql | oracle | sqlserver
+dsn_env = "EXAMPLE_PG_DSN"             # preferred: the connection string lives in your secret store
+# dsn = "postgresql://dbtriage@db.example.com:5432/app"   or inline (stored, masked in the web view)
+# top_n = 25                           how many statements to keep per snapshot
+# changes_file = "changes/example.json"   recent deploys and parameter changes, shown to the reviewer (relative to this file)
+# notes = "Batch window 02:00-04:00. Owned by the payments team."   context the reviewer reads with every review
+# links = [{label = "Grafana", url = "https://grafana.example.com/d/abc"}]   shown next to the database
+# baseline_policy = "previous"         previous | same-time-yesterday | same-time-last-week | pinned
+# baseline = "postgres/example-postgres/2026-11-01/20261101T020000Z"   the snapshot to compare with when pinned
+# schedule = "0 * * * *"               cron in the server's local time, or "every 15m", "every 2h", "hourly", "daily"
+# schedule_window = 60                 minutes each scheduled run looks back
+# schedule_paused = false
+
+# [targets.example-mysql]
+# engine = "mysql"                     MySQL 8, or MariaDB with performance_schema = ON
+# dsn_env = "EXAMPLE_MYSQL_DSN"        mysql://user:pw@host:3306/db
+
+# [targets.example-sqlserver]
+# engine = "sqlserver"                 SQL Server 2016+, Windows or Linux, Azure SQL Managed Instance (uv sync --extra sqlserver)
+# dsn_env = "EXAMPLE_MSSQL_DSN"        mssql://user:pw@host:1433/db (add ?trust_server_certificate=yes for a self-signed lab)
+#                                      or a connection string: Server=tcp:host,1433;Database=db;Authentication=...;Encrypt=yes
+# connect_timeout_s = 10               longest the login may take
+# call_timeout_ms = 120000             longest any single query may take (also Oracle)
+
+# [targets.example-oracle]
+# engine = "oracle"
+# dsn_env = "EXAMPLE_ORACLE_DSN"       user/pw@host:1521/SERVICE
+# user = "C##DBTRIAGE"                 when the DSN has no user
+# password = "..."                     discouraged: put it in the DSN variable instead
+# diagnostics_pack = false             true only with the Diagnostics Pack licence: AWR, ASH and ADDM are read only then
+# create_snapshot = "off"              take an AWR snapshot before collecting: "off", "incident" (incident runs; true
+#                                      means this too) or "always". Does nothing unless [collect] allow_db_writes = true
+# min_snapshot_age_min = 5             ...but only when the newest one is older than this
+# call_timeout_ms = 120000             longest any single query to the database may take
+# mask_report_literals = true          mask quoted values in the stored AWR/ADDM text (what the reviewer reads);
+#                                      false keeps the original text, for teams that do not send it to an outside model

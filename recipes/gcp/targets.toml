@@ -1,0 +1,30 @@
+# Recipe: databases on Google Cloud. Snapshots in a Cloud SQL for PostgreSQL database, the model is Gemini on
+# Vertex AI (no Model Garden enablement needed), reviews to Slack.
+# Run it on a VM or Cloud Run service whose service account has "Vertex AI User"; the token comes from gcloud.
+
+[storage]
+url = "postgres://dbtriage@10.20.0.5:5432/ops?schema=dbtriage&sslmode=require"   # PGPASSWORD in .env
+
+[agent]
+provider = "vertex-gemini"
+model = "gemini-3.8-flash"
+project_id = "acme-ops"
+region = "global"
+
+[delivery]
+channels = ["stdout", "slack"]
+min_severity = "low"
+
+[delivery.slack]
+webhook_url_env = "SLACK_WEBHOOK_URL"
+
+[targets.shop-cloudsql]
+engine = "postgres"
+dsn_env = "SHOP_DSN"
+schedule = "every 15m"
+schedule_window = 15
+
+[targets.inventory-mysql]
+engine = "mysql"
+dsn_env = "INVENTORY_DSN"
+schedule = "0 * * * *"

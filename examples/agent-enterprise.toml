@@ -1,0 +1,36 @@
+# Enterprise: Claude through the cloud you already have, so SQL text stays in your tenant.
+# Pick one block. Models and effort are the same; only the client and auth differ.
+
+# [agent]
+# provider = "bedrock"
+# model = "anthropic.claude-opus-5-5"     # Bedrock ids carry the anthropic. prefix
+# region = "us-east-1"                    # AWS creds from the environment / SSO / instance role
+
+# [agent]
+# provider = "vertex"
+# model = "claude-opus-5-5"
+# project_id = "my-gcp-project"           # GCP Application Default Credentials
+# region = "global"
+
+# [agent]
+# provider = "foundry"
+# model = "claude-opus-5-5"
+# resource = "my-foundry-resource"        # ANTHROPIC_FOUNDRY_API_KEY
+
+# ---- no third-party enablement forms: each cloud's own models ----
+# [agent]
+# provider = "vertex-gemini"              # Gemini on Vertex AI, project credentials only
+# model = "gemini-3.8-flash"
+# project_id = "my-gcp-project"
+# region = "global"                       # api_key_cmd defaults to "gcloud auth print-access-token"
+
+# [agent]
+# provider = "bedrock-converse"           # any Bedrock model through Converse; Nova needs no agreement
+# model = "us.amazon.nova-lite-v1:0"      # or us.amazon.nova-pro-v1:0; Claude ids work here too once accepted
+# region = "us-east-1"
+
+# [agent]                                 # Azure OpenAI deployment instead of Claude
+# provider = "azure-openai"
+# model = "gpt-5-mini"                    # the deployment name
+# base_url = "https://<resource>.cognitiveservices.azure.com/openai/v1/"
+# api_key_env = "AZURE_OPENAI_API_KEY"    # a resource key, or an Entra access token for cognitiveservices.azure.com

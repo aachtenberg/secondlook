@@ -1,0 +1,6 @@
+# Home / small shop: a local Ollama (or Ollama Cloud with provider = "ollama-cloud" and OLLAMA_API_KEY).
+# Tested with qwen3:8b on CPU: about 4 minutes per triage, correct cause on the lab regression.
+[agent]
+provider = "ollama"
+model = "qwen3:8b"
+# base_url = "http://ollama.lan:11434/v1"

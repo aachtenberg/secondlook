@@ -1,0 +1,29 @@
+# Recipe: a small team or a home lab. One server, local disk, a free local model, phone notifications.
+# Start: copy this file and .env.example next to each other, fill in .env, then
+#   dbtriage web --allow-run --allow-edit --allow-chat --schedule
+# Everything here can also be changed later on the web view's Settings page.
+
+[storage]
+url = "file://./data"                  # snapshots on this server's disk
+
+[agent]
+provider = "ollama"                    # a model on your own machine: free, and nothing leaves the network
+model = "qwen3:8b"                     # `ollama pull qwen3:8b`; a GPU makes reviews take seconds instead of minutes
+# base_url = "http://ollama.lan:11434/v1"   if Ollama runs on another machine
+
+[delivery]
+channels = ["stdout", "ntfy"]
+min_severity = "low"                   # quiet results stay in the web view
+
+[delivery.ntfy]
+url = "https://ntfy.sh"
+topic = "dbtriage-change-me"           # pick something hard to guess; install the ntfy app and subscribe to it
+
+[web]
+brand = "DB checks"
+
+[targets.app-db]
+engine = "postgres"
+dsn_env = "APP_DB_DSN"
+schedule = "every 30m"                 # a check every half hour
+notes = "Main app database. Nightly backup at 01:00 makes I/O spike; ignore that."

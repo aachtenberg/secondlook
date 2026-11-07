@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 212" width="740" height="212" role="img" aria-labelledby="t d">
+<title id="t">The store is never a single point of failure</title>
+<desc id="d">A new snapshot or chat answer goes to the store when it answers in time. When it does not, the work is kept in a local spool on this server and pushed to the store automatically when the store is back.</desc>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif}
+.t{font-size:14px;font-weight:600;fill:#1f2328}.s{font-size:12px;fill:#59636e}
+.box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1.5}.acc{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.5}
+.ln{fill:none;stroke:#59636e;stroke-width:1.5}.ah{fill:#59636e}
+@media (prefers-color-scheme:dark){.t{fill:#e6edf3}.s{fill:#9198a1}.box{fill:#151b23;stroke:#3d444d}
+.acc{fill:#0f2a1a;stroke:#3fb950}.ln{stroke:#9198a1}.ah{fill:#9198a1}}
+</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+
+<rect class="box" x="16" y="72" width="168" height="64" rx="10"/>
+<text class="t" x="100" y="100" text-anchor="middle">New snapshot</text>
+<text class="s" x="100" y="118" text-anchor="middle">or chat answer</text>
+
+<path class="ln" marker-end="url(#a)" d="M184,104 H228"/>
+<path class="box" d="M300,58 L370,104 L300,150 L230,104 Z"/>
+<text class="t" x="300" y="101" text-anchor="middle">Store</text>
+<text class="t" x="300" y="118" text-anchor="middle">answers?</text>
+
+<path class="ln" marker-end="url(#a)" d="M335,81 C420,58 470,57 538,57"/>
+<text class="s" x="438" y="52" text-anchor="middle">yes</text>
+<path class="ln" marker-end="url(#a)" d="M335,127 C420,152 470,162 538,162"/>
+<text class="s" x="438" y="178" text-anchor="middle">no, or not in time</text>
+
+<path class="box" d="M540,28 V86 A90,9 0 0 0 720,86 V28 Z"/><ellipse class="box" cx="630" cy="28" rx="90" ry="9"/>
+<text class="t" x="630" y="60" text-anchor="middle">Store</text>
+<text class="s" x="630" y="77" text-anchor="middle">disk · S3 · Azure · Postgres</text>
+
+<rect class="acc" x="540" y="134" width="180" height="58" rx="10"/>
+<text class="t" x="630" y="159" text-anchor="middle">Local spool</text>
+<text class="s" x="630" y="177" text-anchor="middle">on this server</text>
+
+<path class="ln" marker-end="url(#a)" d="M630,132 V98"/>
+<text class="s" x="620" y="119" text-anchor="end">pushed when it's back</text>
+</svg>
