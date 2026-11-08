@@ -95,8 +95,11 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
 ## Safety rules
 
 - **No secrets in the repo.** A gitleaks scan of the whole history runs on every pull request and every push to
-  `main` (`.github/workflows/secrets-scan.yml`); `.gitleaks.toml` lists the lab's made-up credentials, which are
-  public on purpose. Real ones live in `.env` (never committed) or your secret store.
+  `main` (`.github/workflows/secrets-scan.yml`), and `main` takes no change that fails it. `.githooks/pre-commit`
+  runs the same scan on what you are about to commit: install gitleaks 8.21.2, then run
+  `git config core.hooksPath .githooks` once per clone. `.gitleaks.toml` lists the lab's made-up credentials, which
+  are public on purpose; a new made-up value that trips the scan goes in its stopwords. Real ones live in `.env`
+  (never committed) or your secret store.
 - **Read-only unless you opt in.** Each database is reached with a read-only monitoring user, and Postgres and
   MySQL collection sessions are read-only on the server too. The one write dbtriage can make is a snapshot on the
   database before collecting, and only when `targets.toml` sets `allow_db_writes` and the database asks for it
@@ -156,6 +159,7 @@ src/dbtriage/
 compose/          lab database setup (users, grants, sample data)
 examples/         trigger wiring, branding, the Azure and Google Cloud budget caps
 scripts/load.py   lab load generator (--regress plants a slow query)
+.githooks/        the pre-commit secrets scan
 tests/
 ```
 
