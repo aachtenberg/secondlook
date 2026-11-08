@@ -93,6 +93,7 @@ button.primary,.btn.primary{background:var(--accent);border-color:transparent;co
 button.danger{background:color-mix(in srgb,var(--high) 15%,transparent);border-color:transparent;color:var(--high)}button.quiet{background:transparent}
 button.sm,.btn.sm{height:28px;padding:0 10px;font-size:12px;border-radius:6px}button:disabled{opacity:.5;cursor:default}
 select,input,textarea{font:inherit;font-size:13px;height:34px;padding:0 10px;border:1px solid var(--line2);border-radius:8px;background:var(--card2);color:var(--fg)}textarea{height:auto;padding:8px 10px}
+option,optgroup{background:var(--card2);color:var(--fg)}
 label.pill{display:inline-flex;align-items:center;height:30px;padding:0 10px;border-radius:8px;border:1px solid var(--line2);background:var(--card2);font-family:var(--mono);font-size:13px}
 label.pill select{height:auto;border:0;background:transparent;padding:0 16px 0 0;font:inherit;appearance:none;-webkit-appearance:none;color:var(--fg)}
 label.pill::after{content:"";width:6px;height:6px;border-right:2px solid var(--mut);border-bottom:2px solid var(--mut);transform:rotate(45deg);margin:-4px 0 0 -10px}

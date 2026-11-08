@@ -72,6 +72,30 @@ def test_every_page_renders_cleanly(page, web_server, width):
     assert page.errors == []
 
 
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_select_options_are_readable(page, web_server, theme):
+    """An open select's list is drawn on the option's background, else the select's, else the browser's white.
+    The Trend and Compare selects are transparent pills, so without their own option colours the dark theme drew
+    near-white text on white."""
+    page.add_init_script(f"try{{localStorage.setItem('dbtriage.theme','{theme}')}}catch(e){{}}")
+    for path in PAGES:
+        page.goto(web_server + path)
+        bad = page.evaluate("""() => {
+            const rgba = s => (s.match(/[\\d.]+/g) || []).map(Number);
+            const opaque = c => c.length === 3 || c[3] === 1;
+            const lum = c => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+                               return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+            const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+            return [...document.querySelectorAll('select option')].map(o => {
+                const sel = o.closest('select'), ob = rgba(getComputedStyle(o).backgroundColor), sb = rgba(getComputedStyle(sel).backgroundColor);
+                const bg = opaque(ob) ? ob : opaque(sb) ? sb : [255, 255, 255];
+                const r = ratio(rgba(getComputedStyle(o).color), bg);
+                return r < 4.5 ? `${sel.name}/${o.value}: ${r.toFixed(2)}:1` : null;
+            }).filter(Boolean);
+        }""")
+        assert bad == [], f"{path} ({theme}): option text below 4.5:1 on its list background: {bad[:5]}"
+
+
 def test_overview_and_navigation(page, web_server):
     page.goto(web_server)
     expect(page.locator("h1")).to_have_text(re.compile("Overview"))
