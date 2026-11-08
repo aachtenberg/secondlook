@@ -9,7 +9,7 @@ import pytest
 
 from dbtriage.config import Config, Target
 from dbtriage.storage import LocalStorage
-from dbtriage.web import App, md_to_html, serve
+from dbtriage.web import App, md_to_html, serve, sort_value
 
 SID = "postgres/demo/2026-11-05/20261105T100000Z"
 
@@ -538,8 +538,14 @@ def test_old_review_shapes_first_snapshots_and_error_page(tmp_path):
     assert "There was no significant database activity" in page and "engine_finding:" in page  # an old review renders
     assert "<h2 id='sql-h'>Top SQL</h2><span class='mut'>since statistics were last reset; no baseline yet</span>" in page
     assert page.index("select b") < page.index("select a") and "70%" in page  # ranked by time, share computed
+    assert "<table class='list topsql sortable'>" in page and "data-v='0.7'" in page and "data-v='2.0'" in page  # sorts by the raw values
     err = App(config(tmp_path), st, False, None).error_page(404, "nothing here").decode()
     assert "<h1>Not found</h1><span class='chip'>404</span>" in err and "nothing here" in err and "Back to the overview" in err
+
+
+def test_sort_value_is_the_raw_number_or_empty():
+    assert sort_value(31337) == "31337.0" and sort_value(0.54) == "0.54" and sort_value("12.5") == "12.5" and sort_value(0) == "0.0"
+    assert [sort_value(v) for v in (None, True, "n/a", float("nan"), float("inf"), {})] == [""] * 6
 
 
 def _req(url, method="GET", data=None, headers=None, auth=True):

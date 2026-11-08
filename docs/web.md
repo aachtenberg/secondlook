@@ -21,8 +21,8 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
 - **Overview.** Every database with its latest result, and how many are healthy or in trouble.
 - **Database.** A trend line for a chosen metric, headline numbers, and its snapshots filtered by All,
   Incidents or Scheduled.
-- **Snapshot.** The review with its findings, wait-time and load charts, the top SQL, links to every stored
-  file (opened in a side panel), and the discussion panel.
+- **Snapshot.** The review with its findings, wait-time and load charts, the top SQL (click a column header to
+  sort by it), links to every stored file (opened in a side panel), and the discussion panel.
 - **Compare.** Any two snapshots of a database side by side.
 - **SQL.** One statement's history across snapshots, with plan changes marked.
 - **Search.** Database names, SQL ids and snapshot ids.
