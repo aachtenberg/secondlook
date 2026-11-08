@@ -40,6 +40,7 @@ import hmac
 import os
 import html
 import json
+import math
 import mimetypes
 import re
 import string
@@ -138,6 +139,7 @@ footer{color:var(--mut);font-size:12px;padding:16px 32px;border-top:1px solid va
 .chips a:hover{text-decoration:none;color:var(--fg)}.chips a.on{background:var(--active);border-color:var(--line2);color:var(--fg-strong)}
 .scroll{overflow-x:auto}table.list{border-collapse:collapse;width:100%}
 th{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);text-align:left;padding:10px 12px;border-bottom:1px solid var(--line2)}
+.sortbtn{all:unset;cursor:pointer;white-space:nowrap}.sortbtn:hover,th[aria-sort] .sortbtn{color:var(--fg)}.sortbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}th[aria-sort=ascending] .sortbtn::after{content:" ↑";content:" ↑"/""}th[aria-sort=descending] .sortbtn::after{content:" ↓";content:" ↓"/""}
 td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}tbody tr:hover td{background:var(--card2)}
 td:first-child,td.ts{white-space:nowrap}td.ts a,td:first-child a.ts{font-family:var(--mono);font-size:13px}td.r,th.r{text-align:right}td.dim{color:var(--fg2)}
 .finding{display:flex;flex-direction:column;gap:4px}.finding b{font-weight:600;color:var(--fg-strong)}
@@ -295,6 +297,18 @@ STATUS = {"info": "healthy", "low": "degraded", "medium": "degraded", "high": "i
 def sev(s: str | None) -> str:
     s = s if s in ("high", "medium", "low", "info") else "info"
     return f"<span class='sev {s}'><i class='dot'></i>{s}</span>"
+
+
+def sort_value(v) -> str:
+    """A table cell's data-v: the raw number a sortable column orders by, where the cell shows 54% or 31.3k.
+    Missing or non-numeric values are empty, and sort last."""
+    if isinstance(v, bool) or v is None:
+        return ""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return ""
+    return repr(f) if math.isfinite(f) else ""
 
 
 def normalize_finding(f: dict) -> dict:
@@ -808,16 +822,17 @@ class App:
                     ask = (f"<a class='askbtn' data-chat='sql-{html.escape(qid)}' href='/api/snapshots/{html.escape(sid)}/chat/sql-{html.escape(qid)}'"
                            f" aria-label='Ask AI about this query' title='Ask AI about this query'>{ICON['chat']}</a>")
                 trs.append(f"<tr><td><a class='mono' href='/t/{T}/sql/{html.escape(qid)}' title='{html.escape(qid)}'>{html.escape(short(qid))}</a></td>"
-                           f"<td>{charts.share_bar(q.get('share_of_time') or 0)}</td><td class='r mono dim'>{q.get('calls')}</td>"
-                           f"<td class='r mono dim'>{q.get('mean_time_ms')}</td>"
-                           + (f"<td class='r mono dim'>{charts.fmt(q.get('cpu_time_ms'))}</td>" if cpu else "")
+                           f"<td data-v='{sort_value(q.get('share_of_time') or 0)}'>{charts.share_bar(q.get('share_of_time') or 0)}</td>"
+                           f"<td class='r mono dim' data-v='{sort_value(q.get('calls'))}'>{q.get('calls')}</td>"
+                           f"<td class='r mono dim' data-v='{sort_value(q.get('mean_time_ms'))}'>{q.get('mean_time_ms')}</td>"
+                           + (f"<td class='r mono dim' data-v='{sort_value(q.get('cpu_time_ms'))}'>{charts.fmt(q.get('cpu_time_ms'))}</td>" if cpu else "")
                            + f"<td><code class='sqltext'>{html.escape((q.get('text') or '')[:160])}</code></td>"
                            f"<td class='r'>{'<span class=\"sev medium\">plan changed</span>' if q.get('plan_changed') else ''}{ask}</td></tr>")
             basis = d.get("top_sql_basis")
             heading = "Top SQL in window" if basis in (None, "window") else "Top SQL"
             note = f"<span class='mut'>{html.escape(basis)}; no baseline yet</span>" if basis and basis != "window" else ""
             top = (f"<section class='card flush' aria-labelledby='sql-h'><div class='cardhead'><h2 id='sql-h'>{heading}</h2>{note}</div><div class='scroll'>"
-                   "<table class='list topsql'><thead><tr><th>SQL id</th><th>Share</th><th class='r'>Calls</th><th class='r'>Mean ms</th>"
+                   "<table class='list topsql sortable'><thead><tr><th>SQL id</th><th>Share</th><th class='r'>Calls</th><th class='r'>Mean ms</th>"
                    + ("<th class='r'>CPU ms</th>" if cpu else "") + "<th>Text</th><th></th></tr></thead>"
                    f"<tbody>{''.join(trs)}</tbody></table></div></section>")
 

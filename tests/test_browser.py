@@ -183,6 +183,31 @@ def test_snapshot_review_card_and_file_drawer(page, web_server):
     expect(page.locator("#panel")).to_be_hidden()
 
 
+def test_top_sql_sorts_by_its_headers(page, web_server):
+    """Each step starts from q2short on top (by calls, largest first), so every click must move the rows."""
+    page.goto(web_server + f"/s/{INCIDENT}")
+    first = page.locator("table.topsql tbody tr").first.locator("td").first.locator("a")
+    th = lambda name: page.locator("table.topsql th").filter(has=page.get_by_role("button", name=name, exact=True))  # noqa: E731
+    sort = lambda name: page.get_by_role("button", name=name, exact=True).click()  # noqa: E731
+    expect(first).to_have_attribute("title", LONG_SQL)  # as collected: most time first
+    sort("Calls")  # numbers: largest first (18674 calls, then 2628)
+    expect(th("Calls")).to_have_attribute("aria-sort", "descending")
+    expect(first).to_have_attribute("title", "q2short")
+    sort("Calls")  # again: reversed
+    expect(th("Calls")).to_have_attribute("aria-sort", "ascending")
+    expect(first).to_have_attribute("title", LONG_SQL)
+    for name, direction in (("Share", "descending"), ("Mean ms", "descending"), ("SQL id", "ascending")):
+        sort("Calls")
+        if th("Calls").get_attribute("aria-sort") != "descending":
+            sort("Calls")
+        expect(first).to_have_attribute("title", "q2short")
+        sort(name)  # Share by data-v (0.54 over 0.29), not its "54%" text; Mean ms 17.47 over 1.318; ids A to Z
+        expect(th(name)).to_have_attribute("aria-sort", direction)
+        expect(first).to_have_attribute("title", LONG_SQL)
+        assert th("Calls").get_attribute("aria-sort") is None  # one sorted column at a time
+    expect(page.locator("table.topsql tbody tr")).to_have_count(2)  # sorting moves rows, never drops them
+
+
 def test_discuss_panel_round_trip(page, web_server, fake_llm):
     page.goto(web_server + f"/s/{INCIDENT}")
     box, log, q = page.locator("#discuss"), page.locator("#chat-log"), page.locator("#chat-q")

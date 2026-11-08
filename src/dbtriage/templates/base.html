@@ -196,6 +196,37 @@ $body
     if (c && box) { e.preventDefault(); openKey(c.getAttribute('data-chat')); }
   });
 })();
+(function () {
+  // table.sortable: each named header becomes a button. Numbers sort largest first and text A to Z; a second click
+  // reverses. A cell's data-v, when present, is the value it sorts by (the cell may show 54% or 31.3k). Empty
+  // values stay last either way.
+  document.querySelectorAll('table.sortable').forEach(function (tbl) {
+    var head = tbl.tHead && tbl.tHead.rows[0], body = tbl.tBodies[0];
+    if (!head || !body) return;
+    [].forEach.call(head.cells, function (th, i) {
+      var label = th.textContent.trim();
+      if (!label) return;
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'sortbtn'; b.textContent = label;
+      th.textContent = ''; th.appendChild(b);
+      b.addEventListener('click', function () {
+        var key = function (r) { var c = r.cells[i]; return !c ? '' : c.hasAttribute('data-v') ? c.getAttribute('data-v') : c.textContent.trim(); };
+        var blank = function (v) { return v === '' || v === '-'; };
+        var rows = [].slice.call(body.rows).map(function (r, n) { return {r: r, v: key(r), n: n}; });
+        var num = rows.every(function (x) { return blank(x.v) || isFinite(Number(x.v)); });
+        var cur = th.getAttribute('aria-sort');
+        var dir = cur === 'descending' ? 1 : cur === 'ascending' ? -1 : (num ? -1 : 1);
+        rows.sort(function (a, z) {
+          if (blank(a.v) || blank(z.v)) return blank(a.v) === blank(z.v) ? a.n - z.n : (blank(a.v) ? 1 : -1);
+          var d = num ? Number(a.v) - Number(z.v) : a.v.localeCompare(z.v, undefined, {numeric: true, sensitivity: 'base'});
+          return d * dir || a.n - z.n;
+        }).forEach(function (x) { body.appendChild(x.r); });
+        [].forEach.call(head.cells, function (h) { h.removeAttribute('aria-sort'); });
+        th.setAttribute('aria-sort', dir === 1 ? 'ascending' : 'descending');
+      });
+    });
+  });
+})();
 </script>
 </body>
 </html>

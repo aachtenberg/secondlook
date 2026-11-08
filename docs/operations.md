@@ -177,7 +177,7 @@ uv run pytest -m browser                        # the web view in a real Chrome
 |---|---|---|
 | unit | comparison rules, baselines, storage and outage spool, settings, scheduler, chat, model backends with fake clients, every web page and API route | nothing |
 | live | the whole pipeline (collect, store, compare, review) against the lab Postgres, MySQL, MariaDB, Oracle and SQL Server; the reviewer's real tool loop over HTTP; the S3 store | the lab containers, the SQL Server lab on k3s (`compose/sqlserver/k8s.yaml`), and the repo's `.env` |
-| browser | every page at desktop and phone width (no console errors, no sideways scrolling, every control named, select lists readable in both themes), theme and nav toggles, the file drawer, the discussion panel end to end, in-place saves and toasts, schedule rows, the model picker, Capture now, search, compare, the outage banner | Chrome, or `uv run playwright install chromium` |
+| browser | every page at desktop and phone width (no console errors, no sideways scrolling, every control named, select lists readable in both themes), theme and nav toggles, the file drawer, sorting the top SQL, the discussion panel end to end, in-place saves and toasts, schedule rows, the model picker, Capture now, search, compare, the outage banner | Chrome, or `uv run playwright install chromium` |
 
 Nothing in the suite calls a real AI model or posts anywhere. Live and browser tests talk to a small fake
 OpenAI-compatible server started by the tests, which lists models and makes real tool calls. Live tests take
