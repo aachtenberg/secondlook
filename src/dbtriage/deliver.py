@@ -113,7 +113,8 @@ def send_pushgateway(cfg, t, md):
     job = cfg.get("job") or "dbtriage"
     labels = f'target="{t["target"]}",engine="{t["engine"]}"'
     body = (f"# TYPE dbtriage_severity gauge\ndbtriage_severity{{{labels}}} {RANK.get(t['severity'], 0)}\n"
-            f"# TYPE dbtriage_last_run_timestamp_seconds gauge\ndbtriage_last_run_timestamp_seconds{{{labels}}} {t.get('ts', 0)}\n")
+            f"# TYPE dbtriage_last_run_timestamp_seconds gauge\ndbtriage_last_run_timestamp_seconds{{{labels}}} {t.get('ts', 0)}\n"
+            f"# TYPE dbtriage_rules_dropped gauge\ndbtriage_rules_dropped{{{labels}}} {sum(1 for r in t.get('agreement') or [] if r.get('mark') == 'rules_only' and RANK.get(r.get('severity'), 0) >= RANK['medium'])}\n")
     url = f"{cfg['url'].rstrip('/')}/metrics/job/{job}/target/{t['target']}"
     from dbtriage.egress import urlopen
 

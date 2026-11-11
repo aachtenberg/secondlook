@@ -38,8 +38,28 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
         lines.append("")
     if triage.get("checked"):
         lines += [f"**Checked:** {triage['checked']}", ""]
+    lines += agreement_lines(triage)
     lines.append(footer(triage, comparison))
     return "\n".join(lines)
+
+
+def agreement_lines(triage: dict) -> list[str]:
+    """The rules-versus-model marks in a few lines, since this goes to Slack and Jira: the three counts, then
+    one line per rules finding at medium or above that the model left out, so the prose cannot hide it.
+    Nothing for a rules-only review or one stored before the marks existed."""
+    rows = triage.get("agreement")
+    if not isinstance(rows, list):
+        return []
+    from dbtriage.findings import dropped
+
+    n = {m: sum(1 for r in rows if r.get("mark") == m) for m in ("both", "model_only", "rules_only")}
+    lines = [f"**Agreement:** {n['both']} both, {n['model_only']} model only, {n['rules_only']} rules only"]
+    heur = triage.get("heuristics") or []
+    for r in dropped(rows):
+        h = heur[r["rules"]] if r.get("rules") is not None and r["rules"] < len(heur) else {}
+        title = h.get("title") or (r.get("kind", "") + (f" {r['subject']}" if r.get("subject") else ""))
+        lines.append(f"- ⚠️ rules found, not in the review: {ICON.get(r.get('severity'), r.get('severity'))} · {title}")
+    return lines + [""]
 
 
 def footer(triage: dict, comparison: dict | None) -> str:

@@ -58,3 +58,23 @@ def test_match_keeps_the_first_of_duplicates():
 def test_kind_vocabulary():
     assert "other" in KINDS and len(set(KINDS)) == len(KINDS)
     assert known_kind("sql_regressed") and known_kind("engine_sql_tuning") and not known_kind("slow_query")
+
+
+def test_agreement_rows_point_at_both_lists():
+    from dbtriage.findings import agreement, dropped, rules_dropped
+
+    model = [review("sql_regressed", "q1", severity="high"), review("other", "", where="general slowness")]
+    heur = [rules("deadlocks", deadlocks=2), rules("sql_regressed", sql_id="q1"),
+            dict(rules("blocking", sessions=[]), severity="high"), dict(rules("bloat", table="t"), severity="low")]
+    rows = agreement({"source": "agent", "findings": model}, heur)
+    assert [(r["mark"], r["model"], r["rules"], r["severity"]) for r in rows] == [
+        ("both", 0, 1, "high"), ("model_only", 1, None, "medium"),
+        ("rules_only", None, 0, "medium"), ("rules_only", None, 2, "high"), ("rules_only", None, 3, "low")]
+    assert rows[0]["kind"] == "sql_regressed" and rows[0]["subject"] == "q1"
+    assert [r["rules"] for r in dropped(rows)] == [0, 2] and [r["rules"] for r in dropped(rows, "high")] == [2]
+    assert rules_dropped({"agreement": rows}) == 2
+    # a rules-only review has nothing to agree with, and a store from before the marks has no key: neither is zero
+    assert agreement({"source": "rules", "findings": model}, heur) is None
+    assert rules_dropped({"agreement": None}) is None and rules_dropped({}) is None and rules_dropped(None) is None
+    assert agreement({"source": "agent", "findings": []}, []) == [] and rules_dropped({"agreement": []}) == 0
+    assert agreement({"source": "agent"}, None) == [] and dropped(None) == []

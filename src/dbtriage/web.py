@@ -56,6 +56,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from dbtriage import access, charts, chat, dbsnap, envfile, llm, mcp_server, scheduler
 from dbtriage.baseline import LABELS, POLICIES
 from dbtriage.config import Config, top_n_of
+from dbtriage.findings import SEVERITY_RANK, dropped, rules_dropped
 from dbtriage.settings import AGENT_FIELDS, AGENT_PROVIDERS, CHANNEL_FIELDS, ENGINES, SCHEDULE_FIELDS, SEVERITIES, WEB_FIELDS, Settings, mask_dsn, probe
 from dbtriage.settings import SettingsUnavailable
 from dbtriage.storage import Storage, StorageUnavailable, describe as describe_store, key_ok
@@ -198,6 +199,9 @@ button.ai,.btn.ai{background:var(--ai);border-color:transparent;color:#fff;font-
 .fh .chat-link{margin-left:auto}.flist dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin:10px 0 0;font-size:13px}.flist dt{color:var(--mut);font-size:12px}.flist dd{margin:0;color:var(--fg2)}
 .flist dd ul{margin:0;padding-left:16px}
 .checked{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--mut)}.checked .lbl{font-weight:500;color:var(--fg2)}
+.mark{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap}.mark.both{border-color:var(--info);color:var(--info)}.mark.model_only{border-color:var(--ai);color:var(--ai)}.mark.rules_only{border-color:var(--medium);color:var(--medium)}
+.dropped{font-size:13px;color:var(--fg2);padding-top:10px;border-top:1px solid var(--line)}.dropped .lbl{font-weight:500;color:var(--fg2)}.dropped>.lbl{display:block;margin-bottom:6px}.dropped .agree{font-size:12px;color:var(--mut)}
+.dropped ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.dropped li{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.dropped details{font-size:12px;color:var(--mut);margin-top:6px}.dropped summary{cursor:pointer}
 .pill2{padding:2px 8px;border-radius:999px;background:var(--card2);border:1px solid var(--line);font-size:12px;color:var(--fg2)}
 .filesrow{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--mut);padding-top:10px;border-top:1px solid var(--line)}
 a.chat-link{font-size:12px;display:inline-flex;align-items:center;gap:5px;color:var(--ai);white-space:nowrap}
@@ -326,6 +330,49 @@ def normalize_finding(f: dict) -> dict:
     f["summary"] = f.get("summary") or f.get("title") or ""
     f["where"] = f.get("where") or (f.get("kind") or "").replace("_", " ")
     return f
+
+
+MARK_LABEL = {"both": "both", "model_only": "model only", "rules_only": "rules only"}
+
+
+def agreement_marks(tr: dict) -> dict[int, str]:
+    """The mark pill for each model finding, by its index in `findings`: both when a rule found the same
+    thing, model only when the model added it. Empty for a rules-only review or one stored without marks."""
+    rows = tr.get("agreement")
+    if not isinstance(rows, list):
+        return {}
+    return {r["model"]: f"<span class='mark {html.escape(r['mark'])}' title='{'a rule found this too' if r['mark'] == 'both' else 'only the model found this'}'>"
+                        f"{MARK_LABEL.get(r['mark'], r['mark'])}</span>"
+            for r in rows if r.get("model") is not None}
+
+
+def dropped_html(tr: dict) -> str:
+    """The rules findings the model left out, under the review: medium and above listed with title and severity,
+    so a fluent write-up cannot hide a blocking or deadlocks hit; the low ones collapsed to a count. A rules-only
+    review says so instead. Nothing for a triage.json stored before the marks existed."""
+    if tr.get("source") != "agent":
+        return "<div class='dropped'><span class='agree'>Rules-only review; there is no model review to compare with.</span></div>" if tr.get("source") else ""
+    rows = tr.get("agreement")
+    if not isinstance(rows, list) or not rows:  # nothing found by either side: no counts to show
+        return ""
+    heur = tr.get("heuristics") or []
+
+    def item(r: dict) -> str:
+        h = heur[r["rules"]] if r.get("rules") is not None and r["rules"] < len(heur) else {}
+        title = h.get("title") or (r.get("kind", "") + (f" {r['subject']}" if r.get("subject") else ""))
+        return f"<li>{sev(r.get('severity'))}<code class='where'>{html.escape(r.get('kind', ''))}</code><span>{html.escape(title)}</span></li>"
+
+    n = {m: sum(1 for r in rows if r.get("mark") == m) for m in ("both", "model_only", "rules_only")}
+    counts = f"<span class='agree'>Agreement: {n['both']} both · {n['model_only']} model only · {n['rules_only']} rules only</span>"
+    shown = dropped(rows)
+    low = [r for r in rows if r.get("mark") == "rules_only" and SEVERITY_RANK.get(r.get("severity"), 0) < SEVERITY_RANK["medium"]]
+    if not shown and not low:
+        return f"<div class='dropped'>{counts}</div>"
+    out = f"<div class='dropped'><span class='lbl'>Rules found, not in the review</span><ul>{''.join(item(r) for r in shown)}</ul>"
+    if low:
+        out += (f"<details><summary>{len(low)} low-severity rules finding{'s' if len(low) != 1 else ''} not in the review</summary>"
+                f"<ul>{''.join(item(r) for r in low)}</ul></details>")
+    return out + f"<div>{counts}</div></div>"
 
 
 def agent_reason(err: str) -> str:
@@ -512,7 +559,8 @@ class App:
             trig = m.get("trigger") or {}
             rows.append({"id": sid, "captured_at": m["captured_at"], "mode": m["window"]["mode"], "load": self.load_of(sid),
                          "source": trig.get("source", ""), "reason": trig.get("reason", ""), "actor": trig.get("actor", ""),
-                         "severity": (tr or {}).get("severity"), "title": (tr or {}).get("title"), "triaged_by": (tr or {}).get("source")})
+                         "severity": (tr or {}).get("severity"), "title": (tr or {}).get("title"), "triaged_by": (tr or {}).get("source"),
+                         "rules_dropped": rules_dropped(tr)})
         return rows, len(ids)
 
     LOAD_METRICS = ("avg_active_sessions", "db_time_ms", "questions", "tup_returned", "xact_commit", "batch_requests")
@@ -792,7 +840,7 @@ class App:
             if tr.get("summary"):
                 body.append(f"<p>{link_ids(tr['summary'])}</p>")
             if "findings" in tr:
-                items = []
+                items, marks = [], agreement_marks(tr)
                 for i, f in enumerate((normalize_finding(x) for x in tr.get("findings") or []), 1):
                     disc = ""
                     if self.allows("chat"):
@@ -802,11 +850,12 @@ class App:
                     dl = ((f"<dt>Impact</dt><dd>{link_ids(f['impact'])}</dd>" if f.get("impact") else "")
                           + (f"<dt>Evidence</dt><dd><ul>{ev}</ul></dd>" if ev else "")
                           + (f"<dt>Fix</dt><dd>{link_ids(f['fix'])}</dd>" if f.get("fix") else ""))
-                    items.append(f"<li><div class='fh'><span class='n'>{i}</span>{sev(f.get('severity'))}"
+                    items.append(f"<li><div class='fh'><span class='n'>{i}</span>{sev(f.get('severity'))}{marks.get(i - 1, '')}"
                                  f"<code class='where'>{link_ids(f.get('where', ''))}</code><span class='fs'>{link_ids(f.get('summary', ''))}</span>{disc}</div>"
                                  + (f"<dl>{dl}</dl>" if dl else "") + "</li>")
                 if items:
                     body.append(f"<ol class='flist'>{''.join(items)}</ol>")
+                body.append(dropped_html(tr))  # the rules findings the model left out; its own block (see dropped_html)
             else:  # older stores: only the rendered Markdown
                 md = self.store.get(f"{sid}/triage.md").decode() if self.store.exists(f"{sid}/triage.md") else ""
                 body.append(f"<div class='review'>{md_to_html(md)}</div>")
