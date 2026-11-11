@@ -107,6 +107,17 @@ def test_s3_store_round_trip(lab_env):
         with pytest.raises(FileNotFoundError):  # a real S3 reports a missing key like every other store
             st.get("pg/a/2026-11-05/T1/missing.json")
         assert st.list_snapshots("pg", "a") == ["pg/a/2026-11-05/T1"] and not st.exists("nope")
+        # the conditional write the ledger relies on: the endpoint must refuse a stale ETag, not take the fallback
+        from dbtriage.storage import Conflict, S3Storage
+
+        st.put_if("pg/a/findings.json", b'{"generation": 1}', None)
+        v = st.version_of("pg/a/findings.json")
+        st.put_if("pg/a/findings.json", b'{"generation": 2}', v)
+        with pytest.raises(Conflict):
+            st.put_if("pg/a/findings.json", b'{"generation": 9}', v)
+        with pytest.raises(Conflict):
+            st.put_if("pg/a/findings.json", b'{"generation": 9}', None)
+        assert st.get_json("pg/a/findings.json") == {"generation": 2} and S3Storage._conditional, "endpoint took the read-compare-write fallback"
     finally:
         s3 = boto3.client("s3", endpoint_url=os.environ["AWS_ENDPOINT_URL"])
         for o in s3.list_objects_v2(Bucket=bucket).get("Contents", []):

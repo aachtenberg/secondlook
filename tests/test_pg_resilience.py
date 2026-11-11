@@ -35,6 +35,12 @@ class Flaky(LocalStorage):
     def list_keys(self, prefix):
         self._check(); return super().list_keys(prefix)
 
+    def version_of(self, key):
+        self._check(); return super().version_of(key)
+
+    def put_if(self, key, data, expected):
+        self._check(); super().put_if(key, data, expected)
+
 
 def resilient(tmp_path):
     ResilientStorage.RETRY_S = 0.0
