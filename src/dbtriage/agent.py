@@ -309,7 +309,7 @@ def rule_based_triage(comparison: dict) -> dict:
         "severity": f["severity"] if f["severity"] in ("high", "medium", "low") else "low",
         "kind": f["kind"], "subject": subject_of(f), "where": _where(f), "summary": f["title"][:120],
         "impact": _impact(f["kind"]),
-        "evidence": ([f["detail"]] if f.get("detail") else []) + [f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in (f.get("evidence") or {}).items() if k != "sql_id"][:3],
+        "evidence": ([f["detail"]] if f.get("detail") else []) + _evidence_lines(f.get("evidence") or {}),
         "fix": _advice(f),
     } for f in found[:5]]
     return {
@@ -318,6 +318,15 @@ def rule_based_triage(comparison: dict) -> dict:
         "checked": "load profile, top SQL, wait classes, sessions, tables against the previous snapshot (rules only)",
         "confidence": "low", "findings": findings, "source": "rules",
     }
+
+
+def _evidence_lines(evidence: dict, limit: int = 3) -> list[str]:
+    """Three evidence lines, but a settings change in the same window always makes the cut:
+    that correlation is the point of the finding, and it would otherwise be the fourth item."""
+    items = [(k, v) for k, v in evidence.items() if k != "sql_id"]
+    keep = [kv for kv in items if kv[0] == "settings_changed"]
+    rest = [kv for kv in items if kv[0] != "settings_changed"][:max(limit - len(keep), 0)]
+    return [f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in rest + keep]
 
 
 def _where(f: dict) -> str:

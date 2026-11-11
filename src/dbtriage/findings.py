@@ -17,6 +17,7 @@ KINDS = (
     "load_temp_bytes", "load_temp_files", "load_tmp_disk_tables", "load_sorts_disk", "load_row_lock_waits", "load_hard_parses",
     "blocking", "long_running", "lock_waits",
     "bloat", "stale_stats", "seq_scans",
+    "setting_changed",
     "engine_finding",
     "other",
 )
