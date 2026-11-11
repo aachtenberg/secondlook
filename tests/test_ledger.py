@@ -154,6 +154,27 @@ def test_tombstones_expire(tmp_path):
     assert out["life"][0]["state"] == "new"  # too long ago to be the same finding
 
 
+def test_triaging_the_same_snapshot_again_does_not_count_as_another_run(tmp_path):
+    """The rules review runs, then the model review of the same snapshot: one run, not two misses."""
+    st = LocalStorage(tmp_path)
+    run(st, 0, [rule("plan_change")])
+    out = run(st, 1, [])
+    assert out["still_open"][0]["misses"] == 1
+    out = run(st, 1, [])  # the same snapshot, triaged again
+    assert out["still_open"][0]["misses"] == 1 and ledger.load(st, ENGINE, TARGET)["entries"][0]["misses"] == 1
+    out = run(st, 1, [rule("plan_change")])  # and again, this time the review names it: a sighting, not a return
+    assert out["life"][0]["state"] == "still_open" and out["life"][0]["misses"] == 0
+    out = run(st, 2, [])
+    assert out["still_open"][0]["misses"] == 1  # history continues from the last word on snapshot 1
+    # re-triaging an older snapshot leaves the ledger alone and gives that review no life
+    assert ledger.update(st, ENGINE, TARGET, sid(0), at(0), [], []) is None
+    assert ledger.load(st, ENGINE, TARGET)["updated"] == sid(2)
+    result = {"snapshot": sid(0)}
+    from dbtriage.config import Config
+    ledger.attach(result, st, Config(storage_url="x", targets={}, delivery={}), {"findings": []}, {"engine": ENGINE, "target": TARGET, "captured_at": at(0)})
+    assert "life" not in result
+
+
 def test_period_words():
     assert ledger.describe_period(None) == "" and ledger.describe_period(0) == ""
     assert ledger.describe_period(3600) == "about every 1h" and ledger.describe_period(86400) == "about every 24h"
@@ -202,7 +223,7 @@ def test_ledger_round_trips_through_the_store_without_disturbing_snapshots(tmp_p
     data = json.loads(st.get("postgres/demo/findings.json"))
     assert data["updated"] == sid(0) and data["entries"][0]["kind"] == "plan_change"
     assert st.list_snapshots(ENGINE, TARGET) == [sid(0)]  # the ledger is not a snapshot
-    assert ledger.load(st, ENGINE, "nobody") == {"entries": [], "tombstones": [], "updated": None}
+    assert ledger.load(st, ENGINE, "nobody") == {"entries": [], "tombstones": [], "updated": None, "prior": None}
 
 
 def test_ledger_writes_go_through_the_spool_during_an_outage(tmp_path, capsys):

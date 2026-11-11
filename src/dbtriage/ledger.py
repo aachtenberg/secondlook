@@ -29,6 +29,7 @@ from the stored triage.json and compare.json files, so losing it is a rebuild, n
 from __future__ import annotations
 
 import sys
+from copy import deepcopy
 from datetime import datetime
 from statistics import median
 
@@ -63,8 +64,9 @@ def load(store: Storage, engine: str, target: str) -> dict:
     try:
         data = store.get_json(key(engine, target))
     except (FileNotFoundError, ValueError):
-        return {"entries": [], "tombstones": [], "updated": None}
-    return {"entries": list(data.get("entries") or []), "tombstones": list(data.get("tombstones") or []), "updated": data.get("updated")}
+        return {"entries": [], "tombstones": [], "updated": None, "prior": None}
+    return {"entries": list(data.get("entries") or []), "tombstones": list(data.get("tombstones") or []), "updated": data.get("updated"),
+            "prior": data.get("prior")}
 
 
 def save(store: Storage, engine: str, target: str, ledger: dict) -> None:
@@ -150,6 +152,11 @@ def apply(ledger: dict, snapshot_id: str, captured_at: str | None, rules_finding
     is the entries reported gone on this run, which are then dropped from the ledger.
     """
     review_findings = review_findings or []
+    if ledger.get("updated") == snapshot_id and ledger.get("prior") is not None:
+        # the same snapshot triaged again (a model review after the rules, a re-run): start from where it stood
+        # before, or every re-triage would count as another run the open findings were missing from
+        ledger["entries"], ledger["tombstones"] = deepcopy(ledger["prior"]["entries"]), deepcopy(ledger["prior"]["tombstones"])
+    ledger["prior"] = {"entries": deepcopy(ledger["entries"]), "tombstones": deepcopy(ledger.get("tombstones") or [])}
     entries = {(e["kind"], e["subject"]): e for e in ledger["entries"]}
     tombstones = {(e["kind"], e["subject"]): e for e in ledger.get("tombstones") or []}
     # what is present this run, with the review's finding first where it matched (title and severity come from it).
@@ -225,9 +232,15 @@ def _life_of(e: dict) -> dict:
 
 
 def update(store: Storage, engine: str, target: str, snapshot_id: str, captured_at: str | None, rules_findings: list[dict],
-           review_findings: list[dict] | None = None, gone_after: int = DEFAULT_GONE_AFTER) -> dict:
-    """Load the target's ledger, advance it by this run and store it. See `apply` for the return value."""
+           review_findings: list[dict] | None = None, gone_after: int = DEFAULT_GONE_AFTER) -> dict | None:
+    """Load the target's ledger, advance it by this run and store it. See `apply` for the return value.
+
+    None when the snapshot is older than the ledger's last run: re-triaging history must not rewind the ledger,
+    so that review carries no life and delivery keeps the whole-run gate. The latest snapshot may be triaged again
+    (apply restores the state before it)."""
     ledger = load(store, engine, target)
+    if ledger.get("updated") and snapshot_id < ledger["updated"]:  # ids sort by capture time within a target
+        return None
     out = apply(ledger, snapshot_id, captured_at, rules_findings, review_findings, gone_after)
     save(store, engine, target, ledger)
     return out
@@ -243,6 +256,9 @@ def attach(result: dict, store: Storage, cfg, comparison: dict | None, manifest:
                      comparison.get("findings") or [], result.get("findings") or [], gone_after(getattr(cfg, "delivery", None)))
     except StorageUnavailable as exc:  # no history to compare with: this review has no life, and delivery keeps the run gate
         print(f"ledger: store unavailable, finding life skipped for this run ({exc})", file=sys.stderr)
+        return
+    if out is None:
+        print("ledger: snapshot is older than the ledger's last run; finding life not recorded for it", file=sys.stderr)
         return
     result.update(out)
 
@@ -280,7 +296,7 @@ def rebuild(store: Storage, engine: str, target: str, gone_after: int = DEFAULT_
     `attach` recorded. Tickets come back from the `life` each triage.json kept, so the rebuilt ledger equals the
     one built run by run.
     """
-    ledger = {"entries": [], "tombstones": [], "updated": None}
+    ledger = {"entries": [], "tombstones": [], "updated": None, "prior": None}
     for sid in store.list_snapshots(engine, target):
         if not store.exists(f"{sid}/compare.json") or not store.exists(f"{sid}/triage.json"):
             continue
