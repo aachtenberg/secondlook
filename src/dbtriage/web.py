@@ -57,6 +57,7 @@ from dbtriage import access, charts, chat, dbsnap, envfile, llm, mcp_server, sch
 from dbtriage.baseline import LABELS, POLICIES
 from dbtriage.config import Config, top_n_of
 from dbtriage.findings import SEVERITY_RANK, dropped, rules_dropped
+from dbtriage.ledger import describe_period
 from dbtriage.settings import AGENT_FIELDS, AGENT_PROVIDERS, CHANNEL_FIELDS, ENGINES, SCHEDULE_FIELDS, SEVERITIES, WEB_FIELDS, Settings, mask_dsn, probe
 from dbtriage.settings import SettingsUnavailable
 from dbtriage.storage import Storage, StorageUnavailable, describe as describe_store, key_ok
@@ -203,7 +204,7 @@ button.ai,.btn.ai{background:var(--ai);border-color:transparent;color:#fff;font-
 .dropped{font-size:13px;color:var(--fg2);padding-top:10px;border-top:1px solid var(--line)}.dropped .lbl{font-weight:500;color:var(--fg2)}.dropped>.lbl{display:block;margin-bottom:6px}.dropped .agree{font-size:12px;color:var(--mut)}
 .dropped ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.dropped li{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.dropped details{font-size:12px;color:var(--mut);margin-top:6px}.dropped summary{cursor:pointer}
 .life{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mut)}.life .state{padding:2px 8px;border-radius:999px;border:1px solid var(--line2);color:var(--fg2);font-weight:500}
-.life .state.new{border-color:var(--medium);color:var(--medium)}.life .state.worse{border-color:var(--high);color:var(--high)}.life .state.quiet,.life .state.gone{border-color:var(--info);color:var(--info)}
+.life .state.new{border-color:var(--medium);color:var(--medium)}.life .state.worse{border-color:var(--high);color:var(--high)}.life .state.quiet,.life .state.gone,.life .state.recurring{border-color:var(--info);color:var(--info)}.life .state.returned{border-color:var(--medium);color:var(--medium)}
 .life a.ticket{font-family:var(--mono);font-size:12px;color:var(--link)}.life code.ticket{font-family:var(--mono);font-size:12px;color:var(--fg2)}
 .stillopen{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}.stillopen h3{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--fg2)}
 .stillopen ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.stillopen li{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px}.stillopen .cleared{margin-top:8px;font-size:12px;color:var(--mut)}
@@ -420,7 +421,8 @@ def _fmt_ts(iso: str | None) -> str:
     return (iso or "")[:19].replace("T", " ")
 
 
-LIFE_LABEL = {"new": "new", "still_open": "still open", "worse": "worse", "quiet": "quiet", "gone": "gone"}
+LIFE_LABEL = {"new": "new", "still_open": "still open", "worse": "worse", "quiet": "quiet", "returned": "returned",
+              "recurring": "recurring", "gone": "gone"}
 
 
 def life_badge(life: dict | None) -> str:
@@ -434,6 +436,8 @@ def life_badge(life: dict | None) -> str:
         bits.append(f"<span>open since {html.escape(since)}</span>")
     if (misses := int(life.get("misses") or 0)) and state != "gone":
         bits.append(f"<span>not seen in the last {misses} run{'s' if misses != 1 else ''}</span>")
+    if period := describe_period(life.get("period_s")):
+        bits.append(f"<span>{period}</span>")
     for name, t in sorted((life.get("tickets") or {}).items()):
         if not isinstance(t, dict) or not t.get("key"):
             continue

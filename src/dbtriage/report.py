@@ -2,10 +2,11 @@
 numbered findings most severe first with Impact / Evidence / Fix, or a "nothing found" line
 with what was checked, then a footer with the model and the run."""
 from __future__ import annotations
+from dbtriage.ledger import describe_period
 
 ICON = {"high": "🔴 **High**", "medium": "🟠 **Medium**", "low": "🟡 **Low**", "info": "🟢 **Info**"}
 HEADER_ICON = {"high": "🔴", "medium": "🟠", "low": "🟡", "info": "✅"}
-LIFE = {"new": "new", "still_open": "still open", "worse": "worse", "quiet": "quiet", "gone": "gone"}
+LIFE = {"new": "new", "still_open": "still open", "worse": "worse", "quiet": "quiet", "returned": "returned", "recurring": "recurring", "gone": "gone"}
 
 
 def life_note(life: dict | None) -> str:
@@ -18,6 +19,8 @@ def life_note(life: dict | None) -> str:
         since = (life.get("first_seen_at") or life.get("first_seen") or "")[:10]
         if since:
             bits.append(f"open since {since}")
+    if period := describe_period(life.get("period_s")):
+        bits.append(period)
     for name, t in sorted((life.get("tickets") or {}).items()):
         if isinstance(t, dict) and t.get("key"):
             bits.append(f"ticket [{t['key']}]({t['url']})" if t.get("url") else f"ticket {t['key']}")

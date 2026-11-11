@@ -16,6 +16,7 @@
 | `dbtriage mcp` | the MCP server, for MCP clients such as Claude Code; off unless `[mcp] enabled = true` (see mcp.md) |
 | `dbtriage serve --port 8080` | receive alert webhooks; listens on all interfaces, so set `DBTRIAGE_WEBHOOK_TOKEN` (without it anyone who can reach the port can start runs, and it warns at start) |
 | `dbtriage flush-spool` | push work saved during a store outage now |
+| `dbtriage deliver <snapshot> [--force]` | re-send a stored review; `--force` ignores the severity gates and finding life and posts it as it stands |
 | `dbtriage rebuild-ledger -t <db>` | recompute the database's ledger of open findings from its stored reviews (below, "A finding's life") |
 | `dbtriage copy-store --from URL --to URL`, `dbtriage copy-settings --from X --to Y` | move snapshots or settings, for example from files into Postgres |
 
@@ -163,12 +164,22 @@ finding, what its life is:
 | **still open** | seen again at the same severity; shown with "open since" and its ticket |
 | **worse** | seen again at a higher severity than last run; delivery fires, and the ticket gets a comment |
 | **quiet** | seen again, but below its own severity last run; nothing is posted |
-| **gone** | absent from the rules findings for `gone_after_runs` runs in a row (default 3); said once, then dropped |
+| **returned** | back after being absent, or after being reported gone within the last seven days; delivery fires, and an existing ticket gets a comment instead of a new issue |
+| **recurring** | returned at about the same interval as last time: the nightly batch, the Monday job. Shown with "about every 24h"; nothing is posted unless it is worse |
+| **gone** | absent for `gone_after_runs` times its own period, or that many runs when it has no period yet (default 3); said once, its ticket told, then kept as a tombstone for seven days |
 
 Two findings are the same finding when they share a `kind` and a `subject` (the sql_id, table, wait class or
 parameter named), whatever the wording. Presence comes from the rules, which run on every snapshot, so the model
-choosing different words, or not mentioning a finding this time, does not make it new or gone. The threshold on
-*gone* is there so a finding sitting near a rule's limit does not flap between open and cleared.
+choosing different words, or not mentioning a finding this time, does not make it new or gone.
+
+*Gone* is decided by cadence, not by counting runs, because runs are hourly and batch jobs are not. A finding's
+period is the median gap between its returns. A statement present in every hourly run has a period of an hour and
+is gone after three; a statement that appears only in the 02:00 run has, from its second night, a period of a day,
+so three quiet hours do not clear it and its ticket is not told "cleared" every morning. On its first night it has
+no period and the run count applies, which is why the tombstone exists: when it comes back the next night it is the
+same finding, returned, with its ticket and its first-seen date. For a target with a batch cycle, also set its
+baseline policy to `same-time-yesterday` or `same-time-last-week` (configuration.md) so the batch window is compared
+with itself and the relative findings do not fire at all.
 
 The review still caps at five findings, and an open finding never takes a slot from a new one: open findings that
 did not make the five are listed under **Still open** after them, with how long they have been open and how many

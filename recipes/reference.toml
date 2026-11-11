@@ -58,7 +58,7 @@ channels = ["stdout"]
 # min_severity = "info"                below this, only stdout fires: info | low | medium | high
 #                                      once a database has a ledger of open findings the gate is per finding: a channel
 #                                      fires when a finding is new or worse at or above it; a still-open one does not repost
-# gone_after_runs = 3                  a finding absent from the rules this many runs in a row is reported gone (and its ticket told)
+# gone_after_runs = 3                  a finding absent this many of its own periods (or runs, before it has one) is gone (and its ticket told)
 
 # [delivery.ntfy]                      push notifications (ntfy.sh or your own server)
 # url = "https://ntfy.sh"

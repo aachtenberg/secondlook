@@ -72,8 +72,9 @@ def test_gone_after_n_consecutive_misses_then_dropped(tmp_path):
     assert ledger.load(st, ENGINE, TARGET)["entries"] == []
     out = run(st, 4, [])
     assert out["gone"] == []  # not reported twice
-    out = run(st, 5, [rule("plan_change")])
-    assert out["life"][0]["state"] == "new" and out["life"][0]["first_seen"] == sid(5)  # a return is a new finding
+    out = run(st, 5, [rule("plan_change")])  # back within the tombstone window: the same finding, with its history
+    assert out["life"][0]["state"] == "returned" and out["life"][0]["first_seen"] == sid(0)
+    assert ledger.load(st, ENGINE, TARGET)["tombstones"] == []
 
 
 def test_a_sighting_resets_the_misses(tmp_path):
@@ -82,7 +83,7 @@ def test_a_sighting_resets_the_misses(tmp_path):
     run(st, 1, [])
     run(st, 2, [])
     out = run(st, 3, [rule("plan_change")])  # seen again on what would have been the third miss
-    assert out["life"][0]["state"] == "still_open" and out["gone"] == []
+    assert out["life"][0]["state"] == "returned" and out["gone"] == []
     assert ledger.load(st, ENGINE, TARGET)["entries"][0]["misses"] == 0
     out = run(st, 4, [])
     assert out["gone"] == [] and out["still_open"][0]["misses"] == 1  # the count starts over
@@ -96,6 +97,67 @@ def test_the_threshold_is_configurable():
     assert ledger.gone_after({}) == 3 and ledger.gone_after(None) == 3
     assert ledger.gone_after({"gone_after_runs": 5}) == 5 and ledger.gone_after({"gone_after_runs": "2"}) == 2
     assert ledger.gone_after({"gone_after_runs": 0}) == 3 and ledger.gone_after({"gone_after_runs": "x"}) == 3  # blank or nonsense: the default
+
+
+def hourly(store, day: int, hour: int, rules: list[dict], gone_after: int = 3) -> dict:
+    """One hourly run on 2026-11-(5+day) at `hour`, the shape of an AWR interval a day."""
+    s = f"{ENGINE}/{TARGET}/2026-11-{5 + day:02d}/202611{5 + day:02d}T{hour:02d}0000Z"
+    return ledger.update(store, ENGINE, TARGET, s, f"2026-11-{5 + day:02d}T{hour:02d}:00:00+00:00", rules, [review(f) for f in rules[:5]], gone_after)
+
+
+def test_a_nightly_batch_under_hourly_runs_does_not_flap(tmp_path):
+    """Hourly snapshots, a statement that only shows at 02:00: the first night it is gone by 05:00 (no cadence yet),
+    the second night it is a return with a one-day period, and from then on three quiet hours do not clear it."""
+    st = LocalStorage(tmp_path)
+    batch = [rule("sql_top", "batch1", "high")]
+    hourly(st, 0, 2, batch)
+    for h in range(3, 6):
+        out = hourly(st, 0, h, [])
+    assert [e["kind"] for e in out["gone"]] == ["sql_top"]  # night one: three misses, no period to go on
+    assert len(ledger.load(st, ENGINE, TARGET)["tombstones"]) == 1
+    for h in range(6, 24):
+        assert hourly(st, 0, h, [])["gone"] == []
+    out = hourly(st, 1, 2, batch)  # night two
+    assert out["life"][0]["state"] == "returned" and out["life"][0]["first_seen"].endswith("20261105T020000Z")
+    assert out["life"][0]["period_s"] == 86400.0
+    for h in range(3, 24):  # the whole day: still open, never gone (3 x 24h is the new threshold)
+        out = hourly(st, 1, h, [])
+        assert out["gone"] == [] and out["still_open"][0]["state"] == "still_open"
+    out = hourly(st, 2, 2, batch)  # night three: same gap as before, so it is the usual batch
+    assert out["life"][0]["state"] == "recurring" and out["life"][0]["returns"] == 2
+    # it does get reported gone when it really stops: three days past its last sighting
+    for day in (3, 4):
+        for h in range(0, 24):
+            assert hourly(st, day, h, [])["gone"] == []
+    assert [e["kind"] for e in hourly(st, 5, 3, [])["gone"]] == ["sql_top"]
+
+
+def test_a_recurring_finding_that_gets_worse_is_worse(tmp_path):
+    st = LocalStorage(tmp_path)
+    hourly(st, 0, 2, [rule("sql_top", "b", "medium")])
+    hourly(st, 0, 5, [])
+    hourly(st, 1, 2, [rule("sql_top", "b", "medium")])
+    hourly(st, 1, 5, [])
+    out = hourly(st, 2, 2, [rule("sql_top", "b", "high")])
+    assert out["life"][0]["state"] == "worse" and ledger.load(st, ENGINE, TARGET)["entries"][0]["peak"] == "high"
+
+
+def test_tombstones_expire(tmp_path):
+    st = LocalStorage(tmp_path)
+    hourly(st, 0, 2, [rule("deadlocks", None)])
+    for h in (3, 4, 5):
+        hourly(st, 0, h, [])
+    assert len(ledger.load(st, ENGINE, TARGET)["tombstones"]) == 1
+    hourly(st, 8, 2, [])  # eight days later the tombstone is past TOMBSTONE_DAYS
+    assert ledger.load(st, ENGINE, TARGET)["tombstones"] == []
+    out = hourly(st, 8, 3, [rule("deadlocks", None)])
+    assert out["life"][0]["state"] == "new"  # too long ago to be the same finding
+
+
+def test_period_words():
+    assert ledger.describe_period(None) == "" and ledger.describe_period(0) == ""
+    assert ledger.describe_period(3600) == "about every 1h" and ledger.describe_period(86400) == "about every 24h"
+    assert ledger.describe_period(7 * 86400) == "about every 7d" and ledger.describe_period(600) == "about every 10min"
 
 
 def test_identity_is_kind_and_subject_not_wording(tmp_path):
@@ -140,7 +202,7 @@ def test_ledger_round_trips_through_the_store_without_disturbing_snapshots(tmp_p
     data = json.loads(st.get("postgres/demo/findings.json"))
     assert data["updated"] == sid(0) and data["entries"][0]["kind"] == "plan_change"
     assert st.list_snapshots(ENGINE, TARGET) == [sid(0)]  # the ledger is not a snapshot
-    assert ledger.load(st, ENGINE, "nobody") == {"entries": [], "updated": None}
+    assert ledger.load(st, ENGINE, "nobody") == {"entries": [], "tombstones": [], "updated": None}
 
 
 def test_ledger_writes_go_through_the_spool_during_an_outage(tmp_path, capsys):
@@ -332,6 +394,26 @@ def test_the_gate_is_on_the_finding_when_the_review_has_a_life(monkeypatch):
     assert d.deliver(cfg, triage([{"state": "worse", "first_seen": sid(0), "tickets": {}}], [medium]), "md") == ["slack"]
     assert d.deliver(dict(cfg, min_severity="high"), triage([{"state": "new", "first_seen": sid(1), "tickets": {}}], [medium]), "md") == []
     assert len(seen) == 2
+
+
+def test_returned_fires_and_recurring_stays_quiet(monkeypatch):
+    seen = fake_post(monkeypatch, {"/rest/api/2/issue": {"id": "1", "key": "DBA-1"}})
+    f = review(rule("sql_top", "b", severity="high"))
+    cfg = {"channels": ["jira"], "jira": JIRA}
+    assert d.deliver(cfg, triage([{"state": "recurring", "first_seen": sid(0), "tickets": {}}], [f]), "md") == []  # the usual batch
+    assert seen == []
+    t = triage([{"state": "returned", "first_seen": sid(0), "tickets": {"jira": {"key": "DBA-1", "id": "1", "url": "u"}}}], [f])
+    assert d.deliver(cfg, t, "md") == ["jira"]  # back after being cleared: its ticket hears about it, no new issue
+    assert len(seen) == 1 and seen[0][0].endswith("/issue/DBA-1/comment") and seen[0][1]["body"].startswith("returned:")
+
+
+def test_force_posts_regardless_of_the_gates(monkeypatch):
+    seen = fake_post(monkeypatch, {"/rest/api/2/issue": {"id": "1", "key": "DBA-2"}})
+    f = review(rule("sql_top", "b", severity="medium"))
+    t = triage([{"state": "still_open", "first_seen": sid(0), "tickets": {"jira": {"key": "DBA-1", "id": "1", "url": "u"}}}], [f])
+    assert d.deliver({"channels": ["jira"], "jira": JIRA}, t, "md") == []  # a still-open medium: silent
+    assert d.deliver({"channels": ["jira"], "jira": JIRA}, t, "md", force=True) == ["jira"]  # a person asked: a fresh issue
+    assert len(seen) == 1 and seen[0][0].endswith("/rest/api/2/issue")
 
 
 def test_legacy_reviews_keep_the_whole_run_gate_and_stdout_always_fires(monkeypatch, capsys):

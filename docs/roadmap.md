@@ -61,7 +61,7 @@ This goes first because it is the cheapest proof that the matcher works, on data
 
 Today every run writes a fresh review. The same `sql_id` can page the channel every hour. `min_severity` only drops quiet runs. It does not remember yesterday’s high finding.
 
-Using the matcher across snapshots, mark each finding **new**, **still open**, **worse**, **quiet**, or **gone**. Define the last two with thresholds, not judgment: *quiet* is the same identity present but below its own severity in this run; *gone* is absent from the rules findings for N consecutive runs (N configurable, default 3), so the channel does not flap between the two.
+Using the matcher across snapshots, mark each finding **new**, **still open**, **worse**, **quiet**, or **gone**. Define the last two with thresholds, not judgment: *quiet* is the same identity present but below its own severity in this run; *gone* is decided by cadence, not runs. Each finding keeps the gaps between its returns, and its period is their median. It is gone when absent for N times its period (N configurable, default 3), or N runs while it has no period yet. A gone finding stays as a tombstone for a week, so when it comes back it is **returned**, not new, and keeps its ticket. A return at the same gap as before is **recurring**: the nightly batch, quiet unless worse. Without this, hourly snapshots and a nightly job flap once a day.
 
 The review then says “still the plan change on `d8vkav3yzdfuz`, open since Tuesday, ticket PLANE-12” instead of a new red item. Delivery updates that ticket. A gone finding can close it, or say it cleared. Quiet-unless-worse becomes real: a still-open medium does not repost.
 

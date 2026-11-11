@@ -193,6 +193,7 @@ def main(argv=None):
     sp = sub.add_parser("deliver", help="re-send a stored review to delivery channels")
     sp.add_argument("snapshot")
     sp.add_argument("--channel", help="comma-separated channel names (default: configured channels)")
+    sp.add_argument("--force", action="store_true", help="post regardless of severity gates and finding life (a fresh issue on ticket channels)")
     sp = sub.add_parser("list", help="list stored snapshots")
     sp.add_argument("--target", "-t", required=True)
     sp = sub.add_parser("show", help="print a stored file (summary.json, compare.json, triage.md, awr.txt ...)")
@@ -255,7 +256,7 @@ def main(argv=None):
         if not store.exists(f"{args.snapshot}/triage.json"):
             sys.exit(f"{args.snapshot}: not triaged yet")
         tr, md = store.get_json(f"{args.snapshot}/triage.json"), store.get(f"{args.snapshot}/triage.md").decode()
-        done = deliver(cfg.delivery, tr, md, args.channel.split(",") if args.channel else None)
+        done = deliver(cfg.delivery, tr, md, args.channel.split(",") if args.channel else None, force=args.force)
         ledger.record_tickets(store, tr)
         print(f"delivered to: {', '.join(done) or 'nothing'}", file=sys.stderr)
     elif args.cmd == "compare":

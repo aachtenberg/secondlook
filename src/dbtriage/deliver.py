@@ -5,7 +5,7 @@ targets.toml:
     [delivery]
     channels = ["stdout", "ntfy"]      # which to use
     min_severity = "low"               # below this only stdout fires (per finding once a target has a ledger)
-    gone_after_runs = 3                # a finding absent this many runs in a row is reported gone (dbtriage.ledger)
+    gone_after_runs = 3                # a finding is gone after this many runs, or this many of its own periods (dbtriage.ledger)
 
     [delivery.ntfy]     url = "https://ntfy.example.com/dbtriage"            # token_env optional
     [delivery.slack]    webhook_url_env = "SLACK_WEBHOOK_URL"
@@ -163,15 +163,17 @@ def send_pushgateway(cfg, t, md):
 CHANNELS = {"stdout": send_stdout, "ntfy": send_ntfy, "slack": send_slack, "teams": send_teams, "email": send_email,
             "jira": send_jira, "plane": send_plane, "webhook": send_webhook, "pushgateway": send_pushgateway}
 COMMENTS = {"jira": comment_jira, "plane": comment_plane}  # ticket channels: a finding with a ticket gets a comment, not a new issue
+FIRING = ("new", "worse", "returned")  # life states that justify a post; still_open, quiet and recurring stay silent
 RUN_GATED = {"pushgateway"}  # describes the run, not a finding: keeps the whole-run gate so "runs stopped" alerts keep working
 
 
 def _fires(triage: dict, min_sev: int) -> list[int]:
-    """Indexes of the findings that justify a post: new or worse, at or above the gate (quiet-unless-worse).
-    A still-open medium does not repost; a finding that got worse does."""
+    """Indexes of the findings that justify a post: new, returned or worse, at or above the gate (quiet-unless-worse).
+    A still-open medium does not repost, and neither does a recurring one (the nightly batch, back at its usual
+    hour); a finding that got worse does."""
     out = []
     for i, (f, l) in enumerate(zip(triage.get("findings") or [], triage.get("life") or [])):
-        if l.get("state") in ("new", "worse") and RANK.get(f.get("severity"), 0) >= min_sev:
+        if l.get("state") in FIRING and RANK.get(f.get("severity"), 0) >= min_sev:
             out.append(i)
     return out
 
@@ -224,7 +226,7 @@ def test_channel(delivery_cfg: dict, name: str, triage: dict, markdown: str) -> 
         return False, f"{name}: {type(exc).__name__}: {str(exc)[:300]}"
 
 
-def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str] | None = None) -> list[str]:
+def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str] | None = None, force: bool = False) -> list[str]:
     """Send to every configured channel whose min_severity is met. Returns the channels that succeeded;
     failures are reported on stderr and never abort the run.
 
@@ -232,7 +234,11 @@ def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str]
     when some finding is new or worse at or above its min_severity, so a still-open medium does not repost.
     A review without `life` (a first snapshot, an older store) keeps the whole-run gate. stdout always fires.
     Ticket channels also comment on the tickets of findings that got worse or cleared; the tickets they create
-    are written to triage["life"] for the caller to keep (ledger.record_tickets)."""
+    are written to triage["life"] for the caller to keep (ledger.record_tickets).
+
+    `force` (the deliver subcommand's --force) skips every gate and posts the review as it stands to each channel,
+    a new issue included: the gates exist to stop the scheduler repeating itself, and a person re-sending after
+    an outage is the opposite of that."""
     names = channels or delivery_cfg.get("channels", ["stdout"])
     global_min = RANK.get(delivery_cfg.get("min_severity") or "info", 0)
     sev = RANK.get(triage.get("severity", "info"), 0)
@@ -248,7 +254,9 @@ def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str]
         own = cfg["min_severity"] if cfg.get("min_severity") is not None else DEFAULT_MIN.get(name)
         min_sev = RANK.get(own, global_min) if name != "stdout" else 0
         try:
-            if per_finding and name in COMMENTS:
+            if force:
+                fn(cfg, triage, markdown)
+            elif per_finding and name in COMMENTS:
                 if not _ticket_run(name, cfg, triage, markdown, min_sev):
                     continue
             else:
