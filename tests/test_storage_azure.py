@@ -1,4 +1,5 @@
 import builtins
+import hashlib
 import sys
 
 import pytest
@@ -10,12 +11,34 @@ class _NotFound(Exception):
     pass
 
 
+class _Modified(Exception):
+    pass
+
+
+class _Exists(Exception):
+    pass
+
+
+class _Match:
+    """Stand-in for azure.core.MatchConditions."""
+    IfNotModified, IfMissing = "IfNotModified", "IfMissing"
+
+
+def _etag(data: bytes) -> str:
+    return '"' + hashlib.md5(data).hexdigest() + '"'
+
+
 class FakeBlob:
     def __init__(self, store, name):
         self.store, self.name = store, name
 
     def exists(self):
         return self.name in self.store
+
+    def get_blob_properties(self):
+        if self.name not in self.store:
+            raise _NotFound()
+        return type("P", (), {"etag": _etag(self.store[self.name])})()
 
 
 class FakeDownload:
@@ -34,9 +57,13 @@ class FakeContainer:
         self.created = not exists
         self._exists = exists
 
-    def upload_blob(self, name, data, overwrite=False):
+    def upload_blob(self, name, data, overwrite=False, etag=None, match_condition=None):
         if not self._exists:
             raise _NotFound()
+        if match_condition == _Match.IfMissing and name in self.blobs:
+            raise _Exists()
+        if match_condition == _Match.IfNotModified and (name not in self.blobs or _etag(self.blobs[name]) != etag):
+            raise _Modified()
         self.blobs[name] = data
 
     def create_container(self):
@@ -60,8 +87,9 @@ class FakeContainer:
 def azure_core(monkeypatch):
     """Give storage.py an azure.core.exceptions.ResourceNotFoundError without installing the SDK."""
     core = type(sys)("azure.core"); exc = type(sys)("azure.core.exceptions")
-    exc.ResourceNotFoundError = _NotFound
+    exc.ResourceNotFoundError, exc.ResourceModifiedError, exc.ResourceExistsError = _NotFound, _Modified, _Exists
     _NotFound.__name__ = "ResourceNotFoundError"
+    core.MatchConditions = _Match
     monkeypatch.setitem(sys.modules, "azure", type(sys)("azure"))
     monkeypatch.setitem(sys.modules, "azure.core", core)
     monkeypatch.setitem(sys.modules, "azure.core.exceptions", exc)

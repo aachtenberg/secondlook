@@ -34,7 +34,7 @@ from datetime import datetime
 from statistics import median
 
 from dbtriage.findings import identity
-from dbtriage.storage import Storage, StorageUnavailable
+from dbtriage.storage import Conflict, Storage, StorageUnavailable
 
 RANK = {"info": 0, "low": 1, "medium": 2, "high": 3}
 STATES = ("new", "still_open", "worse", "quiet", "returned", "recurring", "gone")
@@ -69,16 +69,23 @@ def load(store: Storage, engine: str, target: str) -> dict:
             "prior": data.get("prior"), "generation": int(data.get("generation") or 0)}
 
 
-def save(store: Storage, engine: str, target: str, ledger: dict) -> None:
+_NOW = object()  # save(): "whatever version the store holds as we write"
+
+
+def save(store: Storage, engine: str, target: str, ledger: dict, expected=_NOW) -> None:
+    """Store the ledger as the next generation, conditionally: `expected` is the store's version token from
+    before the ledger was computed, None for "there was none". The store refuses with Conflict when the object
+    has moved since, and nothing is written. Without `expected` the version is read now, which only guards the
+    write itself (tests and one-off repairs); `commit` and `rebuild` pass the one they read first."""
+    k = key(engine, target)
+    if expected is _NOW:
+        expected = store.version_of(k)
     ledger["generation"] = int(ledger.get("generation") or 0) + 1
-    store.put_json(key(engine, target), ledger)
-
-
-def _generation(store: Storage, engine: str, target: str) -> int:
     try:
-        return int((store.get_json(key(engine, target)) or {}).get("generation") or 0)
-    except (FileNotFoundError, ValueError):
-        return 0
+        store.put_json_if(k, ledger, expected)
+    except Conflict:
+        ledger["generation"] -= 1  # not written: the dict says what the store holds
+        raise
 
 
 class LedgerContended(RuntimeError):
@@ -86,25 +93,29 @@ class LedgerContended(RuntimeError):
 
 
 def commit(store: Storage, engine: str, target: str, mutate, attempts: int = 3):
-    """Read-modify-write the ledger with an optimistic check: `mutate(ledger)` runs on a fresh load, and the save
-    goes ahead only when nobody else saved in between (the stored generation is still the one loaded). If it
-    moved, the whole thing is done again on the new state; a copy that lost the race is never written, and after
+    """Read-modify-write the ledger as a compare-and-set: the store's version is read, `mutate(ledger)` runs on a
+    fresh load, and the save is conditional on that version. A save that lost the race is refused by the store
+    (Conflict) and the whole thing is done again on the new state; a copy that lost is never written, and after
     `attempts` losses LedgerContended is raised. `mutate` returning None declines: nothing is saved (an older
     snapshot, a ticket that matches no entry). Returns what `mutate` returned on the saved attempt.
 
-    The window between the check and the put is not closed (no store here has a conditional put). In one process
-    `run_request` holds a per-target lock, and the spool flush compares generations before replaying this file;
-    across processes, run one scheduler per store, and `rebuild-ledger` repairs the file from the stored reviews."""
+    The version is read before the ledger, so a write that lands between the two makes the save fail rather than
+    succeed on stale data. Every shipped store does the compare and the write in one step (storage.py, put_if);
+    the base-class fallback re-reads the version just before the put, which is the check this used to do itself.
+    During a store outage the save is spooled, and the replay is governed by the generation under the database's
+    lock (ResilientStorage._push_ledger)."""
+    k = key(engine, target)
     for _ in range(attempts):
+        version = store.version_of(k)
         ledger = load(store, engine, target)
-        gen = ledger["generation"]
         out = mutate(ledger)
         if out is None:
             return None
-        if _generation(store, engine, target) != gen:
-            print(f"ledger: {engine}/{target} changed under us; applying again", file=sys.stderr)
+        try:
+            save(store, engine, target, ledger, version)
+        except Conflict:
+            print(f"ledger: {engine}/{target} changed under us (the store refused the save); applying again", file=sys.stderr)
             continue
-        save(store, engine, target, ledger)
         return out
     raise LedgerContended(f"ledger {engine}/{target}: changed under {attempts} attempts; not saved")
 
@@ -339,17 +350,20 @@ def rebuild(store: Storage, engine: str, target: str, gone_after: int = DEFAULT_
 
     A snapshot counts when it has a compare.json (the run had something to compare against), exactly the runs
     `attach` recorded. Tickets come back from the `life` each triage.json kept, so the rebuilt ledger equals the
-    one built run by run. A run that lands while the snapshots are being read moves the generation; the rebuild
-    then starts over so it cannot publish a ledger that misses that run.
+    one built run by run. A run that lands while the snapshots are being read moves the stored version, so the
+    conditional save is refused and the rebuild starts over: it cannot publish a ledger that misses that run.
     """
+    k = key(engine, target)
     for _ in range(attempts):
-        gen = _generation(store, engine, target)
+        version = store.version_of(k)
+        gen = load(store, engine, target)["generation"]
         ledger = _rebuilt(store, engine, target, gone_after)
         ledger["generation"] = gen
-        if _generation(store, engine, target) != gen:
+        try:
+            save(store, engine, target, ledger, version)
+        except Conflict:
             print(f"ledger: {engine}/{target} changed during the rebuild; starting over", file=sys.stderr)
             continue
-        save(store, engine, target, ledger)
         return ledger
     raise LedgerContended(f"ledger {engine}/{target}: changed under {attempts} rebuild attempts; not saved")
 

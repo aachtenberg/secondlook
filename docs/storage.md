@@ -18,6 +18,23 @@ beside the days rather than under one of them: `<engine>/<database>/findings.jso
 open findings (operations.md, "A finding's life"). It is written through the same store and spooled the same way,
 and it can be rebuilt from the stored reviews with `dbtriage rebuild-ledger`.
 
+The ledger is the one object two processes may write at once, so every store offers a conditional write: the
+object is replaced only if it is still at the version the writer read, and refused otherwise. How each one does it:
+
+- `file://`: an exclusive `flock` on `.findings.json.lock` beside the file around the read, compare (content
+  hash) and write; works on an NFS or SMB mount that honours locks.
+- `s3://`: `PutObject` with `If-Match: <ETag>` (`If-None-Match: *` to create); a 412 is the refusal. AWS S3,
+  MinIO, Ceph RGW and versitygw honour it. An endpoint that answers `NotImplemented` gets a read-compare-write
+  for the rest of the process, noted once on stderr.
+- `az://`: `upload_blob` with the blob's ETag as the If-Match condition (If-None-Match to create); a 412 or 409
+  is the refusal.
+- `postgres://`: a `version` column on `dbtriage_objects` (added to existing tables on connect), and the write is
+  one `UPDATE ... WHERE key = ... AND version = ...` (or `INSERT ... ON CONFLICT DO NOTHING`); no row touched
+  is the refusal.
+
+During an outage the write goes to the spool unconditionally; the ledger's generation decides whether the replay
+is applied or dropped ("When the store is down").
+
 Buckets, containers and tables are created on the first write. In Postgres everything sits in one table,
 `dbtriage_objects`; JSON goes into a `jsonb` column, so you can query snapshots with plain SQL. Extra connection
 settings such as `sslmode=require` can be added to the URL.
