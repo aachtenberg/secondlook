@@ -306,6 +306,38 @@ def test_model_picker(page, web_server, monkeypatch):
     expect(page.locator("#a-model")).to_have_value("")
 
 
+def test_target_form_feed_fields_follow_the_source(page, web_server):
+    """The change feed shows only its source's fields; Test feed reads the feed as typed and shows the result in place
+    without saving; the pinned baseline is picked from the stored snapshots."""
+    page.goto(web_server + "/targets/demo")
+    src = page.locator("#feed-source")
+    expect(src).to_have_value("")
+    expect(page.locator("input[name='changes.repo']")).to_be_hidden()
+    expect(page.locator("input[name='changes.lookback_hours']")).to_be_hidden()
+    expect(page.get_by_role("button", name="Test feed")).to_be_hidden()
+    src.select_option("github")
+    expect(page.locator("input[name='changes.repo']")).to_be_visible()
+    expect(page.locator("input[name='changes.releases']")).to_be_visible()
+    expect(page.locator("input[name='changes.path']")).to_be_hidden()
+    expect(page.locator("input[name='changes.project']")).to_be_hidden()
+    src.select_option("gitlab")
+    expect(page.locator("input[name='changes.project']")).to_be_visible()
+    expect(page.locator("input[name='changes.releases']")).to_be_hidden()
+    src.select_option("file")
+    expect(page.locator("input[name='changes.path']")).to_be_visible()
+    expect(page.locator("input[name='changes.lookback_hours']")).to_be_visible()
+    page.fill("input[name='changes.path']", "no-such-feed.json")
+    page.get_by_role("button", name="Test feed").click()
+    expect(page.locator(".notice.bad")).to_contain_text("change feed failed")
+    expect(page.locator("ul.feed li.err")).to_contain_text("no-such-feed.json")
+    expect(page.locator("#feed-source")).to_have_value("file")  # the form keeps what was typed
+    expect(page.locator("input[name='changes.path']")).to_have_value("no-such-feed.json")
+    opts = page.locator("select[name=baseline] option")
+    expect(opts).to_have_count(3)  # none, then the two stored snapshots, newest first
+    expect(opts.nth(1)).to_contain_text("2026-11-05 10:00:00")
+    expect(page.locator("fieldset", has_text="Engine limits").locator("input[name=mask_report_literals]")).to_be_checked()
+
+
 def test_look_and_feel_reloads_with_toast(page, web_server):
     page.goto(web_server + "/settings")
     form = page.locator("form[action='/settings/save']")

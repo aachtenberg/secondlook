@@ -28,33 +28,47 @@ from pathlib import Path
 
 from dbtriage import dbsnap, scheduler
 from dbtriage.baseline import POLICIES
+from dbtriage.changes import SOURCES
 from dbtriage.config import ENGINES, NAME_RULE, Config, Target, target_name_ok, top_n_of  # one rule for file, UI and overlay
 from dbtriage.llm import DEFAULT_TOKEN_BUDGET, scheduled_problem
 
-TARGET_FIELDS = ("engine", "dsn", "dsn_env", "top_n", "diagnostics_pack", "changes_file", "create_snapshot", "user", "password", "links", "notes",
-                 "baseline_policy", "baseline", "schedule", "schedule_window", "schedule_paused")
+TARGET_FIELDS = ("engine", "dsn", "dsn_env", "top_n", "diagnostics_pack", "changes_file", "changes", "create_snapshot", "user", "password", "links", "notes",
+                 "baseline_policy", "baseline", "schedule", "schedule_window", "schedule_paused",
+                 "call_timeout_ms", "connect_timeout_s", "min_snapshot_age_min", "mask_report_literals")
 SCHEDULE_FIELDS = ("schedule", "schedule_window", "schedule_paused")
-WEB_FIELDS = ("title", "brand", "logo", "accent", "theme", "refresh_seconds", "page_size", "footer")
+# per-target numbers the edit page offers: (blank-means default, smallest, largest a save accepts, unit)
+TARGET_NUMBERS = {"top_n": (25, 0, 10_000, ""), "schedule_window": (60, 5, 1440, "minutes"), "call_timeout_ms": (None, 1000, 3_600_000, "ms"),
+                  "connect_timeout_s": (None, 1, 300, "seconds"), "min_snapshot_age_min": (None, 0, 1440, "minutes")}
+# the [targets.X.changes] table: the fields each source reads (the two numbers apply to every source)
+CHANGES_FIELDS = {"file": ("path",), "github": ("repo", "environment", "token_env", "base_url", "releases"),
+                  "gitlab": ("project", "environment", "token_env", "base_url")}
+CHANGES_REQUIRED = {"file": "path", "github": "repo", "gitlab": "project"}
+CHANGES_NUMBERS = {"lookback_hours": (1, 8760), "correlate_minutes": (0, 1440)}
+WEB_FIELDS = ("title", "brand", "logo", "accent", "theme", "refresh_seconds", "page_size", "footer", "files")
 AGENT_FIELDS = ("provider", "model", "region", "aws_profile", "project_id", "resource", "base_url", "api_key_env", "effort", "max_tokens", "max_iterations",
-                "token_budget", "scheduled_provider", "scheduled_model", "scheduled_base_url", "scheduled_api_key_env")
+                "token_budget", "fallback_models", "scheduled_provider", "scheduled_model", "scheduled_base_url", "scheduled_api_key_env")
 # api_key_cmd runs a command on the server, so it can only be set in targets.toml, never from the web view or its API
 AGENT_PROVIDERS = ("anthropic", "bedrock", "vertex", "foundry", "bedrock-converse",
                    "openai", "openrouter", "groq", "ollama", "ollama-cloud", "vllm", "azure-openai", "vertex-gemini")
 SEVERITIES = ("info", "low", "medium", "high")
-# (field, kind, default) per channel; kind: text | secret | int | list | sev. Secrets are masked in pages and the API.
+# (field, kind, default) per channel; kind: text | secret | int | list | sev | bool. Secrets are masked in pages and the API.
+# Every channel but stdout has its own severity gate, as deliver() reads it: "" is the global gate, tickets default to high.
+GATE = ("min_severity", "sev", "")
 CHANNEL_FIELDS: dict[str, list[tuple[str, str, str]]] = {
     "stdout": [],
-    "ntfy": [("url", "text", "https://ntfy.sh"), ("topic", "text", ""), ("token_env", "text", "")],
-    "slack": [("webhook_url", "secret", ""), ("webhook_url_env", "text", "")],
-    "teams": [("webhook_url", "secret", ""), ("webhook_url_env", "text", "")],
-    "email": [("smtp_host", "text", ""), ("smtp_port", "int", "587"), ("from", "text", ""), ("to", "list", ""),
-              ("user_env", "text", ""), ("password_env", "text", "")],
+    "ntfy": [("url", "text", "https://ntfy.sh"), ("topic", "text", ""), ("token_env", "text", ""), GATE],
+    "slack": [("webhook_url", "secret", ""), ("webhook_url_env", "text", ""), GATE],
+    "teams": [("webhook_url", "secret", ""), ("webhook_url_env", "text", ""), GATE],
+    "email": [("smtp_host", "text", ""), ("smtp_port", "int", "587"), ("starttls", "bool", "true"), ("from", "text", ""), ("to", "list", ""),
+              ("user_env", "text", ""), ("password_env", "text", ""), GATE],
     "jira": [("base_url", "text", ""), ("project_key", "text", ""), ("issue_type", "text", "Task"), ("user_env", "text", ""),
              ("token_env", "text", ""), ("min_severity", "sev", "high")],
-    "plane": [("base_url", "text", ""), ("workspace", "text", ""), ("project_id", "text", ""), ("api_key_env", "text", ""), ("min_severity", "sev", "high")],
-    "webhook": [("url", "secret", "")],
-    "pushgateway": [("url", "text", ""), ("job", "text", "dbtriage")],
+    "plane": [("base_url", "text", ""), ("workspace", "text", ""), ("project_id", "text", ""), ("project_identifier", "text", ""),
+              ("api_key_env", "text", ""), ("min_severity", "sev", "high")],
+    "webhook": [("url", "secret", ""), GATE],
+    "pushgateway": [("url", "text", ""), ("job", "text", "dbtriage"), GATE],
 }
+ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")  # what an environment variable's name looks like, for every *_env field
 
 
 SECTIONS = ("targets", "web", "agent", "delivery")
@@ -114,23 +128,61 @@ def _field_problems(t: dict) -> list[str]:
     """Field types a stored target must have: the same check for what a save accepts and what apply() uses, so a
     save can never store an entry that is then skipped."""
     out = []
-    for k in ("top_n", "schedule_window"):  # blank means the default (25, 60)
-        try:
-            if t.get(k) not in (None, ""):
-                if isinstance(t[k], bool):  # JSON true is not 1
-                    raise TypeError
-                n = int(t[k])
-                if k == "schedule_window" and not 5 <= n <= 1440:
-                    out.append("schedule_window: 5 to 1440 minutes")
-        except (TypeError, ValueError, OverflowError):  # OverflowError: JSON's Infinity
-            out.append(f"{k} must be a whole number")
+    for k, (_default, lo, hi, unit) in TARGET_NUMBERS.items():  # blank means the default
+        out += _number_problem(k, t.get(k), lo, hi, unit, ranged=k != "top_n")
     for k in ("dsn", "dsn_env", "changes_file", "notes", "baseline", "baseline_policy", "schedule", "user", "password"):
         if t.get(k) is not None and not isinstance(t[k], str):
             out.append(f"{k} must be text")
+    if t.get("mask_report_literals") not in (None, "", True, False):
+        out.append("mask_report_literals must be true or false")
     links = t.get("links")
     if links is not None and not (isinstance(links, list) and all(
             isinstance(l, dict) and isinstance(l.get("url"), str) and isinstance(l.get("label"), str) for l in links)):
         out.append("links must be a list of {label, url}, both text")
+    if t.get("changes") is not None:
+        out += _changes_problems(t["changes"])
+    return out
+
+
+def _number_problem(k: str, v, lo: int, hi: int, unit: str = "", ranged: bool = True) -> list[str]:
+    """A whole number between lo and hi, or blank; JSON true, Infinity and text are refused rather than coerced."""
+    if v in (None, ""):
+        return []
+    try:
+        if isinstance(v, bool):  # JSON true is not 1
+            raise TypeError
+        n = int(v)
+    except (TypeError, ValueError, OverflowError):  # OverflowError: JSON's Infinity
+        return [f"{k} must be a whole number"]
+    return [f"{k}: {lo} to {hi} {unit}".rstrip()] if ranged and not lo <= n <= hi else []
+
+
+def _changes_problems(c) -> list[str]:
+    """Why a [targets.X.changes] table cannot be saved: one check for the edit page, the API and stored entries. A
+    table without a source is the cleared feed and is fine."""
+    if not isinstance(c, dict):
+        return ["changes must be a table"]
+    source = c.get("source")
+    if not source:
+        return []
+    if source not in SOURCES:
+        return [f"changes.source: one of {', '.join(SOURCES)}"]
+    out = []
+    for k in ("path", "repo", "project", "environment", "token_env", "base_url"):
+        if c.get(k) is not None and not isinstance(c[k], str):
+            out.append(f"changes.{k} must be text")
+    if c.get("releases") not in (None, "", True, False):
+        out.append("changes.releases must be true or false")
+    for k, (lo, hi) in CHANGES_NUMBERS.items():
+        out += _number_problem(f"changes.{k}", c.get(k), lo, hi, k.rsplit("_", 1)[1])
+    if out:
+        return out
+    if not c.get(CHANGES_REQUIRED[source]):
+        out.append(f"changes: a {source} feed needs {CHANGES_REQUIRED[source]}")
+    if c.get("token_env") and not ENV_NAME.match(c["token_env"]):
+        out.append("changes.token_env: an environment variable name like GITHUB_TOKEN")
+    if c.get("base_url") and not re.match(r"^https?://", c["base_url"]):
+        out.append("changes.base_url must start with http(s)://")
     return out
 
 _WARNED: set = set()  # overlay entries already reported as skipped, so a reload does not repeat it
@@ -228,7 +280,7 @@ class Settings:
             problems.append(f"engine: one of {', '.join(ENGINES)}")
         if not fields.get("dsn") and not fields.get("dsn_env"):
             problems.append("set a dsn or a dsn_env")
-        if fields.get("dsn_env") and not re.match(r"^[A-Z_][A-Z0-9_]*$", fields["dsn_env"]):
+        if fields.get("dsn_env") and not ENV_NAME.match(fields["dsn_env"]):
             problems.append("dsn_env: an environment variable name like ORACLE_DSN")
         try:
             dbsnap.mode_of(fields.get("create_snapshot"))
@@ -339,6 +391,12 @@ class Settings:
                         raise ValueError
                 except (TypeError, ValueError):  # an API body can carry anything: refuse it, never crash
                     problems.append(f"{k}: a whole number, at least {AGENT_NUMBERS[k]}"); continue
+            if k == "fallback_models":
+                if not isinstance(v, (str, list)):
+                    problems.append("fallback_models: model ids separated by commas"); continue
+                v = agent_value(k, v)
+                if v == [] and file.get(k) != []:  # "none" is a real choice: unset means the provider's own chain, not an empty one
+                    agent[k] = []; continue
             _record(agent, k, v, file.get(k))
         if not problems and (p := scheduled_problem({**file, **agent})):
             problems.append(p)
@@ -376,6 +434,16 @@ class Settings:
                 clean.pop("min_severity", None)
             else:
                 clean["min_severity"] = v
+        if "gone_after_runs" in data:  # the finding-life threshold (dbtriage.ledger); blank = the default, 3
+            v = data["gone_after_runs"]
+            if bad := _number_problem("gone_after_runs", v, 1, 1000):
+                problems += bad
+            else:
+                v = int(v) if v not in (None, "") else ""
+                if (v or 3) == (file.get("gone_after_runs") or 3):
+                    clean.pop("gone_after_runs", None)
+                else:
+                    clean["gone_after_runs"] = v
         for ch, spec in CHANNEL_FIELDS.items():
             if ch not in data:
                 continue  # not mentioned: keep what is stored
@@ -395,6 +463,8 @@ class Settings:
                     problems.append(f"{ch}.{name}: one of " + ", ".join(SEVERITIES)); continue
                 if kind in ("text", "secret", "sev") and not isinstance(v, str):
                     problems.append(f"{ch}.{name}: must be text"); continue
+                if kind == "bool" and v not in (None, "", True, False, "true", "false"):
+                    problems.append(f"{ch}.{name}: true or false"); continue
                 try:
                     typed, cmp_given = _channel_value(kind, v, ""), _channel_value(kind, v, default)
                     cmp_file = _channel_value(kind, file_ch.get(name), default)
@@ -509,7 +579,7 @@ class Settings:
 AGENT_DEFAULTS = {"provider": "anthropic", "effort": "high", "max_iterations": 25,  # what the Agent card shows unset
                   "token_budget": DEFAULT_TOKEN_BUDGET}
 AGENT_NUMBERS = {"max_tokens": 1, "max_iterations": 1, "token_budget": 0}  # smallest allowed; a token_budget of 0 = no limit
-AGENT_REQUIRED = ("provider", "model", "resource", "max_tokens", "max_iterations", "token_budget")  # blank = use targets.toml's
+AGENT_REQUIRED = ("provider", "model", "resource", "max_tokens", "max_iterations", "token_budget", "fallback_models")  # blank = use targets.toml's
 
 
 def _empty(v) -> bool:
@@ -527,10 +597,12 @@ def _record(overlay: dict, key: str, value, file_value) -> None:
 
 def _target_value(key: str, v):
     """A target field in the form it is stored and compared in (the form posts strings)."""
-    if key == "top_n":
-        return int(v) if v not in (None, "") else 25
-    if key == "schedule_window":
-        return int(v) if v not in (None, "") else 60
+    if key in TARGET_NUMBERS:
+        return int(v) if v not in (None, "") else TARGET_NUMBERS[key][0]
+    if key == "mask_report_literals":  # on unless switched off: False must be stored even where the file is silent
+        return True if v in (None, "") else bool(v)
+    if key == "changes":
+        return changes_value(v)
     if key == "schedule":
         if not v:
             return ""
@@ -549,12 +621,54 @@ def _target_value(key: str, v):
     return v
 
 
+def changes_value(v) -> dict:
+    """A [targets.X.changes] table as it is stored and compared: only its source's fields, blanks dropped, numbers
+    typed, releases kept only when on. Anything without a source is the empty table: no feed."""
+    if not isinstance(v, dict) or not v.get("source"):
+        return {}
+    source = str(v["source"])
+    out = {"source": source}
+    for k in CHANGES_FIELDS.get(source, ()):
+        val = v.get(k)
+        if k == "releases":
+            if val in (True, "true", "on", "1"):
+                out[k] = True
+        elif val not in (None, ""):
+            out[k] = val
+    for k in CHANGES_NUMBERS:
+        if v.get(k) not in (None, ""):
+            try:
+                out[k] = int(v[k])
+            except (TypeError, ValueError):
+                out[k] = v[k]  # _changes_problems has already refused it
+    return out
+
+
 def _web_value(key: str, v):
     if key in ("refresh_seconds", "page_size") and v not in (None, ""):
         try:
             return int(v)
         except (TypeError, ValueError):
             return v
+    if key == "files":  # the card posts one line; the API may send the list
+        return list_value(v)
+    return v
+
+
+def list_value(v) -> list[str]:
+    """A list field as typed on a card (names separated by commas or spaces) or as the API sends it (a list)."""
+    if isinstance(v, str):
+        return [x for x in re.split(r"[,\s]+", v) if x]
+    return [str(x) for x in (v or [])]
+
+
+def agent_value(key: str, v):
+    """An [agent] field as it is stored and compared. fallback_models is a list: the card posts model ids separated
+    by commas, "none" turns the chain off ([]) and blank means targets.toml's or the provider's default."""
+    if key == "fallback_models" and v not in (None, ""):
+        if isinstance(v, str) and v.strip().lower() == "none":
+            return []
+        return list_value(v)
     return v
 
 
@@ -565,6 +679,8 @@ def _channel_value(kind: str, v, default):
         return v if v is not None else default
     if _empty(v):
         v = default
+    if kind == "bool":
+        return v in (True, "true")
     if kind == "int":
         return int(v) if v not in (None, "") else ""
     if kind == "list":
