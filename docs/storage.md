@@ -12,6 +12,12 @@ Every snapshot, review and discussion is kept in one store. You pick it with a U
 | `az://container/prefix` | Azure Blob Storage (install with `uv sync --extra azure`) | `AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_STORAGE_ACCOUNT` with a SAS token or a managed identity |
 | `postgres://user@host:5432/db?schema=dbtriage` | any PostgreSQL-compatible database: PostgreSQL, RDS or Aurora, Cloud SQL, AlloyDB, Azure Database for PostgreSQL, CockroachDB, YugabyteDB | `PGPASSWORD` or `~/.pgpass` is best; a password in the URL works and is always shown masked |
 
+Each snapshot is a prefix, `<engine>/<database>/<date>/<time>/`, holding `manifest.json`, `summary.json`, `raw.json`,
+`compare.json`, `triage.json`, `triage.md`, any engine report (`awr.txt`) and the `chat/` threads. One object sits
+beside the days rather than under one of them: `<engine>/<database>/findings.json`, the ledger of the database's
+open findings (operations.md, "A finding's life"). It is written through the same store and spooled the same way,
+and it can be rebuilt from the stored reviews with `dbtriage rebuild-ledger`.
+
 Buckets, containers and tables are created on the first write. In Postgres everything sits in one table,
 `dbtriage_objects`; JSON goes into a `jsonb` column, so you can query snapshots with plain SQL. Extra connection
 settings such as `sslmode=require` can be added to the URL.

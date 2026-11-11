@@ -5,6 +5,45 @@ from __future__ import annotations
 
 ICON = {"high": "🔴 **High**", "medium": "🟠 **Medium**", "low": "🟡 **Low**", "info": "🟢 **Info**"}
 HEADER_ICON = {"high": "🔴", "medium": "🟠", "low": "🟡", "info": "✅"}
+LIFE = {"new": "new", "still_open": "still open", "worse": "worse", "quiet": "quiet", "gone": "gone"}
+
+
+def life_note(life: dict | None) -> str:
+    """The finding's life in a few words: its state, since when it has been open, and its ticket(s).
+    "open since" is shown once a finding has a history (still open, worse, quiet), never for a new one."""
+    if not life or life.get("state") not in LIFE:
+        return ""
+    bits = [LIFE[life["state"]]]
+    if life["state"] != "new":
+        since = (life.get("first_seen_at") or life.get("first_seen") or "")[:10]
+        if since:
+            bits.append(f"open since {since}")
+    for name, t in sorted((life.get("tickets") or {}).items()):
+        if isinstance(t, dict) and t.get("key"):
+            bits.append(f"ticket [{t['key']}]({t['url']})" if t.get("url") else f"ticket {t['key']}")
+    return " · ".join(bits)
+
+
+def _ident(e: dict) -> str:
+    return f"{e.get('kind') or ''} {e.get('subject') or ''}".strip()
+
+
+def still_open_lines(triage: dict) -> list[str]:
+    """Open findings that did not make the review's five, and findings that cleared this run."""
+    lines = []
+    if still := triage.get("still_open"):
+        lines.append(f"**Still open** ({len(still)} not among the findings above):")
+        for e in still:
+            note = life_note(e)
+            misses = int(e.get("misses") or 0)
+            if misses:
+                note += f" · not seen in the last {misses} run{'s' if misses != 1 else ''}"
+            lines.append(f"- {ICON.get(e.get('severity'), e.get('severity', ''))} · `{_ident(e)}`: {e.get('title', '')} — _{note}_")
+        lines.append("")
+    if gone := triage.get("gone"):
+        lines.append("**Cleared:** " + "; ".join(f"`{_ident(e)}` ({life_note(dict(e, state='gone'))})" for e in gone))
+        lines.append("")
+    return lines
 
 
 def count_line(findings: list[dict]) -> str:
@@ -27,8 +66,10 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
         lines += [f"⚠️ _agent unavailable, rules-based review shown: {plain_provider_error(str(triage['agent_error']))}_", ""]
     lines.append(count_line(findings))
     lines.append("")
+    life = triage.get("life") or []
     for i, f in enumerate(findings, 1):
-        lines.append(f"{i}. {ICON.get(f['severity'], f['severity'])} · `{f.get('where', '')}`: {f['summary']}")
+        note = life_note(life[i - 1]) if i <= len(life) else ""
+        lines.append(f"{i}. {ICON.get(f['severity'], f['severity'])} · `{f.get('where', '')}`: {f['summary']}" + (f" — _{note}_" if note else ""))
         if f.get("impact"):
             lines.append(f"   - **Impact:** {f['impact']}")
         for e in f.get("evidence", [])[:4]:
@@ -36,6 +77,7 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
         if f.get("fix"):
             lines.append(f"   - **Fix:** {f['fix']}")
         lines.append("")
+    lines += still_open_lines(triage)
     if triage.get("checked"):
         lines += [f"**Checked:** {triage['checked']}", ""]
     lines += agreement_lines(triage)

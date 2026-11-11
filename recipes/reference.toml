@@ -56,6 +56,9 @@ model = "claude-opus-5-5"
 channels = ["stdout"]
 # Any of: stdout ntfy slack teams email jira plane webhook pushgateway. Each has a "Send test" button in Settings.
 # min_severity = "info"                below this, only stdout fires: info | low | medium | high
+#                                      once a database has a ledger of open findings the gate is per finding: a channel
+#                                      fires when a finding is new or worse at or above it; a still-open one does not repost
+# gone_after_runs = 3                  a finding absent from the rules this many runs in a row is reported gone (and its ticket told)
 
 # [delivery.ntfy]                      push notifications (ntfy.sh or your own server)
 # url = "https://ntfy.sh"
@@ -91,6 +94,7 @@ channels = ["stdout"]
 # base_url = "https://plane.example.com"
 # workspace = "ops"
 # project_id = "..."
+# project_identifier = "OPS"           the project's short identifier, so tickets are recorded as OPS-12 (else by id)
 # api_key_env = "PLANE_API_KEY"
 # min_severity = "high"
 
