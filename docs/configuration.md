@@ -22,7 +22,8 @@ model = "claude-opus-5-5"
 
 [delivery]
 channels = ["stdout", "ntfy"]        # where reviews go (see operations.md)
-min_severity = "low"
+min_severity = "low"                 # per finding: a channel fires when a finding is new or worse at or above it
+gone_after_runs = 3                  # a finding absent from the rules this many runs in a row is reported gone
 
 [targets.prod-db-3]
 engine = "oracle"                    # postgres | oracle | mysql | sqlserver
@@ -38,6 +39,10 @@ A database's name (`prod-db-3` above) is part of every stored snapshot's path, s
 digits, `.`, `_` and `-`, up to 64 characters, starting with a letter or digit and not ending in `.`, and not a
 Windows device name such as `CON` or `NUL`. Two names that differ only in case would share one folder on some
 stores, so they are refused too. The same rule applies to databases added on the Settings page.
+
+`gone_after_runs` is the one threshold behind a finding's life (operations.md, "A finding's life"): how many runs in a
+row a finding must be missing from the rules before the review says it is gone and its ticket is told it cleared.
+It sits under `[delivery]` because flapping is a channel problem. Blank means 3.
 
 ## Connecting to a database
 

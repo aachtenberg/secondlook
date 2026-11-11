@@ -16,6 +16,7 @@
 | `dbtriage mcp` | the MCP server, for MCP clients such as Claude Code; off unless `[mcp] enabled = true` (see mcp.md) |
 | `dbtriage serve --port 8080` | receive alert webhooks; listens on all interfaces, so set `DBTRIAGE_WEBHOOK_TOKEN` (without it anyone who can reach the port can start runs, and it warns at start) |
 | `dbtriage flush-spool` | push work saved during a store outage now |
+| `dbtriage rebuild-ledger -t <db>` | recompute the database's ledger of open findings from its stored reviews (below, "A finding's life") |
 | `dbtriage copy-store --from URL --to URL`, `dbtriage copy-settings --from X --to Y` | move snapshots or settings, for example from files into Postgres |
 
 `--baseline-policy` and `--baseline` work on `run`, `compare` and `triage` (see configuration.md).
@@ -113,7 +114,12 @@ The request is the same everywhere: which database, which mode, how many minutes
 Pick channels in `[delivery] channels` or on the Settings page, where each has a **Send test** button:
 `stdout`, `ntfy`, `slack`, `teams`, `email`, `jira`, `plane`, `webhook`, `pushgateway`.
 
-- `min_severity` keeps quiet results quiet. Tickets (Jira, Plane) default to high only.
+- `min_severity` keeps quiet results quiet. Tickets (Jira, Plane) default to high only. Once a database has a
+  ledger of open findings (below) the gate is on the finding, not the run: a channel fires when some finding is
+  **new** or **worse** at or above its gate, so a still-open medium does not repost every hour. `stdout` always
+  prints, and `pushgateway` always records the run, so an alert on "runs stopped" keeps working.
+- Jira and Plane remember the ticket they opened. A finding that gets worse is a comment on its ticket, not a new
+  issue; a finding that is gone gets a "cleared" comment. Plane keys read `OPS-12` when `project_identifier` is set.
 - `pushgateway` exposes `dbtriage_severity{target,engine}` and `dbtriage_last_run_timestamp_seconds`, so Prometheus
   can alert on a bad result or on runs that stopped.
 - `webhook` posts the review as JSON to anything else, such as the Datadog or Dynatrace events API.
@@ -143,6 +149,35 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
   arguments and the first 2000 characters of its result, kept even when the model failed to submit a review).
 - **People decide.** dbtriage recommends fixes and never applies them. Automatic fixes, if ever added, belong
   behind an approval step with a ready rollback.
+
+## A finding's life
+
+Every run writes a fresh review, but a finding is not fresh just because the run is. Each database keeps a ledger
+of its open findings (`<engine>/<database>/findings.json` in the store), and every review says, next to each
+finding, what its life is:
+
+| State | Meaning |
+|---|---|
+| **new** | not in the ledger before this run |
+| **still open** | seen again at the same severity; shown with "open since" and its ticket |
+| **worse** | seen again at a higher severity than last run; delivery fires, and the ticket gets a comment |
+| **quiet** | seen again, but below its own severity last run; nothing is posted |
+| **gone** | absent from the rules findings for `gone_after_runs` runs in a row (default 3); said once, then dropped |
+
+Two findings are the same finding when they share a `kind` and a `subject` (the sql_id, table, wait class or
+parameter named), whatever the wording. Presence comes from the rules, which run on every snapshot, so the model
+choosing different words, or not mentioning a finding this time, does not make it new or gone. The threshold on
+*gone* is there so a finding sitting near a rule's limit does not flap between open and cleared.
+
+The review still caps at five findings, and an open finding never takes a slot from a new one: open findings that
+did not make the five are listed under **Still open** after them, with how long they have been open and how many
+runs since they were last seen. A finding that cleared this run is named under **Cleared**.
+
+The ledger is derived data. It is written through the same store as the snapshots, so an outage spools it like
+any other file, and `dbtriage rebuild-ledger -t <db>` recomputes it from the stored `triage.json` and
+`compare.json` files, tickets included. Losing it is a rebuild, not a loss. A run that cannot read the store
+reviews without a life (and delivers on the run's severity, as before) rather than start a ledger that would
+overwrite the real one.
 
 ## The review format
 
@@ -182,7 +217,9 @@ src/dbtriage/
   chat.py         discussing a review
   scheduler.py    schedules
   report.py       turning a review into text
-  deliver.py      the delivery channels
+  findings.py     what makes two findings the same finding (kind and subject)
+  ledger.py       the per-database ledger of open findings: new, still open, worse, quiet, gone
+  deliver.py      the delivery channels, and the finding-level gate
   triggers.py     webhook receiver and Lambda handler
   mcp_server.py   the MCP server (off unless [mcp] enabled = true)
   web.py, charts.py, templates/   the web view

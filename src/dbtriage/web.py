@@ -198,6 +198,11 @@ button.ai,.btn.ai{background:var(--ai);border-color:transparent;color:#fff;font-
 .fh .chat-link{margin-left:auto}.flist dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin:10px 0 0;font-size:13px}.flist dt{color:var(--mut);font-size:12px}.flist dd{margin:0;color:var(--fg2)}
 .flist dd ul{margin:0;padding-left:16px}
 .checked{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--mut)}.checked .lbl{font-weight:500;color:var(--fg2)}
+.life{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mut)}.life .state{padding:2px 8px;border-radius:999px;border:1px solid var(--line2);color:var(--fg2);font-weight:500}
+.life .state.new{border-color:var(--medium);color:var(--medium)}.life .state.worse{border-color:var(--high);color:var(--high)}.life .state.quiet,.life .state.gone{border-color:var(--info);color:var(--info)}
+.life a.ticket{font-family:var(--mono);font-size:12px;color:var(--link)}.life code.ticket{font-family:var(--mono);font-size:12px;color:var(--fg2)}
+.stillopen{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}.stillopen h3{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--fg2)}
+.stillopen ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.stillopen li{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px}.stillopen .cleared{margin-top:8px;font-size:12px;color:var(--mut)}
 .pill2{padding:2px 8px;border-radius:999px;background:var(--card2);border:1px solid var(--line);font-size:12px;color:var(--fg2)}
 .filesrow{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--mut);padding-top:10px;border-top:1px solid var(--line)}
 a.chat-link{font-size:12px;display:inline-flex;align-items:center;gap:5px;color:var(--ai);white-space:nowrap}
@@ -366,6 +371,47 @@ def _show(v) -> str:
 
 def _fmt_ts(iso: str | None) -> str:
     return (iso or "")[:19].replace("T", " ")
+
+
+LIFE_LABEL = {"new": "new", "still_open": "still open", "worse": "worse", "quiet": "quiet", "gone": "gone"}
+
+
+def life_badge(life: dict | None) -> str:
+    """A finding's life (dbtriage.ledger) as a state pill, "open since" for one with a history, and its ticket(s)
+    as links when the channel gave a URL. Empty for a review stored before the ledger existed."""
+    if not life or life.get("state") not in LIFE_LABEL:
+        return ""
+    state = life["state"]
+    bits = [f"<span class='state {state}'>{LIFE_LABEL[state]}</span>"]
+    if state != "new" and (since := (life.get("first_seen_at") or life.get("first_seen") or "")[:10]):
+        bits.append(f"<span>open since {html.escape(since)}</span>")
+    if (misses := int(life.get("misses") or 0)) and state != "gone":
+        bits.append(f"<span>not seen in the last {misses} run{'s' if misses != 1 else ''}</span>")
+    for name, t in sorted((life.get("tickets") or {}).items()):
+        if not isinstance(t, dict) or not t.get("key"):
+            continue
+        key_ = html.escape(str(t["key"]))
+        if t.get("url"):
+            bits.append(f"<a class='ticket' href='{html.escape(t['url'])}' title='{html.escape(name)} ticket'>{key_}</a>")
+        else:
+            bits.append(f"<code class='ticket' title='{html.escape(name)} ticket'>{key_}</code>")
+    return "<span class='life'>" + "".join(bits) + "</span>"
+
+
+def still_open_html(tr: dict) -> str:
+    """The open findings that did not make the review's five, and the ones that cleared this run."""
+    still, gone = tr.get("still_open") or [], tr.get("gone") or []
+    if not still and not gone:
+        return ""
+    def ident(e: dict) -> str:
+        return f"<code class='where'>{html.escape(f'{e.get('kind') or ''} {e.get('subject') or ''}'.strip())}</code>"
+
+    items = "".join(f"<li>{sev(e.get('severity'))}{ident(e)}<span>{html.escape(str(e.get('title') or ''))}</span>{life_badge(e)}</li>" for e in still)
+    out = f"<section class='stillopen' aria-labelledby='still-h'><h3 id='still-h'>Still open ({len(still)} not among the findings above)</h3>"
+    out += f"<ul>{items}</ul>" if items else ""
+    if gone:
+        out += "<p class='cleared'>Cleared: " + "; ".join(f"{ident(e)} {life_badge(dict(e, state='gone'))}" for e in gone) + "</p>"
+    return out + "</section>"
 
 
 class App:
@@ -797,7 +843,9 @@ class App:
                 body.append(f"<p>{link_ids(tr['summary'])}</p>")
             if "findings" in tr:
                 items = []
+                lifes = tr.get("life") if isinstance(tr.get("life"), list) else []  # reviews stored before the ledger have none
                 for i, f in enumerate((normalize_finding(x) for x in tr.get("findings") or []), 1):
+                    badge = life_badge(lifes[i - 1]) if i <= len(lifes) else ""
                     disc = ""
                     if self.allows("chat"):
                         disc = (f"<a class='chat-link' data-chat='finding-{i}' href='/api/snapshots/{html.escape(sid)}/chat/finding-{i}'>"
@@ -807,10 +855,11 @@ class App:
                           + (f"<dt>Evidence</dt><dd><ul>{ev}</ul></dd>" if ev else "")
                           + (f"<dt>Fix</dt><dd>{link_ids(f['fix'])}</dd>" if f.get("fix") else ""))
                     items.append(f"<li><div class='fh'><span class='n'>{i}</span>{sev(f.get('severity'))}"
-                                 f"<code class='where'>{link_ids(f.get('where', ''))}</code><span class='fs'>{link_ids(f.get('summary', ''))}</span>{disc}</div>"
+                                 f"<code class='where'>{link_ids(f.get('where', ''))}</code><span class='fs'>{link_ids(f.get('summary', ''))}</span>{badge}{disc}</div>"
                                  + (f"<dl>{dl}</dl>" if dl else "") + "</li>")
                 if items:
                     body.append(f"<ol class='flist'>{''.join(items)}</ol>")
+                body.append(still_open_html(tr))  # empty for a review without a ledger
             else:  # older stores: only the rendered Markdown
                 md = self.store.get(f"{sid}/triage.md").decode() if self.store.exists(f"{sid}/triage.md") else ""
                 body.append(f"<div class='review'>{md_to_html(md)}</div>")
