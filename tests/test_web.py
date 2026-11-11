@@ -23,7 +23,8 @@ def store(tmp_path):
         st.put_json(f"{sid}/summary.json", {"captured_at": f"2026-11-05T{9 + i:02d}:00:00+00:00", "metrics_kind": "interval", "mode": "adhoc",
                                             "load_profile": {"elapsed_s": 60, "xact_commit": 10 + i, "avg_active_sessions": 1.0 + i},
                                             "top_sql": [{"sql_id": "q1", "calls": 3, "total_time_ms": 30 + i, "mean_time_ms": 1.0 + i, "plan_hash": 100 + i, "text": "select 1"}],
-                                            "wait_events": [], "tables": [], "sessions": [], "findings": []})
+                                            "wait_events": [], "tables": [], "sessions": [], "findings": [],
+                                            "settings": {"work_mem": "4MB" if i == 0 else "64MB", "jit": "on"}})
         st.put_json(f"{sid}/triage.json", {"severity": "high", "title": "Bad query", "source": "rules"})
         st.put_text(f"{sid}/triage.md", "**[HIGH] demo** - Bad query\n- evidence")
         st.put_text(f"{sid}/awr.txt", "WORKLOAD REPOSITORY")
@@ -379,6 +380,7 @@ def test_finding_cell_status_and_compare_search(tmp_path):
     page = app.compare_page("demo", None, None).decode()
     assert "<h1>Compare</h1>" in page and page.count("<option value='postgres/demo/2026-11-05/20261105T100000Z'") == 2 and "selected>2026-11-05 10:00:00" in page
     assert "Heuristic findings" in page and "<figure class='chart'>" in page and "Baseline</span>" in page
+    assert "<h2>Settings changed</h2>" in page and "<td><code>work_mem</code></td><td class=mono>4MB</td><td class=mono>64MB</td>" in page and "<code>jit</code>" not in page
     assert "pick two different snapshots" in app.compare_page("demo", SID, SID).decode()
     s = app.search("dem").decode()
     assert "<a class='btn' href='/t/demo'>demo</a>" in s and "Nothing matched" not in s

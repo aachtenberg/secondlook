@@ -367,6 +367,10 @@ def finding_cell(title: str | None, where: str | None = None) -> str:
     return f"<div class='finding'><span>{text}</span>{chip}</div>"
 
 
+def _show(v) -> str:
+    return "unset" if v is None else str(v)
+
+
 def _fmt_ts(iso: str | None) -> str:
     return (iso or "")[:19].replace("T", " ")
 
@@ -920,7 +924,7 @@ class App:
         ids = list(reversed(self.store.list_snapshots(t.engine, name)))
         if not ids:
             return self.page("compare.html", "compare", active=name, target=html.escape(name), engine=t.engine, a_opts="", b_opts="",
-                             notice=self._notice("no snapshots yet", "bad"), tiles="", charts="", findings="", sql="")
+                             notice=self._notice("no snapshots yet", "bad"), tiles="", charts="", findings="", settings="", sql="")
         a = a if a in ids else ids[0]
         if b not in ids:
             m = self.manifest_of(a)
@@ -930,7 +934,7 @@ class App:
         def opts(sel):
             return "".join(f"<option value='{html.escape(sid)}'{' selected' if sid == sel else ''}>{when[sid]}</option>" for sid in ids)
 
-        notice, tiles, chart_html, findings_html, sql_html = "", "", "", "", ""
+        notice, tiles, chart_html, findings_html, settings_html, sql_html = "", "", "", "", "", ""
         if not b or b == a:
             notice = self._notice("pick two different snapshots", "bad")
         else:
@@ -952,6 +956,11 @@ class App:
                 if found:
                     lis = "".join(f"<li>{sev(f.get('severity'))} {html.escape(f.get('title', ''))}" + (f"<ul><li>{html.escape(f['detail'])}</li></ul>" if f.get("detail") else "") + "</li>" for f in found[:8])
                     findings_html = f"<section class='card review'><h2>Heuristic findings</h2><ol>{lis}</ol></section>"
+                if changed := c.get("settings_changed"):  # parameters that moved inside the window, beside the regressions
+                    trs = "".join(f"<tr><td><code>{html.escape(str(r.get('name')))}</code></td><td class=mono>{html.escape(_show(r.get('before')))}</td>"
+                                  f"<td class=mono>{html.escape(_show(r.get('after')))}</td></tr>" for r in changed)
+                    settings_html = (f"<section class='card flush'><div class='cardhead'><h2>Settings changed</h2><span class='mut'>{len(changed)}</span></div>"
+                                     f"<div class='scroll'><table class='list'><thead><tr><th>parameter</th><th>before</th><th>after</th></tr></thead><tbody>{trs}</tbody></table></div></section>")
                 sq = c.get("sql") or {}
                 parts = []
                 for key, label in (("new", "New"), ("changed", "Changed"), ("gone", "Gone")):
@@ -965,7 +974,7 @@ class App:
                                  f"<thead><tr><th>sql id</th><th>share</th><th class=r>calls</th><th class=r>mean ms</th><th>plan</th><th>text</th></tr></thead><tbody>{trs}</tbody></table></div></section>")
                 sql_html = "".join(parts)
         return self.page("compare.html", f"compare {name}", active=name, target=html.escape(name), engine=t.engine, a_opts=opts(a), b_opts=opts(b),
-                         notice=notice, tiles=tiles, charts=chart_html, findings=findings_html, sql=sql_html)
+                         notice=notice, tiles=tiles, charts=chart_html, findings=findings_html, settings=settings_html, sql=sql_html)
 
     def search(self, q: str) -> bytes:
         """Targets by name, SQL ids seen in any snapshot's top SQL, and snapshot ids: enough to jump anywhere."""

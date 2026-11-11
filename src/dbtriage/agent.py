@@ -293,6 +293,7 @@ def _impact(kind: str) -> str:
         "stale_stats": "The optimizer is planning on stale row counts.",
         "seq_scans": "Full scans on a large table drive I/O and CPU.",
         "throughput_drop": "Either load fell, or requests are queueing somewhere upstream.",
+        "setting_changed": "A configuration change landed in this window; any regression here may be its effect.",
     }.get(kind, "See evidence.")
 
 
@@ -313,4 +314,5 @@ def _advice(f: dict) -> str:
         "stale_stats": "Gather optimizer statistics on the table (DBMS_STATS / ANALYZE).",
         "seq_scans": "Check whether a supporting index exists and is being used; look for implicit casts or new predicates.",
         "throughput_drop": "Confirm with application metrics whether load dropped or requests are queueing.",
+        "setting_changed": "Verify the change was intended and recorded; if a regression in this window followed it, the rollback is to set the parameter back to its previous value.",
     }.get(k, f"Investigate: {f['title']}")
