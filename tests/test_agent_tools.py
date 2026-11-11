@@ -44,8 +44,10 @@ def test_tools_read_compare_history_changes_submit(tmp_path):
     ch = json.loads(tools["get_recent_changes"].call({"snapshot_id": ids[-1], "hours": 48}))
     assert [c["description"] for c in ch] == ["v2"]
 
-    bad = {"severity": "critical", "where": "q1", "summary": "s", "impact": "i", "evidence": [], "fix": "f"}
+    bad = {"severity": "critical", "kind": "sql_regressed", "subject": "q1", "where": "q1", "summary": "s", "impact": "i", "evidence": [], "fix": "f"}
     assert "severity must be" in tools["submit_review"].call({"findings": [bad], "summary": "s", "checked": "c", "confidence": "low"})
+    odd = dict(bad, severity="low", kind="slow_query")
+    assert "kind must be one of" in tools["submit_review"].call({"findings": [odd], "summary": "s", "checked": "c", "confidence": "low"})
     low = dict(bad, severity="low"); high = dict(bad, severity="high", summary="High one")
     assert tools["submit_review"].call({"findings": [low, high], "summary": "s", "checked": "c", "confidence": "high"}) == "recorded"
     assert agent.result["severity"] == "high" and agent.result["title"] == "High one"
@@ -54,6 +56,7 @@ def test_tools_read_compare_history_changes_submit(tmp_path):
     rules = rule_based_triage(cmp)
     assert rules["severity"] == cmp["severity"] and rules["source"] == "rules"
     assert rules["findings"][0]["fix"] and rules["findings"][0]["where"].startswith("sql_id ")
+    assert rules["findings"][0]["kind"] == "sql_regressed" and rules["findings"][0]["where"] == f"sql_id {rules['findings'][0]['subject']}"
 
 
 def test_triage_falls_back_to_rules_when_provider_fails(tmp_path, monkeypatch, capsys):

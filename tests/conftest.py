@@ -110,7 +110,7 @@ class FakeLLM:
                 return self._msg(calls=[("get_report", {"snapshot_id": cur, "section": "load_profile"})])
             if done_tools == 1:
                 return self._msg(calls=[("submit_review", {
-                    "findings": [{"severity": "medium", "where": "fake finding", "summary": "Fake model saw the comparison",
+                    "findings": [{"severity": "medium", "kind": "other", "subject": "", "where": "fake finding", "summary": "Fake model saw the comparison",
                                   "impact": "None, this is a test.", "evidence": ["one tool call before submitting"], "fix": "Nothing to fix."}],
                     "summary": "Fake review written over the real tool loop.", "checked": "comparison", "confidence": "low"})])
             return self._msg("done")
