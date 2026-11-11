@@ -30,8 +30,8 @@ The bets below lean on these facts, so they are stated once.
 - The model's finding has severity, kind, subject, a free-text `where`, summary, impact, evidence and fix. `findings.py` holds the one matcher (identity, `same_finding`, `match`) that joins a model finding to a rules finding or to the same finding in an earlier snapshot. *(Done: the groundwork below.)*
 - Every collector stores a `settings` section, and `compare.py` diffs it: `setting_changed` findings, a `settings_changed` list in `compare.json`, and the changed names attached as evidence to regressions, plan changes and wait shifts in the same window. *(Done: the first half of bet 3.)*
 - `get_recent_changes` reads an optional local `changes.json`, by path, at review time.
-- Jira and Plane delivery creates a new issue per run and discards the response. No ticket id is stored. The delivery gate (`min_severity`) is on the whole run's severity, not on a finding.
-- Storage is per-snapshot prefixes on local disk, S3, Azure or Postgres, with an outage spool. There is no cross-snapshot object per target.
+- Jira and Plane delivery keeps the created issue's key, id and url on the finding's ledger entry, comments on it for worse and cleared findings, and the `min_severity` gate is per finding (new or worse) when the review carries `life`; legacy reviews keep the whole-run gate. *(Done: bet 2.)*
+- Storage is per-snapshot prefixes on local disk, S3, Azure or Postgres, with an outage spool. The one cross-snapshot object is the per-target ledger `<engine>/<target>/findings.json`, written through the same interface and rebuildable with `dbtriage rebuild-ledger`. *(Done: bet 2.)*
 - The model run stores provider, model, token usage, a tool-call count, and `tools.json`: every tool call with its arguments and a truncated result, written even when the run fails. *(Done: the prerequisite for bet 8.)*
 - There is no SQL text hash. `sql_id` is engine-specific and SQL text is redacted before storage.
 
@@ -47,7 +47,7 @@ This is a small schema change and one pure function with unit tests. It is the f
 
 Ranked by how sharply they differ, and by how much of the current pipeline they reuse (snapshot store, `compare.py` finding kinds, rules review plus model review, Jira and Plane delivery, MCP).
 
-### 1. Rules and model on the same review
+### 1. Rules and model on the same review *(landed)*
 
 Both paths already run on every run, and both are already stored in `triage.json`. What the reader does not see is agreement.
 
@@ -57,7 +57,7 @@ Regulated buyers trust a review they can diff. Almost no AI database tool keeps 
 
 This goes first because it is the cheapest proof that the matcher works, on data that already exists.
 
-### 2. A finding that stays a finding
+### 2. A finding that stays a finding *(landed)*
 
 Today every run writes a fresh review. The same `sql_id` can page the channel every hour. `min_severity` only drops quiet runs. It does not remember yesterday’s high finding.
 
@@ -78,7 +78,7 @@ Nobody in the pack writes that life next to a prose review. Dashboards mute aler
 
 The prompt already tells the model to correlate only when the data supports it. The missing half is a real feed. It has a free first half and an integration second half.
 
-**First: diff the settings.** Every snapshot already stores `settings`. Teach `compare.py` to diff current against baseline and emit a `setting_changed` finding (name, before, after) with low severity on its own, and attach it as evidence to any `sql_regressed`, `plan_change` or `wait_shift` in the same window. No integration, no new config, and the correlation line is true for parameter changes on day one.
+**First: diff the settings** *(landed)*. Every snapshot already stores `settings`. Teach `compare.py` to diff current against baseline and emit a `setting_changed` finding (name, before, after) with low severity on its own, and attach it as evidence to any `sql_regressed`, `plan_change` or `wait_shift` in the same window. No integration, no new config, and the correlation line is true for parameter changes on day one.
 
 **Second: deploys.** Replace the local-file read in `get_recent_changes` with a feed interface, with the file as one implementation, and add GitHub and GitLab deployment sources, stats jobs and failovers. The feed is fetched at capture time and stored with the snapshot, so the review never reads outside the store.
 
@@ -133,6 +133,8 @@ One prerequisite: the model run stores only a tool-call count today. Capture the
 Datadog exports charts. The model chat exports a transcript. The bundle is the review plus the evidence, with the safety properties intact (literals masked, credentials absent).
 
 ## What to build first
+
+Status on 2026-11-10: the groundwork, bets 1 and 2, the settings diff and the tool transcript are on branch `feat/finding-identity`. Next is the deploy feed half of bet 3.
 
 The groundwork (kind and subject on the model's finding, one matcher), then bets 1 and 2, then the settings diff from bet 3, then deploy feeds.
 
