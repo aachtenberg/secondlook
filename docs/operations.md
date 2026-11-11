@@ -153,6 +153,9 @@ two snapshots compared.
 
 The model fills in this structure by calling one tool, `submit_review`, and `report.py` turns it into text. So
 every review looks the same whichever model, or the rules, wrote it, and the same text goes to every channel.
+Each finding also carries a `kind` from the rules' vocabulary (`sql_regressed`, `plan_change`, `wait_shift`, ...)
+and a `subject`, the exact sql_id, table, wait class or parameter it names; `findings.py` joins on those two to say
+when the model and the rules found the same thing, or when a finding is the same one as in the previous snapshot.
 
 The reviewer's tools are `get_report`, `get_raw_report` (pages through the AWR text), `compare_snapshots`,
 `get_sql_history`, `get_recent_changes` and `submit_review`. Reports are never pasted into the prompt; the model

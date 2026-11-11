@@ -14,6 +14,7 @@ from anthropic import beta_tool  # used only to derive JSON schemas from the doc
 from pydantic import BaseModel, Field
 
 from dbtriage import compare as cmp
+from dbtriage.findings import KINDS, SUBJECT_KEYS, known_kind, subject_of
 from dbtriage.llm import Backend, ToolSpec
 from dbtriage.storage import Storage
 
@@ -30,11 +31,18 @@ fix. Report only problems the data supports; say when it is inconclusive. Severi
 imminent risk; medium = degraded but coping; low = a real but minor problem. At most 5 findings, most severe
 first. Each finding names one thing (a SQL id, a table, a wait class, a parameter), states the problem in at most
 about 15 words, then Impact in one sentence, Evidence as specific numbers, and a Fix of one or two sentences that
-is safe and says how to roll back if it changes the database. If nothing is wrong, say so and list what you checked.
+is safe and says how to roll back if it changes the database. Give each finding a kind from the fixed list in the
+tool schema (other when none fits) and a subject: the one thing it names, exactly as the reports print it, so for a
+SQL finding the sql_id verbatim, otherwise the table name, wait class, parameter name or session id, and empty when
+there is none. These two fields are how a finding is matched to the rules and to earlier reviews; where is the
+display text. If nothing is wrong, say so and list what you checked.
 Finish by calling submit_review exactly once."""
 
 class Finding(BaseModel):
     severity: str = Field(description="high, medium or low")
+    kind: str = Field(description="One of: " + ", ".join(KINDS) + ". Use other when none fits")
+    subject: str = Field(description="The one thing named, exactly as the reports print it: a sql_id, table name, wait class, "
+                                     "parameter name or session id. Empty string when there is none")
     where: str = Field(description="What the finding is about: a sql_id, table, wait class, parameter or session")
     summary: str = Field(description="The problem in at most about 15 words")
     impact: str = Field(description="What fails or degrades, and when, in one sentence")
@@ -179,6 +187,9 @@ class TriageAgent:
             bad = [f.severity for f in findings if f.severity not in ("high", "medium", "low")]
             if bad:
                 return f"severity must be high, medium or low (got {bad})"
+            bad = [f.kind for f in findings if not known_kind(f.kind)]
+            if bad:
+                return f"kind must be one of {', '.join(KINDS)} (got {bad})"
             rank = {"high": 0, "medium": 1, "low": 2}
             fs = sorted(findings[:5], key=lambda f: rank[f.severity])
             agent.result = {
@@ -256,7 +267,7 @@ def rule_based_triage(comparison: dict) -> dict:
                 "confidence": "medium", "findings": [], "source": "rules"}
     findings = [{
         "severity": f["severity"] if f["severity"] in ("high", "medium", "low") else "low",
-        "where": _where(f), "summary": f["title"][:120],
+        "kind": f["kind"], "subject": subject_of(f), "where": _where(f), "summary": f["title"][:120],
         "impact": _impact(f["kind"]),
         "evidence": ([f["detail"]] if f.get("detail") else []) + [f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in (f.get("evidence") or {}).items() if k != "sql_id"][:3],
         "fix": _advice(f),
@@ -270,8 +281,9 @@ def rule_based_triage(comparison: dict) -> dict:
 
 
 def _where(f: dict) -> str:
+    """Display text: the subject with its evidence key in front, or the kind when nothing is named."""
     e = f.get("evidence") or {}
-    for k in ("sql_id", "table", "class", "metric"):
+    for k in SUBJECT_KEYS:
         if e.get(k):
             return f"{k} {e[k]}"
     return f["kind"].replace("_", " ")
