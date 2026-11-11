@@ -29,7 +29,7 @@ The bets below lean on these facts, so they are stated once.
 - The rules run on every run, not only when the model fails. `compare.py` produces ranked findings with a stable `kind` (`sql_regressed`, `plan_change`, `wait_shift`, `deadlocks`, `blocking`, …) and structured evidence (sql id, wait class, sessions). The CLI copies them into `triage.json` as `heuristics`, next to the model's findings.
 - The model's finding has severity, kind, subject, a free-text `where`, summary, impact, evidence and fix. `findings.py` holds the one matcher (identity, `same_finding`, `match`) that joins a model finding to a rules finding or to the same finding in an earlier snapshot. *(Done: the groundwork below.)*
 - Every collector stores a `settings` section, and `compare.py` diffs it: `setting_changed` findings, a `settings_changed` list in `compare.json`, and the changed names attached as evidence to regressions, plan changes and wait shifts in the same window. *(Done: the first half of bet 3.)*
-- `get_recent_changes` reads an optional local `changes.json`, by path, at review time.
+- Every capture reads the target's change feed (a changes file, GitHub or GitLab deployments) for its window plus a lookback and stores it as `changes.json`; `compare.py` writes the deploys in or just before the window into the evidence of regressions, new statements, plan changes and wait shifts, and `get_recent_changes` reads the stored feed. *(Done: bet 3.)*
 - Jira and Plane delivery keeps the created issue's key, id and url on the finding's ledger entry, comments on it for worse and cleared findings, and the `min_severity` gate is per finding (new or worse) when the review carries `life`; legacy reviews keep the whole-run gate. *(Done: bet 2.)*
 - Storage is per-snapshot prefixes on local disk, S3, Azure or Postgres, with an outage spool. The one cross-snapshot object is the per-target ledger `<engine>/<target>/findings.json`, written through the same interface and rebuildable with `dbtriage rebuild-ledger`. *(Done: bet 2.)*
 - The model run stores provider, model, token usage, a tool-call count, and `tools.json`: every tool call with its arguments and a truncated result, written even when the run fails. *(Done: the prerequisite for bet 8.)*
@@ -74,13 +74,13 @@ One interaction to watch: the review caps at five findings. A still-open finding
 
 Nobody in the pack writes that life next to a prose review. Dashboards mute alerts. Tuners open a new suggestion. The snapshot history to do this is already stored.
 
-### 3. The change that sits beside the regression
+### 3. The change that sits beside the regression *(landed)*
 
 The prompt already tells the model to correlate only when the data supports it. The missing half is a real feed. It has a free first half and an integration second half.
 
 **First: diff the settings** *(landed)*. Every snapshot already stores `settings`. Teach `compare.py` to diff current against baseline and emit a `setting_changed` finding (name, before, after) with low severity on its own, and attach it as evidence to any `sql_regressed`, `plan_change` or `wait_shift` in the same window. No integration, no new config, and the correlation line is true for parameter changes on day one.
 
-**Second: deploys.** Replace the local-file read in `get_recent_changes` with a feed interface, with the file as one implementation, and add GitHub and GitLab deployment sources, stats jobs and failovers. The feed is fetched at capture time and stored with the snapshot, so the review never reads outside the store.
+**Second: deploys** *(landed)*. Replace the local-file read in `get_recent_changes` with a feed interface, with the file as one implementation, and add GitHub and GitLab deployment sources, stats jobs and failovers. The feed is fetched at capture time and stored with the snapshot, so the review never reads outside the store.
 
 The review line that matters is specific: “plan hash changed in this window; deploy `billing@1.4.2` landed 6 minutes earlier.” AWR shows the plan change. Datadog shows the deploy on another screen. The written sentence that ties them, with both ids, is the product.
 
@@ -134,7 +134,7 @@ Datadog exports charts. The model chat exports a transcript. The bundle is the r
 
 ## What to build first
 
-Status on 2026-11-10: the groundwork, bets 1 and 2, the settings diff and the tool transcript are on branch `feat/finding-identity`. Next is the deploy feed half of bet 3.
+Status on 2026-11-11: the groundwork, bets 1, 2 and 3 and the tool transcript have landed. Next is bet 4, the fleet note, which now has the deploy id to join findings across targets.
 
 The groundwork (kind and subject on the model's finding, one matcher), then bets 1 and 2, then the settings diff from bet 3, then deploy feeds.
 

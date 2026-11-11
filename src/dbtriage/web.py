@@ -65,7 +65,7 @@ from dbtriage.storage import Storage, StorageUnavailable, describe as describe_s
 DEFAULTS = {
     "title": "dbtriage", "brand": "dbtriage", "logo": None, "accent": "#3dd68c", "theme": "auto",
     "refresh_seconds": 30, "page_size": 50, "footer": "", "custom_css": None, "templates_dir": None,
-    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "awr.txt", "addm.txt"],
+    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "changes.json", "awr.txt", "addm.txt"],
     "severity_colors": {"high": "#c42f2f", "medium": "#a8540a", "low": "#8a6a00", "info": "#17804a"},
 }
 
@@ -419,6 +419,15 @@ def _show(v) -> str:
 
 def _fmt_ts(iso: str | None) -> str:
     return (iso or "")[:19].replace("T", " ")
+
+
+def _change_link(c: dict) -> str:
+    """A feed item's description, linked to its deployment or commit when the feed gave one (http(s) only)."""
+    text = html.escape(str(c.get("description") or ""))
+    link = str(c.get("link") or "")
+    if link.startswith(("https://", "http://")):
+        return f"<a href='{html.escape(link)}' rel='noopener' target='_blank'>{text}</a>"
+    return text
 
 
 LIFE_LABEL = {"new": "new", "still_open": "still open", "worse": "worse", "quiet": "quiet", "returned": "returned",
@@ -1077,6 +1086,11 @@ class App:
                                   f"<td class=mono>{html.escape(_show(r.get('after')))}</td></tr>" for r in changed)
                     settings_html = (f"<section class='card flush'><div class='cardhead'><h2>Settings changed</h2><span class='mut'>{len(changed)}</span></div>"
                                      f"<div class='scroll'><table class='list'><thead><tr><th>parameter</th><th>before</th><th>after</th></tr></thead><tbody>{trs}</tbody></table></div></section>")
+                if feed := c.get("changes"):  # deploys and jobs from the stored feed that sit in or just before the window
+                    trs = "".join(f"<tr><td class=mono>{html.escape(_fmt_ts(r.get('time')))}</td><td>{html.escape(str(r.get('kind') or ''))}</td>"
+                                  f"<td>{_change_link(r)}</td></tr>" for r in feed[:10])
+                    settings_html += (f"<section class='card flush changes'><div class='cardhead'><h2>Changes</h2><span class='mut'>{len(feed)}</span></div>"
+                                      f"<div class='scroll'><table class='list'><thead><tr><th>when</th><th>kind</th><th>what</th></tr></thead><tbody>{trs}</tbody></table></div></section>")
                 sq = c.get("sql") or {}
                 parts = []
                 for key, label in (("new", "New"), ("changed", "Changed"), ("gone", "Gone")):

@@ -154,3 +154,40 @@ def test_identical_engine_findings_are_said_once():
     found = compare(awr("cur"), awr("base"))["findings"]
     engine = [(f["kind"], f["title"]) for f in found if f["kind"].startswith("engine_")]
     assert len(engine) == 2 and engine.count(("engine_information", "There was no significant database activity to run the ADDM.")) == 1
+
+
+def test_deploy_beside_the_regression_is_evidence():
+    """A deploy inside the window, or up to correlate_minutes before it, lands in the evidence of every regression,
+    new statement, plan change and wait shift, next to the settings change; other kinds and far-off items do not."""
+    s0 = snap(0, {"q1": (0, 0), "q2": (0, 0)})
+    s1 = snap(10, {"q1": (1000, 10000), "q2": (1000, 1000)})
+    s2 = snap(20, {"q1": (2000, 60000), "q2": (2000, 2000), "q3": (10, 30000)})  # window 10:10 - 10:20; q3 is new
+    feed = [{"time": "2026-11-05T10:04:00+00:00", "kind": "deploy", "description": "billing@1.4.2 to production", "link": "https://x", "source": "github"},
+            {"time": "2026-11-05T09:30:00+00:00", "kind": "deploy", "description": "billing@1.4.1 to production", "link": None, "source": "github"},
+            {"time": "2026-11-05T10:15:00+00:00", "kind": "other", "description": "github: HTTP Error 401", "link": None, "source": "github", "error": True},
+            {"time": "2026-11-05T10:12:00+00:00", "kind": "job", "description": "nightly stats", "link": None, "source": "file"},
+            {"time": "2026-11-05T10:25:00+00:00", "kind": "deploy", "description": "after the window", "link": None, "source": "file"}]
+    out = compare(s2, s1, s0, changes=feed)
+    want = [{"time": "2026-11-05T10:04:00+00:00", "kind": "deploy", "description": "billing@1.4.2 to production"},
+            {"time": "2026-11-05T10:12:00+00:00", "kind": "job", "description": "nightly stats"}]
+    assert [c["description"] for c in out["changes"]] == ["billing@1.4.2 to production", "nightly stats"] and out["changes"][0]["link"] == "https://x"
+    kinds = {f["kind"]: f for f in out["findings"]}
+    assert {"sql_regressed", "sql_new", "wait_shift"} <= set(kinds)
+    for k in ("sql_regressed", "sql_new", "wait_shift"):
+        assert kinds[k]["evidence"]["changes"] == want, k
+    wide = compare(s2, s1, s0, changes=feed, correlate_minutes=60)  # a wider margin takes the 09:30 deploy too
+    assert [c["description"] for c in wide["changes"]][0] == "billing@1.4.1 to production"
+    tight = compare(s2, s1, s0, changes=feed, correlate_minutes=5)
+    assert [c["description"] for c in tight["changes"]] == ["nightly stats"]
+    plain = compare(s2, s1, s0)  # every existing caller: nothing attached, the key is still there
+    assert plain["changes"] == [] and "changes" not in {f["kind"]: f for f in plain["findings"]}["sql_regressed"]["evidence"]
+    assert compare(s2, s1, s0, changes=[{"kind": "deploy"}, "junk", {"time": "never", "kind": "deploy"}])["changes"] == []
+
+
+def test_interval_window_without_a_start_uses_elapsed():
+    from dbtriage.compare import changes_near
+
+    feed = [{"time": "2026-11-05T09:40:00+00:00", "kind": "deploy", "description": "d"}]
+    assert changes_near(feed, None, "2026-11-05T10:20:00+00:00", 1800, 30) == feed  # window 09:50-10:20, margin to 09:20
+    assert changes_near(feed, None, "2026-11-05T10:20:00+00:00", 600, 5) == []
+    assert changes_near(feed, "2026-11-05T09:40:00", "2026-11-05T10:20:00+00:00", None, 0) == feed  # a naive start is read in the end's zone

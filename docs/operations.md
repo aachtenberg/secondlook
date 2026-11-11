@@ -298,5 +298,4 @@ database inside the container, so a recreate starts it over too, AWR history inc
   statements when plans are evicted.
 - Statspack, for Oracle Standard Edition. Taking Statspack snapshots can already plug in through the
   `dbtriage.db_snapshot` entry point ([configuration](configuration.md#letting-dbtriage-take-snapshots-on-the-database)); reading them is the missing part.
-- A real change feed behind `get_recent_changes`, such as GitLab deployments and parameter-change audits.
 - A weekly trend digest across many snapshots.

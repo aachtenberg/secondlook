@@ -30,7 +30,7 @@ engine = "oracle"                    # postgres | oracle | mysql | sqlserver
 dsn_env = "PROD_DB_3_DSN"            # read the connection string from this environment variable
 diagnostics_pack = true              # Oracle only: you hold the licence for AWR/ASH/ADDM
 create_snapshot = "off"              # snapshot on the database first: off | incident | always (opt-in, below)
-changes_file = "changes/prod-db-3.json"   # optional list of recent deploys, for context
+changes_file = "changes/prod-db-3.json"   # optional list of recent deploys; or a [targets.prod-db-3.changes] feed (below)
 baseline_policy = "same-time-last-week"   # what to compare against (below)
 schedule = "0 * * * *"               # optional: run hourly (see web.md, Scheduling)
 ```
@@ -91,8 +91,40 @@ settings file with owner-only permissions and shown masked afterwards.
 If a `dsn_env` variable is not set, only that database is affected: dbtriage says so when it starts, the others
 keep working, and a run for that database stops with a clear message until the variable is set.
 
-Relative paths in `targets.toml` (a `file://./data` store, `changes_file`, `logo`, `custom_css`,
-`templates_dir`) are relative to `targets.toml` itself, not to the directory you start dbtriage from.
+Relative paths in `targets.toml` (a `file://./data` store, `changes_file`, a change feed's `path`, `logo`,
+`custom_css`, `templates_dir`) are relative to `targets.toml` itself, not to the directory you start dbtriage from.
+
+## The change feed
+
+A regression is easier to read next to the change that sits beside it. Every snapshot already diffs the database's
+own settings; a `changes` table on a database adds deploys. The feed is read when the snapshot is taken, for the
+window plus `lookback_hours`, and stored with it as `changes.json`, so the review and every tool read only the
+store and a review written later sees exactly what was known at capture time. A deploy inside the window, or up
+to `correlate_minutes` before it, is written into the evidence of every regressed or new statement, plan change
+and wait shift in the comparison, next to the settings that changed, and the rules review says it in one line:
+"deploy billing@1.4.2 to production landed 6 minutes before the window".
+
+```toml
+[targets.prod-db-3.changes]
+source = "github"                    # file | github | gitlab
+repo = "acme/billing"                # github: owner/name
+# project = "acme/billing"           # gitlab: the project path or numeric id
+environment = "production"           # optional: only this environment's deployments
+token_env = "GITHUB_TOKEN"           # the forge token's environment variable; blank reads anonymously
+# base_url = "https://gitlab.example.com"   # GitHub Enterprise's API host, or your GitLab instance
+# releases = true                    # github: read releases when the repository records no deployments
+lookback_hours = 48                  # how far before the window the feed is read
+correlate_minutes = 30               # a change this long before the window still sits beside a regression
+```
+
+`source = "file"` with `path = "changes/prod-db-3.json"` reads a JSON list you keep yourself, each item
+`{"time", "kind", "description", "link"}` with an ISO time; `changes_file = "..."` on the database is the short
+form of that. Kinds are `deploy`, `parameter`, `job`, `failover` and `other`; a few common spellings
+(`release`, `maintenance`, `config`, `switchover`) are mapped onto them. Only the first four are evidence: `other`
+holds notes and the one line a feed leaves when it could not be read, so an unreachable forge never fails a
+capture and the review can say the feed was down. The feed is read through the same proxy and trust store as every
+other outbound call (`HTTPS_PROXY`, `AWS_CA_BUNDLE`), with a ten-second timeout. Items that arrive through
+`dbtriage serve` are not a source yet.
 
 Cloud or on-premises makes no difference: dbtriage needs a network path and a credential. RDS, Cloud SQL and
 Azure Database for PostgreSQL or MySQL work as they are. For Oracle on RDS, set `diagnostics_pack` to match the
