@@ -56,6 +56,39 @@ def test_tools_read_compare_history_changes_submit(tmp_path):
     assert rules["findings"][0]["fix"] and rules["findings"][0]["where"].startswith("sql_id ")
 
 
+def test_run_stores_the_tool_transcript(tmp_path):
+    """tools.json next to triage.json: every call in order, with its arguments and a truncated result."""
+    from dbtriage import llm
+
+    st = _store(tmp_path)
+    ids = st.list_snapshots("postgres", "demo")
+    st.put_text(f"{ids[-1]}/awr.txt", "AWR REPORT " * 500)  # 5500 chars: longer than one stored result may be
+
+    class Scripted:
+        name = "fake"
+
+        def run(self, system, task, tools, max_iterations=25, require_tool=None, stop_when=None):
+            by = {t.name: t.fn for t in tools}
+            by["compare_snapshots"]({"snapshot_id": ids[-1], "baseline_id": ids[-2]})
+            by["get_raw_report"]({"snapshot_id": ids[-1], "name": "awr.txt", "offset": 0, "length": 5000})
+            by["get_raw_report"]({"snapshot_id": ids[-1], "name": "missing.txt"})
+            finding = {"severity": "high", "where": "sql_id q1", "summary": "Slow", "impact": "i", "evidence": [], "fix": "f"}
+            by["submit_review"]({"findings": [finding], "summary": "s", "checked": "c", "confidence": "high"})
+            return llm.AgentResult(text="", stop_reason="tool_use", model="m", tool_calls=4)
+
+    result = TriageAgent(st, Scripted()).run("postgres", "demo", ids[-1], ids[-2], "adhoc")
+    assert result["tool_calls"] == 4 and result["tools_file"] == "tools.json"
+    log = st.get_json(f"{ids[-1]}/tools.json")
+    assert log["snapshot"] == ids[-1] and log["provider"] == "fake" and log["model"] == "m"
+    calls = log["calls"]
+    assert [c["n"] for c in calls] == [1, 2, 3, 4]
+    assert [c["tool"] for c in calls] == ["compare_snapshots", "get_raw_report", "get_raw_report", "submit_review"]
+    assert calls[0]["args"] == {"snapshot_id": ids[-1], "baseline_id": ids[-2]} and all(isinstance(c["ms"], int) for c in calls)
+    long = calls[1]["result"]
+    assert long.startswith("[chars 0-5000 of 5500]") and long.endswith("... (5023 chars)") and len(long) < 2100
+    assert calls[2]["result"].startswith("no report 'missing.txt'") and calls[3]["result"] == "recorded"  # short results are kept whole
+
+
 def test_triage_falls_back_to_rules_when_provider_fails(tmp_path, monkeypatch, capsys):
     from dbtriage import cli
     from dbtriage.config import Config, Target
@@ -143,12 +176,15 @@ def test_silent_model_and_missing_key_fall_back_to_the_rules(tmp_path, monkeypat
 
     class Silent:
         name = "silent"
-        def run(self, *a, **k):
-            return llm.AgentResult(text="I think it is fine.", stop_reason="end_turn", model="m", tool_calls=2)
+        def run(self, system, task, tools, **k):
+            next(t for t in tools if t.name == "compare_snapshots").fn({"snapshot_id": sid, "baseline_id": base})
+            return llm.AgentResult(text="I think it is fine.", stop_reason="end_turn", model="m", tool_calls=1)
 
     monkeypatch.setattr(llm, "make_backend", lambda c: Silent())
     r, _ = triage(cfg, st, sid, base, "adhoc", True)
     assert r["source"] == "rules" and "without submitting a review" in r["agent_error"] and r["findings"], r
+    log = st.get_json(f"{sid}/tools.json")  # the transcript is what explains a silent model, so it is kept anyway
+    assert [c["tool"] for c in log["calls"]] == ["compare_snapshots"] and log["model"] == "m"
     monkeypatch.setattr(llm, "make_backend", lambda c: (_ for _ in ()).throw(SystemExit("[agent] GROQ_API_KEY is not set")))
     r, _ = triage(cfg, st, sid, base, "adhoc", True)
     assert r["source"] == "rules" and "GROQ_API_KEY is not set" in r["agent_error"]

@@ -63,7 +63,7 @@ from dbtriage.storage import Storage, StorageUnavailable, describe as describe_s
 DEFAULTS = {
     "title": "dbtriage", "brand": "dbtriage", "logo": None, "accent": "#3dd68c", "theme": "auto",
     "refresh_seconds": 30, "page_size": 50, "footer": "", "custom_css": None, "templates_dir": None,
-    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "awr.txt", "addm.txt"],
+    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "awr.txt", "addm.txt"],
     "severity_colors": {"high": "#c42f2f", "medium": "#a8540a", "low": "#8a6a00", "info": "#17804a"},
 }
 

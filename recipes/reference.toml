@@ -113,7 +113,7 @@ channels = ["stdout"]
 # footer = "Internal tool: questions to #dba"
 # custom_css = "branding/theme.css"    appended after the built-in styles
 # templates_dir = "branding/templates" replace any page template, file by file
-# files = ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "awr.txt", "addm.txt"]   files shown on a snapshot page; "*" exposes every stored file
+# files = ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "awr.txt", "addm.txt"]   files shown on a snapshot page; "*" exposes every stored file
 # settings_file = "dbtriage-settings.json"   where Settings-page changes go; or a postgres:// URL to share them (DBTRIAGE_SETTINGS overrides)
 # [web.severity_colors]
 # high = "#c42f2f"
