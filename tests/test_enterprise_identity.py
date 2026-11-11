@@ -305,6 +305,30 @@ def test_trust_proxy_groups_and_audit(monkeypatch, tmp_path, capsys):
         access.clear_current()
 
 
+def test_schedule_run_now_follows_the_run_group(monkeypatch, tmp_path):
+    from dbtriage.web import App
+
+    app = App(config(tmp_path), store(tmp_path), True, None, allow_edit=True)
+
+    def button(actor):
+        access.set_current(actor)
+        page = app.settings_page().decode()
+        start = page.rindex("<button", 0, page.index("Run now</button>"))
+        return page[start:page.index("Run now</button>")]
+
+    try:
+        monkeypatch.delenv("DBTRIAGE_TRUST_PROXY", raising=False)
+        assert button(access.Actor()).startswith("<button form=")
+        monkeypatch.setenv("DBTRIAGE_TRUST_PROXY", "1")
+        monkeypatch.setenv("DBTRIAGE_GROUP_RUN", "runners")
+        assert button(access.Actor("ada", frozenset())).startswith("<button disabled")
+        assert button(access.Actor("ada", frozenset({"runners"}))).startswith("<button form=")
+        app.allow_run = False
+        assert button(access.Actor("ada", frozenset({"runners"}))).startswith("<button disabled")
+    finally:
+        access.clear_current()
+
+
 def test_schedule_is_not_stopped_by_a_click_group(monkeypatch, tmp_path):
     monkeypatch.setenv("DBTRIAGE_TRUST_PROXY", "1")
     monkeypatch.setenv("DBTRIAGE_GROUP_RUN", "runners")

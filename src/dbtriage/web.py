@@ -1078,7 +1078,7 @@ class App:
             fid = "sched-" + re.sub(r"[^A-Za-z0-9_-]", "_", r["target"])
             f = f"form='{fid}'"  # every control names its form, so a row stays wired after it is replaced in place
             pause = (f"<button{ro} {f} class=quiet name=action value=resume>Resume</button>" if r["paused"] else f"<button{ro} {f} class=quiet name=action value=pause>Pause</button>") if r["schedule"] else ""
-            runbtn = f"<button{'' if self.allow_run else ' disabled'} {f} class=quiet name=action value=run title='collect and review now'>Run now</button>"
+            runbtn = f"<button{'' if self.allows('run') else ' disabled'} {f} class=quiet name=action value=run title='collect and review now'>Run now</button>"
             rows.append(f"<tr{' class=paused' if r['paused'] else ''}><td><form id='{fid}' method=post action=/schedule/save class=inline data-ajax=refresh-card>"
                         f"<input type=hidden name=name value='{n}'></form><a href='/t/{n}'>{n}</a></td>"
                         f"<td><select {f} name=schedule class=sched aria-label='schedule for {n}'>{opts}</select> <input {f} name=schedule_custom class=cron aria-label='cron line for {n}' "
