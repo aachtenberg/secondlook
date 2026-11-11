@@ -75,7 +75,7 @@ def test_run_stores_the_tool_transcript(tmp_path):
             by["compare_snapshots"]({"snapshot_id": ids[-1], "baseline_id": ids[-2]})
             by["get_raw_report"]({"snapshot_id": ids[-1], "name": "awr.txt", "offset": 0, "length": 5000})
             by["get_raw_report"]({"snapshot_id": ids[-1], "name": "missing.txt"})
-            finding = {"severity": "high", "where": "sql_id q1", "summary": "Slow", "impact": "i", "evidence": [], "fix": "f"}
+            finding = {"severity": "high", "kind": "sql_regressed", "subject": "q1", "where": "sql_id q1", "summary": "Slow", "impact": "i", "evidence": [], "fix": "f"}
             by["submit_review"]({"findings": [finding], "summary": "s", "checked": "c", "confidence": "high"})
             return llm.AgentResult(text="", stop_reason="tool_use", model="m", tool_calls=4)
 
