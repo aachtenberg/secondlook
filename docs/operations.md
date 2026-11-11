@@ -50,6 +50,11 @@ systemctl --user restart dbtriage-web       # after uv sync with new code
 journalctl --user -u dbtriage-web -f        # its log
 ```
 
+On a laptop, that user service is the one place a credentials file is expected. After the access portal, paste
+today's keys into `~/.aws/credentials`. The process notices the new file and does not need a restart. The keys
+die in under a day; the scheduler on the laptop stops until the next paste, and the review says so. See
+[where the process gets its cloud identity](#where-the-process-gets-its-cloud-identity).
+
 Running it as its own user, or as a system service with `User=`, works the same way.
 
 The repo's `Dockerfile` is the other route. The image has every optional extra (the SQL Server driver, Azure Blob
@@ -67,6 +72,27 @@ docker run -d --name dbtriage-web --restart unless-stopped \
 Inside a container the web view has to listen on `0.0.0.0`; publishing the port on `127.0.0.1` keeps it on this
 machine. Publish it wider only with `DBTRIAGE_WEB_TOKEN` set or behind your single sign-on proxy
 ([web view](web.md#who-can-see-it)).
+
+## Where the process gets its cloud identity
+
+Two shapes. They are not mixed.
+
+**Desktop or laptop on the same LAN as the databases.** Browser sign-in at the access portal ends in keys you
+paste into `~/.aws/credentials` (a profile such as `[dev]`) or export as `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. Nothing refreshes them. Set `aws_profile` to that profile.
+Outbound HTTPS goes through `HTTPS_PROXY` and trusts `AWS_CA_BUNDLE` (the corporate chain plus the public CAs
+for hosts that bypass the proxy).
+
+**A pod or a container.** EKS (IRSA or Pod Identity), Cloud Run, Azure Container Apps, or the same pattern on
+k3s with a projected service-account token. The role is attached to the workload. Leave `aws_profile` blank.
+Do not mount someone's `~/.aws/credentials` and do not forward their portal session. The scheduler keeps
+running on that role. Sketches: `examples/eks.yaml`, `examples/cloudrun.yaml`, `examples/container-apps.yaml`.
+
+Database protocols are not HTTP. Postgres, Oracle, MySQL and SQL Server on the cluster or on other machines on
+the LAN are not sent through the proxy. Do not set `ALL_PROXY`. `NO_PROXY` lists what HTTP must still reach
+directly: `169.254.169.254`, `.svc`, `.cluster.local`, and the LAN of databases and local model hosts (an
+example is in `recipes/reference.env`). That covers a local model, webhooks and the instance metadata service.
+The proxy and the bundle still apply to Bedrock and to other HTTPS calls when the network inspects TLS.
 
 ## What can start a run
 

@@ -111,7 +111,7 @@ CONVERSE_PROVIDERS = ("bedrock-converse",)
 
 SCHEDULED_FIELDS = ("scheduled_provider", "scheduled_model", "scheduled_base_url", "scheduled_api_key_env")
 # what belongs to the main provider and is not carried over to a different scheduled provider
-PROVIDER_FIELDS = ("model", "base_url", "api_key_env", "region", "project_id", "resource", "effort", "api_key_cmd")
+PROVIDER_FIELDS = ("model", "base_url", "api_key_env", "region", "project_id", "resource", "effort", "api_key_cmd", "aws_profile")
 
 
 def agent_for(cfg: dict[str, Any], source: str | None) -> dict[str, Any]:
@@ -165,15 +165,39 @@ def test_model(cfg: dict[str, Any]) -> tuple[bool, str]:
 
     try:
         t0 = time.time()
+        provider = os.environ.get("DBTRIAGE_PROVIDER") or cfg.get("provider")
+        if provider in ("bedrock", "bedrock-converse"):
+            from dbtriage.awscred import probe_caller, profile_name
+            from dbtriage.egress import plain_provider_error
+
+            who = probe_caller(profile_name(cfg), cfg.get("region") or None)  # account and ARN, or expired / none
+            if who == "expired":
+                return False, plain_provider_error("ExpiredTokenException: The security token included in the request is expired")
+            if who == "none":
+                return False, plain_provider_error("NoCredentialsError: Unable to locate credentials")
         backend = make_backend(cfg)
         res = backend.run("You are a connectivity check. Reply with the single word OK.", "Say OK.", [], max_iterations=1)
         text = (res.text or "").strip().replace("\n", " ")
         tokens = f"{res.usage.get('input_tokens', '?')} in / {res.usage.get('output_tokens', '?')} out"
         return True, f"{backend.name}:{res.model} answered {text[:40]!r} ({tokens}, {time.time() - t0:.1f}s)"
     except SystemExit as exc:
-        return False, str(exc)
+        return False, _provider_failure(exc)
     except Exception as exc:  # noqa: BLE001 - the message is the point
-        return False, f"{type(exc).__name__}: {str(exc)[:300]}"
+        return False, _provider_failure(exc)
+
+
+def _provider_failure(exc: BaseException) -> str:
+    """The Test model button shows the plain sentence when we know it (expired session, TLS, proxy)."""
+    from dbtriage.awscred import note_from_error
+    from dbtriage.egress import plain_provider_error
+
+    note_from_error(exc)
+    raw = f"{type(exc).__name__}: {str(exc)[:300]}"
+    plain = plain_provider_error(raw)
+    if plain != raw.split("\n")[0][:140]:
+        return plain
+    # SystemExit is already a sentence ([agent] set KEY). Other errors keep the type name.
+    return str(exc) if isinstance(exc, SystemExit) else raw
 
 
 def configured(cfg: dict[str, Any]) -> tuple[bool, str]:
@@ -189,7 +213,8 @@ def configured(cfg: dict[str, Any]) -> tuple[bool, str]:
 
         _, key_env, default_key = PRESETS[provider]
         env = cfg.get("api_key_env") or key_env
-        if os.environ.get(env) or default_key or cfg.get("api_key_cmd") or provider == "vertex-gemini":
+        # vertex-gemini refreshes ADC; azure-openai uses a key or DefaultAzureCredential. Both resolve at call time.
+        if os.environ.get(env) or default_key or cfg.get("api_key_cmd") or provider in ("vertex-gemini", "azure-openai"):
             return True, ""
         return False, f"no {env} in the server's environment"
     if provider in ANTHROPIC_PROVIDERS + CONVERSE_PROVIDERS:
@@ -208,7 +233,7 @@ def list_models(cfg: dict[str, Any], ttl_s: float = 300) -> tuple[list[str], str
     import time
 
     provider = cfg.get("provider") or "anthropic"
-    key = (provider, cfg.get("base_url"), cfg.get("region"), cfg.get("api_key_env"), cfg.get("project_id"))
+    key = (provider, cfg.get("base_url"), cfg.get("region"), cfg.get("api_key_env"), cfg.get("project_id"), cfg.get("aws_profile"))
     hit = _MODEL_CACHE.get(key)
     if hit and time.monotonic() - hit[0] < ttl_s:
         return hit[1], hit[2]
@@ -242,9 +267,10 @@ def _list_models(provider: str, cfg: dict) -> tuple[list[str], str]:
             return [], "ANTHROPIC_API_KEY is not set: add it to the .env next to targets.toml"
         return [m.id for m in anthropic.Anthropic(timeout=10).models.list(limit=100)], ""
     if provider in ("bedrock", "bedrock-converse"):
-        import boto3
+        from dbtriage.awscred import client as aws_client
+        from dbtriage.awscred import profile_name
 
-        bed = boto3.client("bedrock", region_name=cfg.get("region") or os.environ.get("AWS_REGION"))
+        bed = aws_client("bedrock", region=cfg.get("region") or os.environ.get("AWS_REGION") or None, profile=profile_name(cfg))
         fms = bed.list_foundation_models(byOutputModality="TEXT")["modelSummaries"]
         if provider == "bedrock":
             ids = [m["modelId"].split(":")[0].rsplit("-v", 1)[0] for m in fms if m.get("providerName") == "Anthropic"]

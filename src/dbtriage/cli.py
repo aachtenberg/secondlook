@@ -49,7 +49,7 @@ def collect(cfg: Config, store: Storage, req: TriageRequest) -> str:
     store.put_json(f"{sid}/manifest.json", {
         "id": sid, "engine": target.engine, "target": target.name, "captured_at": snap.summary["captured_at"],
         "window": window.as_dict(), "metrics_kind": snap.summary.get("metrics_kind", "cumulative"),
-        "trigger": {"source": req.source, "reason": req.reason},
+        "trigger": {"source": req.source, "reason": req.reason, **({"actor": req.actor} if req.actor else {})},
         "files": ["summary.json", "raw.json"], "reports": sorted(snap.reports),
         "changes_file": target.changes_file,
         **({"db_snapshot": db_snapshot} if db_snapshot else {}),
@@ -109,6 +109,9 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
                 engine, target, sid, baseline, mode, max_iterations=int(agent.get("max_iterations") or 25),
                 notes=(t.extra.get("notes") if t else None))
         except (Exception, SystemExit) as exc:  # noqa: BLE001 - an outage or a missing key must not lose the run: use the rules
+            from dbtriage.awscred import note_from_error
+
+            note_from_error(exc)  # an expired daily session is remembered for settings and /health
             print(f"agent failed ({type(exc).__name__}: {str(exc)[:300]}); using rules-based triage", file=sys.stderr)
             agent_error = f"{type(exc).__name__}: {str(exc)[:300]}"
     if result is None:

@@ -31,25 +31,39 @@ def _middleware(cfg: dict) -> list:
     return [BetaRefusalFallbackMiddleware(chain)] if chain else []
 
 
+def _http_kw() -> dict:
+    from dbtriage.egress import httpx_client
+
+    client = httpx_client()  # corporate CA when AWS_CA_BUNDLE is set; None keeps the SDK default
+    return {"http_client": client} if client is not None else {}
+
+
 def make_client(cfg: dict) -> anthropic.Anthropic:
     p = cfg["provider"]
+    http = _http_kw()
     if p == "anthropic":
-        return anthropic.Anthropic()  # ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile
+        return anthropic.Anthropic(**http)  # ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile
     if p == "bedrock":
         from anthropic import AnthropicBedrockMantle
 
-        return AnthropicBedrockMantle(aws_region=cfg.get("region") or os.environ.get("AWS_REGION"),
-                                      aws_profile=cfg.get("aws_profile"), middleware=_middleware(cfg))
+        from dbtriage.awscred import note_credential_change, profile_name
+
+        note_credential_change()  # the SDK caches a session; drop it when the pasted keys change
+        return AnthropicBedrockMantle(aws_region=cfg.get("region") or os.environ.get("AWS_REGION") or None,
+                                      aws_profile=profile_name(cfg), middleware=_middleware(cfg), **http)
     if p == "vertex":
         from anthropic import AnthropicVertex
 
+        from dbtriage.egress import adopt_ca_bundle
+
+        adopt_ca_bundle()
         return AnthropicVertex(project_id=cfg.get("project_id") or os.environ.get("GOOGLE_CLOUD_PROJECT"),
-                               region=cfg.get("region") or "global", middleware=_middleware(cfg))
+                               region=cfg.get("region") or "global", middleware=_middleware(cfg), **http)
     if p == "foundry":
         from anthropic import AnthropicFoundry
 
         key = os.environ.get(cfg.get("api_key_env") or "ANTHROPIC_FOUNDRY_API_KEY")
-        return AnthropicFoundry(resource=cfg.get("resource"), api_key=key, middleware=_middleware(cfg))
+        return AnthropicFoundry(resource=cfg.get("resource"), api_key=key, middleware=_middleware(cfg), **http)
     raise SystemExit(f"unsupported anthropic provider {p!r}")
 
 

@@ -1,0 +1,58 @@
+# dbtriage on EKS with a workload role. No daily keys, and do not mount ~/.aws/credentials.
+# k3s uses the same shape: a projected service-account token instead of the IRSA annotation,
+# plus NO_PROXY for the cluster and for databases on the local network.
+# Database ports are not HTTP. Do not set ALL_PROXY.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dbtriage
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/dbtriage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dbtriage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dbtriage
+  template:
+    metadata:
+      labels:
+        app: dbtriage
+    spec:
+      serviceAccountName: dbtriage
+      containers:
+        - name: dbtriage
+          image: dbtriage:latest
+          args: ["web", "--host", "0.0.0.0", "--port", "8081", "--allow-run", "--schedule"]
+          env:
+            - name: HTTPS_PROXY
+              value: http://proxy.example:8080
+            - name: HTTP_PROXY
+              value: http://proxy.example:8080
+            # metadata, cluster DNS, and an example LAN for databases and a local model
+            - name: NO_PROXY
+              value: localhost,127.0.0.1,169.254.169.254,.svc,.cluster.local,192.168.0.0/24
+            - name: AWS_CA_BUNDLE
+              value: /etc/ssl/corporate/bundle.pem
+            - name: DBTRIAGE_CONFIG
+              value: /conf/targets.toml
+          volumeMounts:
+            - name: conf
+              mountPath: /conf
+              readOnly: true
+            - name: ca
+              mountPath: /etc/ssl/corporate
+              readOnly: true
+          ports:
+            - containerPort: 8081
+      volumes:
+        - name: conf
+          configMap:
+            name: dbtriage-conf
+        - name: ca
+          configMap:
+            name: corporate-ca

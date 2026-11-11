@@ -1,6 +1,7 @@
 # Recipe: databases on Google Cloud. Snapshots in a Cloud SQL for PostgreSQL database, the model is Gemini on
 # Vertex AI (no Model Garden enablement needed), reviews to Slack.
-# Run it on a VM or Cloud Run service whose service account has "Vertex AI User"; the token comes from gcloud.
+# Run it on a VM or Cloud Run service whose service account has "Vertex AI User". Application default
+# credentials refresh the token. A pasted GOOGLE_OAUTH_ACCESS_TOKEN or api_key_cmd still wins when set.
 
 [storage]
 url = "postgres://dbtriage@10.20.0.5:5432/ops?schema=dbtriage&sslmode=require"   # PGPASSWORD in .env

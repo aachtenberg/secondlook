@@ -136,46 +136,66 @@ class S3Storage(Storage):
     """Works with AWS S3, MinIO, Ceph RGW, etc. Endpoint comes from AWS_ENDPOINT_URL."""
 
     def __init__(self, bucket: str, prefix: str = ""):
-        import boto3  # imported lazily so local mode needs no AWS deps at runtime
-
         self.bucket = bucket
         self.prefix = prefix.strip("/")
+        self._own_client = True  # a test that builds the object with __new__ and sets .s3 keeps that client
+        self._fp = None
+        self.s3 = None
+        self._connect()
+
+    def _connect(self) -> None:
         from botocore.config import Config as BotoConfig
 
-        # short timeouts and few retries: an unreachable store should cost seconds, then the spool takes over
-        self.s3 = boto3.client("s3", endpoint_url=os.environ.get("AWS_ENDPOINT_URL"),
-                               config=BotoConfig(connect_timeout=5, read_timeout=15, retries={"max_attempts": 2, "mode": "standard"}))
+        from dbtriage.awscred import client, material_fingerprint
+
+        # short timeouts and few retries: an unreachable store should cost seconds, then the spool takes over.
+        # The client is rebuilt when the credentials file or the AWS_* key variables change.
+        self.s3 = client("s3", endpoint_url=os.environ.get("AWS_ENDPOINT_URL"),
+                         config=BotoConfig(connect_timeout=5, read_timeout=15, retries={"max_attempts": 2, "mode": "standard"}))
+        self._fp = material_fingerprint()
+
+    def _client(self):
+        if getattr(self, "_own_client", False):
+            from dbtriage.awscred import material_fingerprint
+
+            if self._fp != material_fingerprint():
+                self._connect()
+        return self.s3
 
     def _k(self, key: str) -> str:
         return f"{self.prefix}/{key}" if self.prefix else key
 
     def put(self, key: str, data: bytes) -> None:
+        s3 = self._client()
         try:
-            self.s3.put_object(Bucket=self.bucket, Key=self._k(key), Body=data)
-        except self.s3.exceptions.NoSuchBucket:
-            self.s3.create_bucket(Bucket=self.bucket)
-            self.s3.put_object(Bucket=self.bucket, Key=self._k(key), Body=data)
+            s3.put_object(Bucket=self.bucket, Key=self._k(key), Body=data)
+        except s3.exceptions.NoSuchBucket:
+            s3.create_bucket(Bucket=self.bucket)
+            s3.put_object(Bucket=self.bucket, Key=self._k(key), Body=data)
 
     def get(self, key: str) -> bytes:
+        s3 = self._client()
         try:
-            return self.s3.get_object(Bucket=self.bucket, Key=self._k(key))["Body"].read()
-        except self.s3.exceptions.ClientError as exc:  # a missing key is FileNotFoundError, as in every other store
+            return s3.get_object(Bucket=self.bucket, Key=self._k(key))["Body"].read()
+        except s3.exceptions.ClientError as exc:  # a missing key is FileNotFoundError, as in every other store
             if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404", "NotFound"):
                 raise FileNotFoundError(key) from None
             raise
 
     def exists(self, key: str) -> bool:
+        s3 = self._client()
         try:
-            self.s3.head_object(Bucket=self.bucket, Key=self._k(key))
+            s3.head_object(Bucket=self.bucket, Key=self._k(key))
             return True
-        except self.s3.exceptions.ClientError:
+        except s3.exceptions.ClientError:
             return False
 
     def list_keys(self, prefix: str) -> list[str]:
+        s3 = self._client()
         full = self._k(prefix)
         strip = len(self.prefix) + 1 if self.prefix else 0
         keys: list[str] = []
-        paginator = self.s3.get_paginator("list_objects_v2")
+        paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=full):
             for obj in page.get("Contents", []):
                 keys.append(obj["Key"][strip:])

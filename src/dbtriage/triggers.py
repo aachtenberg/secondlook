@@ -35,6 +35,7 @@ class TriageRequest:
     channels: list[str] | None = None
     baseline_policy: str | None = None   # previous | same-time-yesterday | same-time-last-week | pinned; None = target default
     baseline: str | None = None          # explicit snapshot id, wins over the policy
+    actor: str = ""                      # who started a web run, when the proxy or basic auth names them
 
     def __post_init__(self):
         # a payload's end without an offset ("2026-11-06T10:00:00") means UTC: every time dbtriage keeps is UTC, and

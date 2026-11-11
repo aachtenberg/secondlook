@@ -7,7 +7,8 @@ wins over it.
 
 Rather than starting from scratch, copy a [recipe](../recipes/README.md). Every option is explained in
 [recipes/reference.toml](../recipes/reference.toml), and every environment variable in
-[recipes/reference.env](../recipes/reference.env).
+[recipes/reference.env](../recipes/reference.env). How a laptop paste differs from a cloud role, and how the
+corporate proxy and CA bundle apply, is in [models](models.md#enterprise-identity).
 
 ## A minimal `targets.toml`
 

@@ -2,7 +2,9 @@
 # severity as Jira tickets, and a Prometheus metric for alerting.
 # Run it on a small EC2 instance or ECS task with an IAM role that can use the S3 bucket (s3:GetObject, s3:PutObject,
 # s3:ListBucket; s3:CreateBucket only if dbtriage should create it) and call Bedrock (bedrock:InvokeModel);
-# then no AWS keys are needed at all. Schedules can come from the built-in scheduler or from EventBridge
+# then no AWS keys are needed at all. On a laptop, a named aws_profile holds the daily portal paste instead.
+# If TLS is inspected, set HTTPS_PROXY, HTTP_PROXY, NO_PROXY and AWS_CA_BUNDLE (see recipes/reference.env).
+# Schedules can come from the built-in scheduler or from EventBridge
 # (examples/eventbridge-schedule.json).
 
 [storage]

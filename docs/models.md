@@ -27,12 +27,46 @@ at another file and `DBTRIAGE_NO_ENV_FILE=1` turns this off.
 | Provider | What it is | How it signs in |
 |---|---|---|
 | `anthropic` | Claude, directly from Anthropic | `ANTHROPIC_API_KEY` |
-| `bedrock` | Claude on Amazon Bedrock | your AWS credentials and `region`; model ids look like `anthropic.claude-...` |
+| `bedrock` | Claude on Amazon Bedrock | your AWS credentials and `region`; `aws_profile` names a laptop profile. Model ids look like `anthropic.claude-...` |
 | `vertex` | Claude on Google Vertex AI | Google application credentials, `project_id`, `region`; Claude must be enabled in Model Garden |
 | `foundry` | Claude on Microsoft Foundry | `ANTHROPIC_FOUNDRY_API_KEY` and `resource` |
-| `openai`, `openrouter`, `groq`, `ollama`, `ollama-cloud`, `vllm`, `azure-openai` | anything that speaks the OpenAI chat API | the provider's key variable (`OPENAI_API_KEY`, `GROQ_API_KEY`, `OLLAMA_API_KEY` for ollama-cloud and so on; see `recipes/reference.env`), or name your own with `api_key_env`; `base_url` points elsewhere. Azure OpenAI uses its `/openai/v1/` address and the deployment name as the model |
-| `vertex-gemini` | Google's Gemini on Vertex AI | your Google project credentials and `project_id`; the token comes from `gcloud auth print-access-token`, so the `gcloud` CLI must be installed where dbtriage runs |
-| `bedrock-converse` | any model on Bedrock through the Converse API | your AWS credentials and `region` |
+| `openai`, `openrouter`, `groq`, `ollama`, `ollama-cloud`, `vllm`, `azure-openai` | anything that speaks the OpenAI chat API | the provider's key variable (`OPENAI_API_KEY`, `GROQ_API_KEY`, `OLLAMA_API_KEY` for ollama-cloud and so on; see `recipes/reference.env`), or name your own with `api_key_env`; `base_url` points elsewhere. Azure OpenAI uses its `/openai/v1/` address and the deployment name as the model. With no key it uses the process identity |
+| `vertex-gemini` | Google's Gemini on Vertex AI | your Google project credentials and `project_id`. Application default credentials refresh the token. `GOOGLE_OAUTH_ACCESS_TOKEN` or `api_key_cmd` still wins when you set one |
+| `bedrock-converse` | any model on Bedrock through the Converse API | your AWS credentials and `region`; `aws_profile` names a laptop profile. Blank uses the attached role |
+
+## Enterprise identity
+
+Two paths, kept separate. dbtriage does not log in, does not complete MFA, and does not store pasted keys.
+
+**Laptop.** The access portal (browser sign-in, then a copy) ends in keys that last under a day. Paste them into
+`~/.aws/credentials` under a profile such as `[dev]`, or export `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+`AWS_SESSION_TOKEN`. There is no expiry field and nothing to refresh. `aws_profile` on the Agent card is the
+profile name only. A shell variable wins over `.env`. A long-running `dbtriage web` rebuilds its AWS clients when
+that file or those variables change, so the morning paste does not need a restart. When the keys die, the review
+says `AWS session expired. Copy today's keys from the access portal into ~/.aws/credentials.` A scheduler on that
+laptop stops until the next paste. This is not `aws sso login`.
+
+**Cloud.** A VM, a container, an EKS pod or a Cloud Run service uses the role attached to it (instance role, task
+role, IRSA, Pod Identity, or a Cloud Run service account). Leave `aws_profile` blank. Do not mount a person's
+`~/.aws/credentials` and do not forward their portal session. The same pattern works on k3s with a projected
+service-account token. A scheduler there keeps running. Gemini refreshes application default credentials.
+Azure OpenAI with no key uses the process identity (`dbtriage[azure]`, scope
+`https://cognitiveservices.azure.com/.default`).
+
+**Proxy and CA.** If the network inspects TLS, set `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and `AWS_CA_BUNDLE`
+in the process environment. The bundle is the corporate chain plus the public CAs for hosts that bypass the
+proxy. Bedrock, delivery webhooks and the OpenAI and Anthropic clients use it. Database protocols are not HTTP,
+so Postgres, Oracle, MySQL and SQL Server are not sent through the proxy. Do not set `ALL_PROXY`. Put
+`169.254.169.254`, cluster DNS (`.svc`, `.cluster.local`) and the LAN of databases and local model hosts into
+`NO_PROXY` (an example list is in `recipes/reference.env`) so a local model, webhooks and instance metadata stay
+off the proxy.
+
+The Settings page and an authenticated `/health` show the profile, how old the credentials file is, whether a
+session token is present, the proxy host, the CA path, and the last caller check. They do not call AWS just to
+render. **Test model** is the live check. There is no field for keys.
+
+Workload examples: [operations](operations.md#where-the-process-gets-its-cloud-identity), `examples/eks.yaml`,
+`examples/cloudrun.yaml`, `examples/container-apps.yaml`.
 
 The Claude providers retry on a fallback model if the first one declines a request. If the model still cannot
 review (no key, an unknown provider, an outage, or a model that never fills in the review), dbtriage writes the

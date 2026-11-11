@@ -1,0 +1,35 @@
+# Cloud Run service. The runtime service account is the identity. No daily keys and no
+# mount of a person's ~/.aws/credentials. The CA bundle is a secret volume.
+# Do not set ALL_PROXY. NO_PROXY keeps metadata and private addresses off the proxy.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: dbtriage
+spec:
+  template:
+    spec:
+      serviceAccountName: dbtriage
+      containers:
+        - image: dbtriage:latest
+          args: ["web", "--host", "0.0.0.0", "--port", "8081", "--allow-run", "--schedule"]
+          env:
+            - name: HTTPS_PROXY
+              value: http://proxy.example:8080
+            - name: HTTP_PROXY
+              value: http://proxy.example:8080
+            - name: NO_PROXY
+              value: localhost,127.0.0.1,169.254.169.254,.svc,.cluster.local,192.168.0.0/24
+            - name: AWS_CA_BUNDLE
+              value: /etc/ssl/corporate/bundle.pem
+            - name: DBTRIAGE_CONFIG
+              value: /conf/targets.toml
+          ports:
+            - containerPort: 8081
+          volumeMounts:
+            - name: ca
+              mountPath: /etc/ssl/corporate
+              readOnly: true
+      volumes:
+        - name: ca
+          secret:
+            secretName: corporate-ca

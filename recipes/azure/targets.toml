@@ -1,6 +1,7 @@
 # Recipe: databases on Azure. Snapshots in Blob Storage, the model on Azure OpenAI, reviews to Teams and email.
 # Run it on a VM or Container App with a managed identity that has "Storage Blob Data Contributor" on the account;
-# then no storage key is needed. To put a hard cap on model spend, see examples/azure-budget-cap.md.
+# then no storage key is needed. Azure OpenAI with no API key uses that same identity
+# (scope https://cognitiveservices.azure.com/.default). To put a hard cap on model spend, see examples/azure-budget-cap.md.
 
 [storage]
 url = "az://dbtriage/snapshots"        # uv sync --extra azure

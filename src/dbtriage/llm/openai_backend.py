@@ -22,9 +22,8 @@ PRESETS: dict[str, tuple[str | None, str, str | None]] = {  # provider -> (base_
     "ollama-cloud": ("https://ollama.com/v1", "OLLAMA_API_KEY", None),
     "vllm": ("http://localhost:8000/v1", "VLLM_API_KEY", "none"),
     "azure-openai": (None, "AZURE_OPENAI_API_KEY", None),
-    "vertex-gemini": (None, "GOOGLE_OAUTH_ACCESS_TOKEN", None),  # base_url built from project_id/region; token via api_key_cmd
+    "vertex-gemini": (None, "GOOGLE_OAUTH_ACCESS_TOKEN", None),  # base_url from project_id/region; ADC refreshes the token
 }
-GEMINI_TOKEN_CMD = "gcloud auth print-access-token"  # ADC / service account; swap for a Workload Identity command in prod
 
 
 class OpenAIBackend:
@@ -40,17 +39,28 @@ class OpenAIBackend:
             base_url = base_url or f"https://{host}/v1beta1/projects/{project}/locations/{region}/endpoints/openapi"
             if "/" not in self.model:
                 self.model = "google/" + self.model
-            cfg.setdefault("api_key_cmd", GEMINI_TOKEN_CMD)
         key = os.environ.get(cfg.get("api_key_env") or key_env) or default_key
-        if not key and cfg.get("api_key_cmd"):  # a command that prints a short-lived token; never stored
+        if not key and cfg.get("api_key_cmd"):  # a command that prints a short-lived token; never stored, and not refreshed
             key = subprocess.run(shlex.split(cfg["api_key_cmd"]), capture_output=True, text=True, check=True).stdout.strip()
+        bearer = None
+        if not key and self.name == "vertex-gemini":
+            from dbtriage.cloudauth import gemini_access_token
+
+            bearer = gemini_access_token  # called per request, so an expired ADC token is refreshed
+        elif not key and self.name == "azure-openai":
+            from dbtriage.cloudauth import azure_access_token
+
+            bearer = azure_access_token  # DefaultAzureCredential when no resource key is set
         if client is None:
             from openai import OpenAI
 
-            if not key:
+            from dbtriage.egress import httpx_client
+
+            if not key and bearer is None:
                 _die(f"[agent] {cfg.get('api_key_env') or key_env} is not set for provider {self.name!r}: add it to the .env next to "
                      "targets.toml (picked up within a second) or to the server's environment")
-            client = OpenAI(base_url=base_url, api_key=key)
+            http = httpx_client()
+            client = OpenAI(base_url=base_url, api_key=bearer or key, **({"http_client": http} if http is not None else {}))
         self.client = client
 
     def run(self, system: str, task: str, tools: list[ToolSpec], max_iterations: int = 25,

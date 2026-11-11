@@ -22,9 +22,12 @@ class BedrockConverseBackend:
         self.cfg = cfg
         self.model = cfg.get("model") or _die("[agent] model is required for provider 'bedrock-converse'")
         if client is None:
-            import boto3
+            from dbtriage.awscred import client as aws_client
+            from dbtriage.awscred import profile_name
 
-            client = boto3.client("bedrock-runtime", region_name=cfg.get("region") or os.environ.get("AWS_REGION"))
+            # a new session when ~/.aws/credentials or the AWS_* key variables change
+            client = aws_client("bedrock-runtime", region=cfg.get("region") or os.environ.get("AWS_REGION") or None,
+                                profile=profile_name(cfg))
         self.client = client
 
     def run(self, system: str, task: str, tools: list[ToolSpec], max_iterations: int = 25,
