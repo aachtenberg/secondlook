@@ -213,11 +213,20 @@ def _ticket_run(name: str, cfg: dict, triage: dict, markdown: str, min_sev: int)
     for f, l in comment:
         COMMENTS[name](cfg, l["tickets"][name], _comment_text(f, l, triage, markdown))
         sent = True
+    # one run's new findings share one issue, so a gone finding's issue may still track an open sibling
+    open_on = {}
+    for l in list(life) + list(triage.get("still_open") or []):
+        if k := ((l.get("tickets") or {}).get(name) or {}).get("key"):
+            open_on[k] = open_on.get(k, 0) + 1
     for e in triage.get("gone") or []:
         if t := (e.get("tickets") or {}).get(name):
-            COMMENTS[name](cfg, t, f"cleared: {e.get('kind', '')} {e.get('subject', '')}: {e.get('title', '')}\n"
-                                   f"not seen in the last {e.get('misses', '')} runs · open since {(e.get('first_seen_at') or '')[:10]} "
-                                   f"· snapshot {triage.get('snapshot', '')}")
+            what = f"{e.get('kind', '')} {e.get('subject', '')}: {e.get('title', '')}"
+            where = f"not seen in the last {e.get('misses', '')} runs · open since {(e.get('first_seen_at') or '')[:10]} · snapshot {triage.get('snapshot', '')}"
+            if n := open_on.get(t.get("key")):
+                text = f"{what} cleared; this issue still tracks {n} open finding{'s' if n != 1 else ''}\n{where}"
+            else:
+                text = f"cleared: {what}\n{where}"
+            COMMENTS[name](cfg, t, text)
             sent = True
     return sent
 

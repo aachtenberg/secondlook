@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -135,6 +136,18 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
     return result, comparison
 
 
+_target_locks: dict[str, threading.Lock] = {}
+_target_locks_guard = threading.Lock()
+
+
+def target_lock(name: str) -> threading.Lock:
+    """One lock per target in this process: two runs of one database (two alerts, a webhook beside the schedule)
+    take turns, so the ledger's read-modify-write and the ticket bookkeeping never interleave. The web view and
+    the scheduler already refuse a second run; `dbtriage serve` starts a thread per POST and relies on this."""
+    with _target_locks_guard:
+        return _target_locks.setdefault(name, threading.Lock())
+
+
 def run_request(req: TriageRequest, cfg: Config | None = None, use_llm: bool | None = None, baseline: str | None = None) -> dict:
     """The whole pipeline for one request: collect -> compare with the baseline -> triage -> deliver."""
     cfg = cfg or load_config()
@@ -142,11 +155,12 @@ def run_request(req: TriageRequest, cfg: Config | None = None, use_llm: bool | N
     cfg.target(req.target)  # fail early on an unknown target
     if use_llm is None:
         use_llm = os.environ.get("DBTRIAGE_NO_LLM", "") == ""
-    sid = collect(cfg, store, req)
-    baseline, policy, reason = pick_baseline(cfg, store, sid, req.baseline_policy, baseline or req.baseline)
-    result, comparison = triage(cfg, store, sid, baseline, req.mode, use_llm, (policy, reason), source=req.source)
-    result["delivered"] = deliver(cfg.delivery, result, render_markdown(result, comparison), req.channels)
-    ledger.record_tickets(store, result)  # a ticket a channel opened stays with the finding for its later runs
+    with target_lock(req.target):
+        sid = collect(cfg, store, req)
+        baseline, policy, reason = pick_baseline(cfg, store, sid, req.baseline_policy, baseline or req.baseline)
+        result, comparison = triage(cfg, store, sid, baseline, req.mode, use_llm, (policy, reason), source=req.source)
+        result["delivered"] = deliver(cfg.delivery, result, render_markdown(result, comparison), req.channels)
+        ledger.record_tickets(store, result)  # a ticket a channel opened stays with the finding for its later runs
     return result
 
 

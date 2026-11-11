@@ -188,6 +188,14 @@ the review did not name it, and its ticket gets the comment. A finding that clea
 **Cleared**. Reviews stored before findings had a kind are not tracked: a rebuild takes presence from their rules
 findings, which always had one.
 
+One run's new findings share one Jira or Plane issue. When one of them clears while another on the same issue is
+still open, the comment says so instead of "cleared".
+
+Runs of one database take turns within a process (the web view and the scheduler refuse a second run; `dbtriage
+serve` queues it), and the ledger's save checks that nobody saved in between and applies again if someone did.
+Two separate processes writing one database's ledger through a store outage still end last-write-wins, so run one
+scheduler per store; `dbtriage rebuild-ledger` repairs the file from the stored reviews.
+
 The ledger is derived data. It is written through the same store as the snapshots, so an outage spools it like
 any other file, and `dbtriage rebuild-ledger -t <db>` recomputes it from the stored `triage.json` and
 `compare.json` files, tickets included. Losing it is a rebuild, not a loss. A run that cannot read the store

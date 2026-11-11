@@ -175,6 +175,58 @@ def test_triaging_the_same_snapshot_again_does_not_count_as_another_run(tmp_path
     assert "life" not in result
 
 
+def test_a_save_that_lost_the_race_is_applied_again(tmp_path, monkeypatch):
+    """Two writers on one ledger: the second sees the generation moved and redoes its work on the new state."""
+    st = LocalStorage(tmp_path)
+    run(st, 0, [rule("plan_change")])
+    real_load, raced = ledger.load, {"done": False}
+
+    def load_then_rival_writes(store, engine, target):
+        led = real_load(store, engine, target)
+        if not raced["done"]:  # between our load and our save, another process records a ticket
+            raced["done"] = True
+            ledger.record_tickets(store, {"engine": engine, "target": target, "snapshot": None,
+                                          "findings": [review(rule("plan_change"))], "life": [{"tickets": {"jira": {"key": "DBA-3"}}}]})
+        return led
+
+    monkeypatch.setattr(ledger, "load", load_then_rival_writes)
+    out = run(st, 1, [rule("plan_change"), rule("deadlocks", None)])
+    monkeypatch.setattr(ledger, "load", real_load)
+    led = ledger.load(st, ENGINE, TARGET)
+    by = {e["kind"]: e for e in led["entries"]}
+    assert by["plan_change"]["tickets"]["jira"]["key"] == "DBA-3" and by["deadlocks"]["state"] == "new"  # both writers' work kept
+    assert out["life"][0]["tickets"]["jira"]["key"] == "DBA-3" and led["generation"] == 3
+
+
+def test_runs_of_one_target_take_turns():
+    from dbtriage.cli import target_lock
+
+    assert target_lock("pg") is target_lock("pg") and target_lock("pg") is not target_lock("ora")
+
+
+def test_still_open_rows_carry_the_cadence(tmp_path):
+    st = LocalStorage(tmp_path)
+    batch = [rule("sql_top", "b", "low")]
+    hourly(st, 0, 2, batch); hourly(st, 0, 5, []); hourly(st, 1, 2, batch)
+    out = hourly(st, 1, 5, [rule("blocking", "", "high")] * 0 + [])
+    row = out["still_open"][0]
+    assert row["period_s"] == 86400.0 and row["returns"] == 1 and row["title"] and row["severity"] == "low"
+    from dbtriage.report import life_note
+    assert "about every 24h" in life_note(row)
+
+
+def test_a_shared_ticket_is_not_told_cleared_while_a_sibling_is_open(monkeypatch):
+    seen = fake_post(monkeypatch)
+    t = triage([{"state": "still_open", "first_seen": sid(0), "tickets": {"jira": {"key": "DBA-5", "id": "5", "url": "u"}}}],
+               [review(rule("plan_change", severity="medium"))],
+               gone=[{"kind": "deadlocks", "subject": "", "title": "2 deadlocks", "misses": 3, "first_seen_at": at(0), "tickets": {"jira": {"key": "DBA-5", "id": "5", "url": "u"}}}])
+    assert d.deliver({"channels": ["jira"], "jira": JIRA}, t, "md") == ["jira"]
+    assert seen[0][0].endswith("/issue/DBA-5/comment") and seen[0][1]["body"].startswith("deadlocks : 2 deadlocks cleared; this issue still tracks 1 open finding")
+    t2 = triage([], [], gone=[{"kind": "deadlocks", "subject": "", "title": "2 deadlocks", "misses": 3, "first_seen_at": at(0), "tickets": {"jira": {"key": "DBA-6", "id": "6", "url": "u"}}}])
+    d.deliver({"channels": ["jira"], "jira": JIRA}, t2, "md")
+    assert seen[-1][1]["body"].startswith("cleared: deadlocks")
+
+
 def test_period_words():
     assert ledger.describe_period(None) == "" and ledger.describe_period(0) == ""
     assert ledger.describe_period(3600) == "about every 1h" and ledger.describe_period(86400) == "about every 24h"
@@ -223,7 +275,7 @@ def test_ledger_round_trips_through_the_store_without_disturbing_snapshots(tmp_p
     data = json.loads(st.get("postgres/demo/findings.json"))
     assert data["updated"] == sid(0) and data["entries"][0]["kind"] == "plan_change"
     assert st.list_snapshots(ENGINE, TARGET) == [sid(0)]  # the ledger is not a snapshot
-    assert ledger.load(st, ENGINE, "nobody") == {"entries": [], "tombstones": [], "updated": None, "prior": None}
+    assert ledger.load(st, ENGINE, "nobody") == {"entries": [], "tombstones": [], "updated": None, "prior": None, "generation": 0}
 
 
 def test_ledger_writes_go_through_the_spool_during_an_outage(tmp_path, capsys):
@@ -285,8 +337,9 @@ def test_rebuild_equals_the_ledger_built_run_by_run(tmp_path):
     assert [e["subject"] for e in built["entries"]] == ["q1", ""] and built["entries"][0]["tickets"] == {"plane": {"key": "OPS-7", "id": "uuid", "url": "p"}}
     assert json.loads(st.get(f"{sid(1)}/triage.json"))["life"][1]["tickets"]["jira"]["key"] == "DBA-1"  # the review keeps its ticket
     st._p(ledger.key(ENGINE, TARGET)).unlink()
-    assert ledger.rebuild(st, ENGINE, TARGET) == built
-    assert ledger.load(st, ENGINE, TARGET) == built
+    same = lambda a, b: {k: v for k, v in a.items() if k != "generation"} == {k: v for k, v in b.items() if k != "generation"}  # noqa: E731
+    assert same(ledger.rebuild(st, ENGINE, TARGET), built)  # the save counter is the one thing a rebuild need not match
+    assert same(ledger.load(st, ENGINE, TARGET), built)
 
 
 def test_attach_is_a_no_op_without_a_comparison(tmp_path):
@@ -318,7 +371,8 @@ def test_cli_triage_records_the_life_and_the_command_rebuilds(tmp_path, capsys):
     (tmp_path / "targets.toml").write_text(f'[storage]\nurl = "file://{tmp_path / "data"}"\n[targets.demo]\nengine = "postgres"\ndsn = "d"\n')
     cli.main(["--config", str(tmp_path / "targets.toml"), "rebuild-ledger", "--target", "demo"])
     assert f"postgres/demo/findings.json: {n} open finding(s), as of {s10}" in capsys.readouterr().out
-    assert ledger.load(st, "postgres", "demo") == led
+    rebuilt = ledger.load(st, "postgres", "demo")
+    assert {k: v for k, v in rebuilt.items() if k != "generation"} == {k: v for k, v in led.items() if k != "generation"}
 
 
 # ---------------------------------------------------------------- delivery: tickets as state and the finding gate
