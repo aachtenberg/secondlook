@@ -27,11 +27,13 @@ model = "claude-opus-5-5"
 # region = "us-east-1"                 bedrock, bedrock-converse, vertex, vertex-gemini ("global", the Vertex default, works for most models)
 # project_id = "my-gcp-project"        vertex, vertex-gemini (else GOOGLE_CLOUD_PROJECT)
 # resource = "my-foundry-resource"     foundry
-# aws_profile = "dbtriage"             bedrock: a named AWS profile instead of the default chain
+# aws_profile = "dev"                  the profile in ~/.aws/credentials (a daily portal paste). Blank uses the
+#                                      process default: AWS_PROFILE, else the role on a VM, task or pod
 # base_url = "http://ollama.lan:11434/v1"   OpenAI-style providers: point at another endpoint
 # api_key_env = "MY_KEY_VAR"           which environment variable holds the key (default: <PROVIDER>_API_KEY)
-# api_key_cmd = "gcloud auth print-access-token"   a command that prints a short-lived token (vertex-gemini default);
-#                                      it runs on the server, so it can only be set here, never in the web view
+# api_key_cmd = "gcloud auth print-access-token"   optional one-shot token command. vertex-gemini refreshes
+#                                      application default credentials when this is unset. It runs on the server,
+#                                      so it can only be set here, never in the web view
 # effort = "high"                      Claude only: low | medium | high; "" leaves it out for older models
 # max_tokens = 16000                   longest answer per model call: Claude providers (default 16000) and
 #                                      bedrock-converse (default 4096); OpenAI-style providers use their own limit

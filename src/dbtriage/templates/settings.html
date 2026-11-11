@@ -45,6 +45,7 @@ document.addEventListener('change', function (e) {  // delegated: schedule rows 
 <label>Model <input name="model" id="a-model" list="model-list" autocomplete="off" value="$a_model" placeholder="pick from the list, or type an id">
 <datalist id="model-list"></datalist><span class="hint" id="model-status" aria-live="polite"></span></label>
 <label>Region <input name="region" value="$a_region" placeholder="us-east-1 · global"></label>
+<label>AWS profile <input name="aws_profile" value="$a_aws_profile" placeholder="dev · blank uses the default chain"></label>
 <label>Project (Vertex) <input name="project_id" value="$a_project_id"></label>
 <label>Resource (Foundry / Azure OpenAI) <input name="resource" value="$a_resource"></label>
 <label>Base URL (OpenAI-compatible) <input name="base_url" value="$a_base_url" placeholder="http://ollama.lan:11434/v1"></label>
@@ -60,7 +61,9 @@ document.addEventListener('change', function (e) {  // delegated: schedule rows 
 </fieldset>
 <div class="row">$agent_buttons</div>
 </form>
-<p class="mut">Only runs the schedule starts use the scheduled model; Run, webhooks and discussion use the one above. Keys and tokens are read from the environment of the process at run time; this page only stores their variable names. Values here override <code>[agent]</code> in targets.toml for the UI, cron and webhook runs alike.</p>
+<p class="mut" id="aws-status">$aws_status</p>
+<p class="mut">Only runs the schedule starts use the scheduled model; Run, webhooks and discussion use the one above. API keys are read from the environment of the process at run time; this page only stores their variable names. Daily access-portal keys stay in <code>~/.aws/credentials</code> (mode 600) or in <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code> and <code>AWS_SESSION_TOKEN</code>. This page never stores them. Paste today's keys into that file; a running process notices the new file without a restart. On a VM, a container or a pod, leave the profile blank and use the attached role. Do not mount a person's credentials file into the cluster.</p>
+<p class="mut">Database connections are not HTTP, so they are not sent through the proxy. Put cluster DNS (<code>.svc</code>, <code>.cluster.local</code>), the LAN addresses of databases and local model hosts, and <code>169.254.169.254</code> in <code>NO_PROXY</code> so HTTP calls (a local model, webhooks, instance metadata) can bypass it. Do not set <code>ALL_PROXY</code>. A shell variable wins over <code>.env</code>. Values here override <code>[agent]</code> in targets.toml for the UI, cron and webhook runs alike.</p>
 </div>
 <div class="card">
 <h2>Delivery (where reviews are posted)</h2>
@@ -80,7 +83,7 @@ $channel_blocks
   var form = prov.form, seq = 0;
   function load() {
     var mine = ++seq, q = new URLSearchParams({ provider: prov.value });
-    ['base_url', 'region', 'api_key_env', 'project_id', 'resource'].forEach(function (k) {
+    ['base_url', 'region', 'api_key_env', 'project_id', 'resource', 'aws_profile'].forEach(function (k) {
       var el = form.elements[k]; if (el && el.value) q.set(k, el.value);
     });
     status.textContent = 'looking up ' + prov.value + ' models…'; status.className = 'hint';
@@ -100,7 +103,7 @@ $channel_blocks
     }).catch(function (e) { if (mine === seq) { status.textContent = 'could not list models: ' + e.message; status.className = 'hint warn'; } });
   }
   prov.addEventListener('change', function () { model.value = ''; load(); });
-  ['base_url', 'region', 'api_key_env', 'project_id'].forEach(function (k) { var el = form.elements[k]; if (el) el.addEventListener('change', load); });
+  ['base_url', 'region', 'api_key_env', 'project_id', 'aws_profile'].forEach(function (k) { var el = form.elements[k]; if (el) el.addEventListener('change', load); });
   model.addEventListener('change', function () {
     var ids = [].map.call(list.options, function (o) { return o.value; });
     if (ids.length) { var ok = ids.indexOf(model.value) >= 0; status.textContent = ok ? ids.length + ' models available' : '"' + model.value + '" is not in the list ' + prov.value + ' returned'; status.className = 'hint' + (ok ? ' ok' : ' warn'); }

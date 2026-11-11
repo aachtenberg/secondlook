@@ -22,7 +22,9 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
     if triage.get("summary"):
         lines += [triage["summary"], ""]
     if triage.get("agent_error"):
-        lines += [f"⚠️ _agent unavailable, rules-based review shown: {triage['agent_error']}_", ""]
+        from dbtriage.egress import plain_provider_error
+
+        lines += [f"⚠️ _agent unavailable, rules-based review shown: {plain_provider_error(str(triage['agent_error']))}_", ""]
     lines.append(count_line(findings))
     lines.append("")
     for i, f in enumerate(findings, 1):

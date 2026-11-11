@@ -35,7 +35,7 @@ TARGET_FIELDS = ("engine", "dsn", "dsn_env", "top_n", "diagnostics_pack", "chang
                  "baseline_policy", "baseline", "schedule", "schedule_window", "schedule_paused")
 SCHEDULE_FIELDS = ("schedule", "schedule_window", "schedule_paused")
 WEB_FIELDS = ("title", "brand", "logo", "accent", "theme", "refresh_seconds", "page_size", "footer")
-AGENT_FIELDS = ("provider", "model", "region", "project_id", "resource", "base_url", "api_key_env", "effort", "max_tokens", "max_iterations",
+AGENT_FIELDS = ("provider", "model", "region", "aws_profile", "project_id", "resource", "base_url", "api_key_env", "effort", "max_tokens", "max_iterations",
                 "token_budget", "scheduled_provider", "scheduled_model", "scheduled_base_url", "scheduled_api_key_env")
 # api_key_cmd runs a command on the server, so it can only be set in targets.toml, never from the web view or its API
 AGENT_PROVIDERS = ("anthropic", "bedrock", "vertex", "foundry", "bedrock-converse",

@@ -53,6 +53,16 @@ live in `targets.toml` only.
 single sign-on proxy you already run and leave the token unset. Listening beyond loopback with runs, editing or
 discussions on and no token prints a warning at start, since anyone who can reach the port could use them.
 
+That proxy can also say who clicked. It is off until `DBTRIAGE_TRUST_PROXY` is set, because a browser can send
+the headers itself. `DBTRIAGE_PROXY_USER_HEADER` (default `X-Forwarded-User`) and
+`DBTRIAGE_PROXY_GROUPS_HEADER` (default `X-Forwarded-Groups`) name the headers the proxy overwrites. Optional
+comma-separated lists `DBTRIAGE_GROUP_VIEW`, `DBTRIAGE_GROUP_RUN`, `DBTRIAGE_GROUP_EDIT` and
+`DBTRIAGE_GROUP_CHAT` narrow who may read, run, edit and discuss. The process flags stay the ceiling: a group
+cannot turn on something the process was started without. `/health` stays open for monitors. With a token, the
+Basic username is recorded only after the password matches. This is not the cloud access portal, and it does
+not read `~/.aws/credentials`. When a person is known, changes print one `audit:` line. A run they start stores
+their name on the snapshot.
+
 `dbtriage mcp`, the [MCP server](mcp.md), is another: off unless `targets.toml` turns it on, and it talks over
 stdio only, so it does not listen on the network at all. `dbtriage serve`, the webhook receiver, is a separate process too: it listens on all interfaces (port 8080) and wants
 `DBTRIAGE_WEBHOOK_TOKEN` (see [operations](operations.md)).

@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from dbtriage import charts, chat, dbsnap, envfile, llm, mcp_server, scheduler
+from dbtriage import access, charts, chat, dbsnap, envfile, llm, mcp_server, scheduler
 from dbtriage.baseline import LABELS, POLICIES
 from dbtriage.config import Config, top_n_of
 from dbtriage.settings import AGENT_FIELDS, AGENT_PROVIDERS, CHANNEL_FIELDS, ENGINES, SCHEDULE_FIELDS, SEVERITIES, WEB_FIELDS, Settings, mask_dsn, probe
@@ -330,16 +330,9 @@ def normalize_finding(f: dict) -> dict:
 
 def agent_reason(err: str) -> str:
     """One plain sentence for why the model review did not run; the raw error stays behind 'details'."""
-    e = err.lower()
-    if any(k in e for k in ("authentication", "api_key", "api key", "credential", "unauthorized", "401", "403", "token")):
-        return "No credentials configured for the model provider."
-    if any(k in e for k in ("timed out", "timeout", "connection", "unreachable", "name resolution")):
-        return "The model provider could not be reached."
-    if "refus" in e or "declined" in e:
-        return "The model declined the request."
-    if "not found" in e or "404" in e or "model" in e and "exist" in e:
-        return "The configured model was not found at the provider."
-    return err.split("\n")[0][:140]
+    from dbtriage.egress import plain_provider_error
+
+    return plain_provider_error(err)
 
 
 def status_of(s: str | None) -> str:
@@ -384,6 +377,19 @@ class App:
         self.lock = threading.Lock()
         self.reload()
 
+    def allows(self, cap: str) -> bool:
+        """Process flag is the ceiling. A trusted-proxy group list, when set, narrows it.
+        With trust off, this is the flag. View is on unless a view group is configured."""
+        flag = {"run": self.allow_run, "edit": self.allow_edit, "chat": self.allow_chat}.get(cap, True)
+        return access.permits(access.current(), cap, flag)
+
+    def _gate_notice(self, msg: str | None, kind: str, flag: bool, allowed: bool, off: str, narrowed: str) -> str:
+        if msg:
+            return self._notice(msg, kind or ("bad" if not allowed else ""))
+        if allowed:
+            return ""
+        return self._notice(off if not flag else narrowed, "bad")
+
     def reload(self):
         """Recompute the effective config after the settings overlay changed."""
         cfg = self.settings.apply(self.seed)
@@ -409,7 +415,7 @@ class App:
 
     def sidenav(self, active: str | None, sid: str | None) -> str:
         """Left-hand navigation: every target with its latest severity, and under the active one its newest snapshots."""
-        add = "<a class='add' href='/targets/new' aria-label='add target' title='add target'>" + ICON["plus"] + "</a>" if self.allow_edit else ""
+        add = "<a class='add' href='/targets/new' aria-label='add target' title='add target'>" + ICON["plus"] + "</a>" if self.allows("edit") else ""
         out = [f"<div class='navhead'><h3>Targets</h3>{add}</div><div class='items'>"]
         for r in self.target_rows():
             n, lt = r["name"], r["latest"] or {}
@@ -503,8 +509,9 @@ class App:
         rows = []
         for sid in ids[offset:offset + limit]:
             m, tr = self.manifest_of(sid), self.triage_of(sid)
+            trig = m.get("trigger") or {}
             rows.append({"id": sid, "captured_at": m["captured_at"], "mode": m["window"]["mode"], "load": self.load_of(sid),
-                         "source": m.get("trigger", {}).get("source", ""), "reason": m.get("trigger", {}).get("reason", ""),
+                         "source": trig.get("source", ""), "reason": trig.get("reason", ""), "actor": trig.get("actor", ""),
                          "severity": (tr or {}).get("severity"), "title": (tr or {}).get("title"), "triaged_by": (tr or {}).get("source")})
         return rows, len(ids)
 
@@ -609,6 +616,9 @@ class App:
 
         if not self.allow_run:
             return 403, {"error": "runs are disabled (start with --allow-run)"}
+        # The scheduler is the process, not a person, so a click-group does not stop it.
+        if source != "schedule" and not self.allows("run"):
+            return 403, {"error": "your group cannot start runs"}
         if target not in self.cfg.targets:
             return 400, {"error": f"unknown target {target!r}"}
         if mode not in MODES:
@@ -619,8 +629,11 @@ class App:
             th = self.running.get(target)
             if th and th.is_alive():
                 return 409, {"error": f"a run for {target!r} is already in progress"}
+            who = "" if source == "schedule" else access.current().name
+            if who:
+                access.audit("run", f"{target} {mode}")
             req = TriageRequest(target=target, mode=mode, source=source, reason=reason[:200], window_minutes=int(window_minutes or 60),
-                                baseline_policy=baseline_policy or None, baseline=(baseline or "").strip() or None)
+                                baseline_policy=baseline_policy or None, baseline=(baseline or "").strip() or None, actor=who)
             th = threading.Thread(target=self._run, args=(req, use_llm), daemon=True, name=f"run-{target}")
             self.running[target] = th
             th.start()
@@ -637,7 +650,7 @@ class App:
     # ---------------------------------------------------------------- pages
     def run_dialog(self, target: str | None) -> str:
         """The Capture now dialog: the run form, for one target or with a target picker."""
-        if not self.allow_run:
+        if not self.allows("run"):
             return ""
         tsel = (f"<input type=hidden name=target value='{html.escape(target)}'>" if target else
                 "<label>Target<select name=target>" + "".join(f"<option>{html.escape(n)}</option>" for n in sorted(self.cfg.targets)) + "</select></label>")
@@ -651,7 +664,7 @@ class App:
                 "</form></dialog>")
 
     def capture_button(self) -> str:
-        return f"<button type=button class='primary' data-dialog='run'>{ICON['plus']}Capture now</button>" if self.allow_run else ""
+        return f"<button type=button class='primary' data-dialog='run'>{ICON['plus']}Capture now</button>" if self.allows("run") else ""
 
     def index(self) -> bytes:
         rows = []
@@ -684,8 +697,9 @@ class App:
         for r in rows:
             tr = self.triage_of(r["id"]) or {}
             where = tr["findings"][0].get("where") if tr.get("findings") else None
+            who = f" · {html.escape(r['actor'])}" if r.get("actor") else ""
             trs.append(f"<tr><td><a class=ts href='/s/{html.escape(r['id'])}'>{_fmt_ts(r['captured_at'])}</a></td><td class=dim>{r['mode']}</td>"
-                       f"<td class=dim>{html.escape(r['source'])}{(' · ' + html.escape(r['reason'])) if r['reason'] else ''}</td><td>{sev(r['severity'])}</td>"
+                       f"<td class=dim>{html.escape(r['source'])}{who}{(' · ' + html.escape(r['reason'])) if r['reason'] else ''}</td><td>{sev(r['severity'])}</td>"
                        f"<td>{finding_cell(r['title'], where)}</td><td class='r mut'>{html.escape(r['triaged_by'] or '')}</td></tr>")
         links = [f"<a href='{html.escape(l.get('url', ''))}'>{html.escape(l.get('label', ''))}</a>" for l in t.extra.get("links") or []]
         sched = next((r for r in self.schedule_rows() if r["target"] == name), None)
@@ -781,7 +795,7 @@ class App:
                 items = []
                 for i, f in enumerate((normalize_finding(x) for x in tr.get("findings") or []), 1):
                     disc = ""
-                    if self.allow_chat:
+                    if self.allows("chat"):
                         disc = (f"<a class='chat-link' data-chat='finding-{i}' href='/api/snapshots/{html.escape(sid)}/chat/finding-{i}'>"
                                 f"{ICON['chat']}Discuss{self._thread_count(sid, f'finding-{i}')}</a>")
                     ev = "".join(f"<li>{link_ids(e)}</li>" for e in (f.get("evidence") or [])[:4])
@@ -818,7 +832,7 @@ class App:
             for q in top_rows:
                 qid = str(q.get("sql_id") or "")
                 ask = ""
-                if self.allow_chat and chat.KEY_RE.match(f"sql-{qid}"):
+                if self.allows("chat") and chat.KEY_RE.match(f"sql-{qid}"):
                     ask = (f"<a class='askbtn' data-chat='sql-{html.escape(qid)}' href='/api/snapshots/{html.escape(sid)}/chat/sql-{html.escape(qid)}'"
                            f" aria-label='Ask AI about this query' title='Ask AI about this query'>{ICON['chat']}</a>")
                 trs.append(f"<tr><td><a class='mono' href='/t/{T}/sql/{html.escape(qid)}' title='{html.escape(qid)}'>{html.escape(short(qid))}</a></td>"
@@ -838,7 +852,7 @@ class App:
 
         # ---- discuss panel
         discuss, discuss_btn = "", ""
-        if self.allow_chat and tr:
+        if self.allows("chat") and tr:
             ok, why = llm.configured(self.cfg.agent)
             ctx = [T, f"{captured[11:19]} vs {b_time}" if b_time else f"{captured[11:19]}, no baseline", "triage.md + compare.json"]
             sugg = self._suggestions(sid, tr, top_rows, d.get("load_profile") or {}, m)
@@ -1064,7 +1078,7 @@ class App:
             fid = "sched-" + re.sub(r"[^A-Za-z0-9_-]", "_", r["target"])
             f = f"form='{fid}'"  # every control names its form, so a row stays wired after it is replaced in place
             pause = (f"<button{ro} {f} class=quiet name=action value=resume>Resume</button>" if r["paused"] else f"<button{ro} {f} class=quiet name=action value=pause>Pause</button>") if r["schedule"] else ""
-            runbtn = f"<button{'' if self.allow_run else ' disabled'} {f} class=quiet name=action value=run title='collect and review now'>Run now</button>"
+            runbtn = f"<button{'' if self.allows('run') else ' disabled'} {f} class=quiet name=action value=run title='collect and review now'>Run now</button>"
             rows.append(f"<tr{' class=paused' if r['paused'] else ''}><td><form id='{fid}' method=post action=/schedule/save class=inline data-ajax=refresh-card>"
                         f"<input type=hidden name=name value='{n}'></form><a href='/t/{n}'>{n}</a></td>"
                         f"<td><select {f} name=schedule class=sched aria-label='schedule for {n}'>{opts}</select> <input {f} name=schedule_custom class=cron aria-label='cron line for {n}' "
@@ -1091,6 +1105,8 @@ class App:
     def chat_ask(self, sid: str, key: str, question: str) -> tuple[int, dict]:
         if not self.allow_chat:
             return 403, {"error": "discussion is disabled (start with --allow-chat)"}
+        if not self.allows("chat"):
+            return 403, {"error": "your group cannot use chat"}
         finding = key if key.startswith("sql-") else (int(key.split("-", 1)[1]) if key.startswith("finding-") else None)
         try:  # decided from the snapshot itself: read it, so an outage is a 503, not a missing snapshot
             if not key_ok(sid):
@@ -1114,6 +1130,7 @@ class App:
             print(f"web: chat for {sid}/{key} failed:\n{traceback.format_exc()}", file=sys.stderr)
             return 502, {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
         answer["html"], answer["footer"] = md_to_html(answer["text"]), chat.footer(answer)
+        access.audit("chat", f"{sid} {key}")
         return 200, answer
 
     # ---------------------------------------------------------------- settings (UI-editable config)
@@ -1124,20 +1141,25 @@ class App:
         w = self.web
         rows = []
         for name, t in sorted(self.cfg.targets.items()):
-            edit = f"<a href='/targets/{html.escape(name)}'>edit</a>" if self.allow_edit else ""
+            edit = f"<a href='/targets/{html.escape(name)}'>edit</a>" if self.allows("edit") else ""
             rows.append(f"<tr><td><a href='/t/{html.escape(name)}'>{html.escape(name)}</a></td><td>{t.engine}</td>"
                         f"<td><code>{html.escape(mask_dsn(t.dsn) or ('$' + str(t.extra.get('dsn_env'))))}</code></td>"
                         f"<td class=mut>{self.settings.origin(name, self.seed)}</td><td>{edit}</td></tr>")
-        ro = "" if self.allow_edit else " disabled"
-        notice = msg or ("" if self.allow_edit else "Read-only: start the web view with --allow-edit to change settings here.")
-        return self.page("settings.html", "settings", active="/settings", notice=self._notice(notice, kind or ("" if self.allow_edit else "bad")),
-                         target_rows="\n".join(rows), add_link="<a href='/targets/new'>+ add target</a>" if self.allow_edit else "",
+        ro = "" if self.allows("edit") else " disabled"
+        notice = self._gate_notice(msg, kind, self.allow_edit, self.allows("edit"),
+                                   "Read-only: start the web view with --allow-edit to change settings here.",
+                                   "Read-only: your group cannot edit.")
+        from dbtriage.awscred import profile_name, status_line
+
+        return self.page("settings.html", "settings", active="/settings", notice=notice,
+                         target_rows="\n".join(rows), add_link="<a href='/targets/new'>+ add target</a>" if self.allows("edit") else "",
                          db_writes_note=self._db_writes_note(), mcp_note=self._mcp_note(),
                          web_title=html.escape(w["title"]), brand=html.escape(w["brand"]), logo=html.escape(w.get("logo") or ""),
                          accent=html.escape(w["accent"]), refresh_seconds=int(w["refresh_seconds"]), page_size=int(w["page_size"]),
                          footer=html.escape(w.get("footer") or ""), settings_file=html.escape(self.settings.where),
                          theme_opts="".join(f"<option{' selected' if w['theme'] == o else ''}>{o}</option>" for o in ("auto", "light", "dark")),
                          save_button=f"<button{ro} class=primary>Save</button>", schedule_card=self._schedule_card(ro),
+                         aws_status=html.escape(status_line(profile_name(self.cfg.agent))),
                          **self._agent_fields(ro), **self._delivery_fields(ro))
 
     def _agent_fields(self, ro: str) -> dict:
@@ -1232,13 +1254,15 @@ class App:
         v = values if values is not None else (self.settings.form_of(name, self.seed) if name else {})
         new = not name
         links = "\n".join(f"{l.get('label', '')} {l.get('url', '')}" for l in v.get("links") or [])
-        ro = "" if self.allow_edit else " disabled"
+        ro = "" if self.allows("edit") else " disabled"
         buttons = f"<button{ro}>Save</button> <button{ro} class=quiet name=action value=probe>Test connection</button>"
-        if not new and self.allow_edit:
+        if not new and self.allows("edit"):
             buttons += f" <button class=danger name=action value=delete formaction='/targets/{html.escape(name)}/delete'>Delete</button>"
-        notice = msg or ("" if self.allow_edit else "Read-only: start the web view with --allow-edit to change targets here.")
+        notice = self._gate_notice(msg, kind, self.allow_edit, self.allows("edit"),
+                                   "Read-only: start the web view with --allow-edit to change targets here.",
+                                   "Read-only: your group cannot edit.")
         return self.page("target_edit.html", "add target" if new else name, active="/settings",
-                         heading="Add target" if new else f"Edit target {html.escape(name)}", notice=self._notice(notice, kind or ("" if self.allow_edit else "bad")),
+                         heading="Add target" if new else f"Edit target {html.escape(name)}", notice=notice,
                          tname=html.escape(name or v.get("name", "")), name_ro="" if new else "readonly",
                          engine_opts="".join(f"<option{' selected' if v.get('engine') == e else ''}>{e}</option>" for e in ENGINES),
                          dsn="", dsn_placeholder=html.escape(mask_dsn(v.get("dsn")) or "postgresql://user:pass@host:5432/db · mysql://… · host:1521/service"),
@@ -1323,7 +1347,7 @@ class App:
         return probe(t)
 
     def api_settings(self) -> dict:
-        return {"web": {k: self.web.get(k) for k in WEB_FIELDS}, "settings_file": self.settings.where, "editable": self.allow_edit,
+        return {"web": {k: self.web.get(k) for k in WEB_FIELDS}, "settings_file": self.settings.where, "editable": self.allows("edit"),
                 "agent": {k: self.cfg.agent.get(k) for k in AGENT_FIELDS if self.cfg.agent.get(k) not in (None, "")},
                 "allow_db_writes": dbsnap.writes_allowed(self.cfg.collect),  # targets.toml only: never changed here
                 "mcp": {**mcp_server.settings(self.cfg), "problems": mcp_server.problems(self.cfg),  # targets.toml only too
@@ -1367,12 +1391,39 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
         def _authed(self) -> bool:
             if not token:
                 return True
+            return hmac.compare_digest(self._basic_password().encode(), token.encode())
+
+        def _basic_parts(self) -> tuple[str, str]:
             hdr = self.headers.get("Authorization", "")
             try:
-                given = base64.b64decode(hdr[6:]).decode().split(":", 1)[1] if hdr.startswith("Basic ") else ""
+                raw = base64.b64decode(hdr[6:]).decode() if hdr.startswith("Basic ") else ""
+                user, _, password = raw.partition(":")
+                return user, password
             except Exception:  # noqa: BLE001
-                given = ""
-            return hmac.compare_digest(given.encode(), token.encode())
+                return "", ""
+
+        def _basic_password(self) -> str:
+            return self._basic_parts()[1]
+
+        def _enter(self) -> None:
+            """Who this request is. Proxy headers only when trusted. The Basic username counts
+            only after the password matches, and never when the process has no token."""
+            user = self._basic_parts()[0] if token and self._authed() else ""
+            access.set_current(access.actor_from(self.headers, user))
+
+        def _cap(self, cap: str, api: bool) -> bool:
+            """True when this request may do cap. The process flag's sentence stays when the
+            flag itself is off; a different sentence when the flag is on and the group is not."""
+            if app.allows(cap):
+                return True
+            flag = {"edit": allow_edit, "run": allow_run, "chat": allow_chat}[cap]
+            off = {"edit": "editing is disabled (start with --allow-edit)",
+                   "run": "runs are disabled (start with --allow-run)",
+                   "chat": "discussion is disabled (start with --allow-chat)"}[cap]
+            narrowed = {"edit": "your group cannot edit", "run": "your group cannot start runs",
+                        "chat": "your group cannot use chat"}[cap]
+            self._error(403, off if not flag else narrowed, api)
+            return False
 
         def _send(self, body: bytes, ctype="text/html; charset=utf-8", code=200, extra: dict | None = None):
             self.send_response(code)
@@ -1432,6 +1483,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
         def do_GET(self):  # noqa: N802
             if envfile.refresh():  # a key added to .env is live on the next request
                 app.reload()
+            self._enter()
             u = urlparse(self.path)
             path, q = unquote(u.path), parse_qs(u.query)
             api = path.startswith("/api/")
@@ -1443,11 +1495,19 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                        "chat_enabled": allow_chat, "scheduler": bool(app.scheduler), **st}
                 if token and not self._authed():  # without the password, health only: no hosts, no locations
                     out = {k: out[k] for k in ("ok", "store_ok", "settings_ok", "spooled")}
+                else:
+                    from dbtriage.awscred import describe as aws_describe
+                    from dbtriage.awscred import profile_name
+
+                    # Cached status only. Do not call STS or the metadata service from here.
+                    out["aws"] = aws_describe(profile_name(app.cfg.agent))
                 return self._json(out)
             if path == "/api/settings/agent/models" and not self._same_origin():  # it calls out with the provider key
                 return self._refuse("cross-site request refused")
             if not self._authed():
                 return self._send(b"auth required", "text/plain", 401, {"WWW-Authenticate": 'Basic realm="dbtriage"'})
+            if not app.allows("view"):
+                return self._error(403, "your group cannot view this", api)
             try:
                 if path == "/":
                     return self._send(app.index())
@@ -1476,8 +1536,8 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 if path == "/api/settings":
                     return self._json(app.api_settings())
                 if path == "/api/settings/agent/models":
-                    if not allow_edit:
-                        return self._error(403, "editing is disabled (start with --allow-edit)", True)
+                    if not self._cap("edit", True):
+                        return
                     ids, note, prov = app.agent_models({k: q[k][0] for k in AGENT_FIELDS if q.get(k, [""])[0]})
                     return self._json({"provider": prov, "models": ids, "note": note})
                 if path == "/api/schedule":
@@ -1530,6 +1590,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
         def do_POST(self):  # noqa: N802
             if envfile.refresh():
                 app.reload()
+            self._enter()
             if not self._host_ok():
                 return self._refuse("unexpected Host header")
             if not self._same_origin():
@@ -1537,6 +1598,8 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
             if not self._authed():
                 return self._send(b"auth required", "text/plain", 401, {"WWW-Authenticate": 'Basic realm="dbtriage"'})
             path = unquote(urlparse(self.path).path)
+            if not app.allows("view"):
+                return self._error(403, "your group cannot view this", path.startswith("/api/"))
             try:
                 if path == "/api/run":
                     body = json.loads(self._read_body() or b"{}")
@@ -1544,8 +1607,8 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                                               not body.get("no_llm", False), body.get("baseline_policy"), body.get("baseline"))
                     return self._json(out, code)
                 if path == "/api/settings/agent/test":
-                    if not allow_edit:  # it can point the provider key at another endpoint: an edit in all but name
-                        return self._error(403, "editing is disabled (start with --allow-edit)", True)
+                    if not self._cap("edit", True):  # it can point the provider key at another endpoint: an edit in all but name
+                        return
                     ok, msg = app.test_agent(json.loads(self._read_body() or b"{}"))
                     return self._json({"ok": ok, "message": msg})
                 if m := re.match(r"^/api/snapshots/(.+?)/chat/([^/]+)$", path):
@@ -1558,8 +1621,8 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                         return self._error(404, str(exc) or "not found", True)
                     return self._json(out, code)
                 if m := re.match(r"^/api/settings/delivery/([^/]+)/test$", path):
-                    if not allow_edit:  # it posts to real channels and can open tickets
-                        return self._error(403, "editing is disabled (start with --allow-edit)", True)
+                    if not self._cap("edit", True):  # it posts to real channels and can open tickets
+                        return
                     ok, msg = app.test_delivery(m[1])
                     return self._json({"ok": ok, "message": msg})
                 if path == "/api/settings" or re.match(r"^/api/targets/[^/]+$", path):
@@ -1570,12 +1633,13 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                     code, out = app.start_run(m[1], "scheduled", "run now from the schedule page", True, window_minutes=win)
                     return self._json(out, code)
                 if m := re.match(r"^/api/schedule/([^/]+)$", path):
-                    if not allow_edit:
-                        return self._error(403, "editing is disabled (start with --allow-edit)", True)
+                    if not self._cap("edit", True):
+                        return
                     body = json.loads(self._read_body() or b"{}")
                     problems = app.save_schedule(m[1], {k: body.get(k) for k in SCHEDULE_FIELDS})
                     if problems:
                         return self._json({"error": "; ".join(problems)}, 400)
+                    access.audit("settings", f"schedule {m[1]}")
                     return self._json(next(x for x in app.schedule_rows() if x["target"] == m[1]))
                 if m := re.match(r"^/api/targets/([^/]+)/probe$", path):
                     if m[1] not in app.cfg.targets:
@@ -1590,8 +1654,8 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                         win = next((x["window"] for x in app.schedule_rows() if x["target"] == name), 60)
                         code, out = app.start_run(name, "scheduled", "run now from the schedule page", True, window_minutes=win)
                         return self._send(app.settings_page(f"{name}: {'run started' if code == 202 else out['error']}", "good" if code == 202 else "bad"), code=200 if code == 202 else code)
-                    if not allow_edit:
-                        return self._error(403, "editing is disabled (start with --allow-edit)", False)
+                    if not self._cap("edit", False):
+                        return
                     cur = next((x for x in app.schedule_rows() if x["target"] == name), None)
                     sched = g("schedule_custom") if g("schedule") == "custom" else g("schedule")
                     paused = (cur["paused"] if cur else False)
@@ -1599,10 +1663,11 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                     problems = app.save_schedule(name, {"schedule": sched, "schedule_window": g("schedule_window"), "schedule_paused": paused})
                     if problems:
                         return self._send(app.settings_page("; ".join(problems), "bad"), code=400)
+                    access.audit("settings", f"schedule {name}")
                     return self._send(app.settings_page(f"{name}: {scheduler.describe(sched)}{' (paused)' if paused and sched else ''}", "good"))
                 if path.startswith("/settings/") or path.startswith("/targets/"):
-                    if not allow_edit:
-                        return self._error(403, "editing is disabled (start with --allow-edit)", False)
+                    if not self._cap("edit", False):
+                        return
                     form = parse_qs(self._read_body().decode(), keep_blank_values=True)
                     return self._edit_form(path, form)
                 if path == "/run":
@@ -1628,6 +1693,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 # only the fields the form actually has: a missing one is "not given", never "cleared"
                 app.settings.put_web({k: form[k][0].strip() for k in WEB_FIELDS if k in form}, base={**DEFAULTS, **app.seed.web})
                 app.reload()
+                access.audit("settings", path)
                 return self._send(app.settings_page("saved", "good"))
             if path == "/settings/agent":
                 fields = {k: form[k][0].strip() for k in AGENT_FIELDS if k in form}  # the card has no max_tokens input
@@ -1638,6 +1704,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 if problems:
                     return self._send(app.settings_page("; ".join(problems), "bad"), code=400)
                 app.reload()
+                access.audit("settings", path)
                 return self._send(app.settings_page("agent settings saved", "good"))
             if path == "/settings/delivery":
                 action = form.get("action", [""])[0]
@@ -1645,6 +1712,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 if problems:
                     return self._send(app.settings_page("; ".join(problems), "bad"), code=400)
                 app.reload()
+                access.audit("settings", path)
                 if action.startswith("test:"):
                     ok, msg = app.test_delivery(action[5:])
                     return self._send(app.settings_page(f"delivery {'ok: ' if ok else 'failed: '}{msg}", "good" if ok else "bad"))
@@ -1658,16 +1726,18 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 problems = app.save_target(name, fields)
                 if problems:
                     return self._send(app.target_form(name if name in app.cfg.targets else None, "; ".join(problems), "bad", values={**fields, "name": name}), code=400)
+                access.audit("settings", f"target {name}")
                 return self._send(b"", code=303, extra={"Location": "/settings"})
             if m := re.match(r"^/targets/([^/]+)/delete$", path):
                 app.settings.delete_target(m[1], seeded=m[1] in app.seed.targets)
                 app.reload()
+                access.audit("settings", f"delete target {m[1]}")
                 return self._send(b"", code=303, extra={"Location": "/settings"})
             return self._error(404, "not found", False)
 
         def _api_edit(self, path: str):
-            if not allow_edit:
-                return self._error(403, "editing is disabled (start with --allow-edit)", True)
+            if not self._cap("edit", True):
+                return
             body = json.loads(self._read_body() or b"{}")
             if path == "/api/settings":
                 if "collect" in body or "allow_db_writes" in body:  # the owner of targets.toml decides whether dbtriage may write
@@ -1685,6 +1755,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 app.reload()
                 if problems:
                     return self._json({"error": "; ".join(problems)}, 400)
+                access.audit("settings", path)
                 return self._json(app.api_settings())
             name = path.rsplit("/", 1)[1]
             if self.command == "DELETE":
@@ -1692,10 +1763,12 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                     return self._error(404, "unknown target", True)
                 app.settings.delete_target(name, seeded=name in app.seed.targets)
                 app.reload()
+                access.audit("settings", f"delete target {name}")
                 return self._json({"deleted": name})
             problems = app.save_target(name, dict(body))
             if problems:
                 return self._json({"error": "; ".join(problems)}, 400)
+            access.audit("settings", f"target {name}")
             return self._json(app.api_settings()["targets"][name])
 
         def do_PUT(self):  # noqa: N802

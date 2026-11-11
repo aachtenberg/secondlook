@@ -8,7 +8,7 @@ Every snapshot, review and discussion is kept in one store. You pick it with a U
 | URL | Where the data goes | How it signs in |
 |---|---|---|
 | `file:///var/lib/dbtriage` | a local disk, or an NFS or SMB share used by several servers | file permissions |
-| `s3://bucket/prefix` | AWS S3, or anything S3-compatible: MinIO, Ceph, versitygw (set `AWS_ENDPOINT_URL`) | the usual AWS chain: environment, profile, instance role |
+| `s3://bucket/prefix` | AWS S3, or anything S3-compatible: MinIO, Ceph, versitygw (set `AWS_ENDPOINT_URL`) | the usual AWS chain: environment, profile, or the role on the workload. A daily session token is part of that chain, and a long-running process re-reads the credentials file when it changes |
 | `az://container/prefix` | Azure Blob Storage (install with `uv sync --extra azure`) | `AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_STORAGE_ACCOUNT` with a SAS token or a managed identity |
 | `postgres://user@host:5432/db?schema=dbtriage` | any PostgreSQL-compatible database: PostgreSQL, RDS or Aurora, Cloud SQL, AlloyDB, Azure Database for PostgreSQL, CockroachDB, YugabyteDB | `PGPASSWORD` or `~/.pgpass` is best; a password in the URL works and is always shown masked |
 

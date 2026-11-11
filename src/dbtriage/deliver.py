@@ -41,7 +41,9 @@ def _post(url: str, body, headers: dict | None = None, json_body: bool = True) -
     data = json.dumps(body).encode() if json_body else body
     req = urllib.request.Request(url, data=data, method="POST",
                                  headers={"Content-Type": "application/json" if json_body else "text/plain", **(headers or {})})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    from dbtriage.egress import urlopen
+
+    with urlopen(req, 20) as r:  # AWS_CA_BUNDLE when set; the process proxy env still applies
         return r.read().decode(errors="replace")
 
 
@@ -113,8 +115,10 @@ def send_pushgateway(cfg, t, md):
     body = (f"# TYPE dbtriage_severity gauge\ndbtriage_severity{{{labels}}} {RANK.get(t['severity'], 0)}\n"
             f"# TYPE dbtriage_last_run_timestamp_seconds gauge\ndbtriage_last_run_timestamp_seconds{{{labels}}} {t.get('ts', 0)}\n")
     url = f"{cfg['url'].rstrip('/')}/metrics/job/{job}/target/{t['target']}"
+    from dbtriage.egress import urlopen
+
     req = urllib.request.Request(url, data=body.encode(), method="PUT", headers={"Content-Type": "text/plain"})
-    urllib.request.urlopen(req, timeout=20).read()
+    urlopen(req, 20).read()
 
 
 CHANNELS = {"stdout": send_stdout, "ntfy": send_ntfy, "slack": send_slack, "teams": send_teams, "email": send_email,

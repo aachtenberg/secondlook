@@ -4,7 +4,8 @@
 # [agent]
 # provider = "bedrock"
 # model = "anthropic.claude-opus-5-5"     # Bedrock ids carry the anthropic. prefix
-# region = "us-east-1"                    # AWS creds from the environment / SSO / instance role
+# region = "us-east-1"                    # laptop: aws_profile = "dev" after pasting today's portal keys
+# aws_profile = "dev"                     # blank on a VM, task or pod: the attached role, no credentials file
 
 # [agent]
 # provider = "vertex"
@@ -22,15 +23,16 @@
 # provider = "vertex-gemini"              # Gemini on Vertex AI, project credentials only
 # model = "gemini-3.8-flash"
 # project_id = "my-gcp-project"
-# region = "global"                       # api_key_cmd defaults to "gcloud auth print-access-token"
+# region = "global"                       # application default credentials refresh the token; api_key_cmd is optional
 
 # [agent]
 # provider = "bedrock-converse"           # any Bedrock model through Converse; Nova needs no agreement
 # model = "us.amazon.nova-lite-v1:0"      # or us.amazon.nova-pro-v1:0; Claude ids work here too once accepted
-# region = "us-east-1"
+# region = "us-east-1"                    # same identity as bedrock: a profile on a laptop, a role in the cloud
+# aws_profile = "dev"
 
 # [agent]                                 # Azure OpenAI deployment instead of Claude
 # provider = "azure-openai"
 # model = "gpt-5-mini"                    # the deployment name
 # base_url = "https://<resource>.cognitiveservices.azure.com/openai/v1/"
-# api_key_env = "AZURE_OPENAI_API_KEY"    # a resource key, or an Entra access token for cognitiveservices.azure.com
+# api_key_env = "AZURE_OPENAI_API_KEY"    # omit the key and the process identity supplies the Entra token

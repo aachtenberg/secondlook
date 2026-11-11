@@ -1,0 +1,39 @@
+# Azure Container Apps with a system-assigned identity. Azure OpenAI with no API key
+# uses that identity. No daily keys. The PEM is a secret, not a person's credentials file.
+# Do not set ALL_PROXY. Database connections on the LAN or in-cluster are not HTTP.
+location: eastus
+identity:
+  type: SystemAssigned
+properties:
+  configuration:
+    ingress:
+      external: false
+      targetPort: 8081
+    secrets:
+      - name: corporate-ca
+        value: CORPORATE_BUNDLE_PEM
+  template:
+    containers:
+      - name: dbtriage
+        image: dbtriage:latest
+        args: ["web", "--host", "0.0.0.0", "--port", "8081", "--allow-run", "--schedule"]
+        env:
+          - name: HTTPS_PROXY
+            value: http://proxy.example:8080
+          - name: HTTP_PROXY
+            value: http://proxy.example:8080
+          - name: NO_PROXY
+            value: localhost,127.0.0.1,169.254.169.254,.svc,.cluster.local,192.168.0.0/24
+          - name: AWS_CA_BUNDLE
+            value: /etc/ssl/corporate/bundle.pem
+          - name: DBTRIAGE_CONFIG
+            value: /conf/targets.toml
+        volumeMounts:
+          - volumeName: ca
+            mountPath: /etc/ssl/corporate
+    volumes:
+      - name: ca
+        storageType: Secret
+        secrets:
+          - secretRef: corporate-ca
+            path: bundle.pem
