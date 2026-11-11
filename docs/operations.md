@@ -115,7 +115,8 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
 
 - `min_severity` keeps quiet results quiet. Tickets (Jira, Plane) default to high only.
 - `pushgateway` exposes `dbtriage_severity{target,engine}` and `dbtriage_last_run_timestamp_seconds`, so Prometheus
-  can alert on a bad result or on runs that stopped.
+  can alert on a bad result or on runs that stopped, and `dbtriage_rules_dropped`, the number of rules findings at
+  medium or above the model's review left out (a rising number is a prompt or model problem to look at).
 - `webhook` posts the review as JSON to anything else, such as the Datadog or Dynatrace events API.
 
 ## Safety rules

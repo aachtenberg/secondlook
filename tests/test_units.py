@@ -86,6 +86,26 @@ def test_ticket_channels_default_to_high(monkeypatch):
     assert sent == [("jira", "medium")]  # an explicit setting wins
 
 
+def test_pushgateway_counts_the_rules_findings_the_model_dropped(monkeypatch):
+    from dbtriage import deliver as d
+
+    sent = []
+
+    class R:
+        def read(self):
+            return b""
+
+    monkeypatch.setattr("dbtriage.egress.urlopen", lambda req, timeout: sent.append(req) or R())
+    t = {"severity": "high", "target": "t", "engine": "postgres", "title": "x", "ts": 5,
+         "agreement": [{"mark": "rules_only", "severity": "high"}, {"mark": "rules_only", "severity": "low"}, {"mark": "both", "severity": "high"}]}
+    d.send_pushgateway({"url": "http://pg:9091"}, t, "md")
+    body = sent[0].data.decode()
+    assert 'dbtriage_severity{target="t",engine="postgres"} 3' in body and 'dbtriage_rules_dropped{target="t",engine="postgres"} 1' in body
+    assert sent[0].full_url == "http://pg:9091/metrics/job/dbtriage/target/t" and sent[0].get_method() == "PUT"
+    d.send_pushgateway({"url": "http://pg:9091"}, dict(t, agreement=None), "md")  # a rules-only review drops nothing
+    assert 'dbtriage_rules_dropped{target="t",engine="postgres"} 0' in sent[1].data.decode()
+
+
 def test_report_literals_are_masked_without_breaking_layout():
     from dbtriage.redact import mask_report_literals
 

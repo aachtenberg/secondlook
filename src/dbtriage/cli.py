@@ -15,6 +15,7 @@ from dbtriage.collectors import get_collector
 from dbtriage.collectors.base import Window
 from dbtriage.config import Config, load_config
 from dbtriage.deliver import deliver
+from dbtriage.findings import agreement
 from dbtriage.report import render_markdown
 from dbtriage.storage import Storage, open_storage
 from dbtriage.baseline import POLICIES
@@ -123,6 +124,7 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
     result.update({"snapshot": sid, "baseline": baseline, "target": target, "engine": engine, "mode": mode,
                    "baseline_policy": how[0] if how else None, "baseline_reason": how[1] if how else None,
                    "ts": int(time.time()), "heuristics": (comparison or {}).get("findings", [])})
+    result["agreement"] = agreement(result, result["heuristics"])  # None for a rules-only review; the markdown shows the marks
     md = render_markdown(result, comparison)
     store.put_json(f"{sid}/triage.json", result)
     store.put_text(f"{sid}/triage.md", md)

@@ -110,6 +110,7 @@ def test_triage_falls_back_to_rules_when_provider_fails(tmp_path, monkeypatch, c
     ids = st.list_snapshots("postgres", "demo")
     result, comparison = cli.triage(cfg, st, ids[-1], ids[-2], "adhoc", use_llm=True)
     assert result["source"] == "rules" and "401" in result["agent_error"] and comparison["findings"]
+    assert result["agreement"] is None and st.get_json(f"{ids[-1]}/triage.json")["agreement"] is None  # rules only: nothing to agree with
     assert "using rules-based triage" in capsys.readouterr().err
     assert "agent unavailable" in st.get(f"{ids[-1]}/triage.md").decode()
 
@@ -130,6 +131,29 @@ def test_render_review_markdown():
     assert "ollama:m · 3 tool calls · 1,200 in / 50 out tokens · 4.2s · confidence high · 2 heuristic findings · snapshot `s2` vs `s1`" in md
     none = render_markdown(dict(t, severity="info", findings=[], source="rules"), None)
     assert "✅ **No significant change.**" in none and "rules-based (no model)" in none
+
+
+def test_render_markdown_agreement_section():
+    from dbtriage.report import render_markdown
+
+    heur = [{"severity": "high", "kind": "deadlocks", "title": "4 deadlocks in the window", "evidence": {"deadlocks": 4}},
+            {"severity": "medium", "kind": "sql_regressed", "title": "q1 regressed", "evidence": {"sql_id": "q1"}},
+            {"severity": "low", "kind": "bloat", "title": "t is bloated", "evidence": {"table": "t"}}]
+    t = {"target": "demo", "engine": "postgres", "severity": "medium", "source": "agent", "snapshot": "s2", "confidence": "high",
+         "findings": [{"severity": "medium", "kind": "sql_regressed", "subject": "q1", "where": "q1", "summary": "slow"},
+                      {"severity": "low", "kind": "other", "subject": "", "where": "x", "summary": "added"}],
+         "heuristics": heur,
+         "agreement": [{"mark": "both", "kind": "sql_regressed", "subject": "q1", "model": 0, "rules": 1, "severity": "medium"},
+                       {"mark": "model_only", "kind": "other", "subject": "", "model": 1, "rules": None, "severity": "low"},
+                       {"mark": "rules_only", "kind": "deadlocks", "subject": "", "model": None, "rules": 0, "severity": "high"},
+                       {"mark": "rules_only", "kind": "bloat", "subject": "t", "model": None, "rules": 2, "severity": "low"}]}
+    md = render_markdown(t, {"findings": heur})
+    assert "**Agreement:** 1 both, 1 model only, 2 rules only" in md
+    assert "- ⚠️ rules found, not in the review: 🔴 **High** · 4 deadlocks in the window" in md
+    assert "t is bloated" not in md and "q1 regressed" not in md  # low and matched ones stay out of Slack
+    assert md.index("**Agreement:**") < md.index("confidence high · 3 heuristic findings")  # before the footer
+    assert "Agreement" not in render_markdown(dict(t, source="rules", agreement=None), None)
+    assert "Agreement" not in render_markdown({k: v for k, v in t.items() if k != "agreement"}, None)
 
 
 def test_agent_settings_reach_the_reviewer(tmp_path, monkeypatch):

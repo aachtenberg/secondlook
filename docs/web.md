@@ -32,6 +32,18 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
 Saving on the Settings page happens in place: the page stays where it is and the result appears as a toast in the
 corner. Changing the look reloads the page once, at the same spot, so the new colours apply.
 
+## Rules and model on the same review
+
+The rules run on every snapshot, whether or not a model reviews it, and both results are stored in `triage.json`
+(the model's `findings`, the rules' `heuristics`). When the model wrote the review, each of its findings carries a
+mark: **both** when a rule found the same thing (same kind and subject: the sql id, table, wait class or parameter),
+or **model only** when the model added it. Rules findings at medium or above that the model left out are listed
+under the review as **Rules found, not in the review**, with their title and severity, so a fluent write-up cannot
+hide a `blocking` or `deadlocks` hit; the low ones fold into a count. The same section goes into the delivered
+markdown as a few **Agreement** lines, and the count of dropped findings is in `/api/targets/<name>/snapshots` as
+`rules_dropped` and in the `dbtriage_rules_dropped` gauge. A rules-only review has nothing to compare with and
+says so; reviews stored before the marks existed render as before.
+
 ## Branding
 
 On the Settings page, or in `[web]`: `brand`, `title`, `logo` (a file or a URL), `accent`, `theme` (dark,

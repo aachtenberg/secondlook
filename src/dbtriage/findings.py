@@ -72,3 +72,43 @@ def match(model_findings: list[dict], rules_findings: list[dict]) -> list[dict]:
     for row in rows.values():
         row["mark"] = "both" if row["model"] and row["rules"] else "model_only" if row["model"] else "rules_only"
     return list(rows.values())
+
+
+SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3}
+
+
+def agreement(review: dict, heuristics: list[dict] | None) -> list[dict] | None:
+    """The marks between a model review and the rules on one run, stored in triage.json as `agreement`.
+
+    One row per identity: mark, kind, subject, the index of the model finding in `findings` and of the
+    rules finding in `heuristics` (None where that side has nothing), and a severity (the model's where it
+    spoke, else the rules'). Indexes rather than copies keep the stored object small and let the page point
+    at the finding it already renders. A rules-only review has nothing to agree with: None.
+    """
+    if review.get("source") != "agent":
+        return None
+    findings, heuristics = review.get("findings") or [], heuristics or []
+    rows = []
+    for r in match(findings, heuristics):
+        mi = next((i for i, f in enumerate(findings) if f is r["model"]), None)
+        ri = next((i for i, f in enumerate(heuristics) if f is r["rules"]), None)
+        picked = r["model"] if r["model"] is not None else r["rules"]
+        rows.append({"mark": r["mark"], "kind": r["kind"], "subject": r["subject"], "model": mi, "rules": ri,
+                     "severity": picked.get("severity") or "low"})
+    return rows
+
+
+def dropped(rows: list[dict] | None, min_severity: str = "medium") -> list[dict]:
+    """Agreement rows the rules raised at `min_severity` or above and the model did not: the roadmap's measure.
+
+    A rising count is a prompt or model problem to look at, so the page and the markdown both show these.
+    """
+    floor = SEVERITY_RANK.get(min_severity, 2)
+    return [r for r in rows or [] if r.get("mark") == "rules_only" and SEVERITY_RANK.get(r.get("severity"), 0) >= floor]
+
+
+def rules_dropped(review: dict | None) -> int | None:
+    """The per-snapshot number: dropped rules findings at medium or above. None when the review has no
+    agreement rows (rules-only, or stored before the marks existed), which is not the same as zero."""
+    rows = (review or {}).get("agreement")
+    return len(dropped(rows)) if isinstance(rows, list) else None

@@ -684,3 +684,37 @@ def test_agent_card_save_keeps_fields_the_card_does_not_have(server):
     assert _req(f"{server}/settings/agent", "POST", form.encode())[0] == 200
     agent = json.loads(_req(f"{server}/api/settings")[1])["agent"]
     assert agent["model"] == "m2" and agent["max_tokens"] == 9000
+
+
+def test_agreement_marks_and_dropped_rules_findings(tmp_path):
+    """Both / model only on the model's findings, and the rules findings the model dropped stay on the page."""
+    from dbtriage.findings import agreement
+
+    st = store(tmp_path)
+    heur = [{"severity": "high", "kind": "blocking", "title": "3 sessions blocked by pid 42", "detail": "", "evidence": {"sessions": [{"pid": 42}]}},
+            {"severity": "medium", "kind": "sql_regressed", "title": "q1 regressed 4x", "evidence": {"sql_id": "q1"}},
+            {"severity": "low", "kind": "bloat", "title": "public.t has 12% dead rows", "evidence": {"table": "public.t"}}]
+    findings = [{"severity": "medium", "kind": "sql_regressed", "subject": "q1", "where": "sql_id q1", "summary": "q1 slowed down", "impact": "i", "evidence": ["e"], "fix": "f"},
+                {"severity": "low", "kind": "other", "subject": "", "where": "general", "summary": "Load is up", "impact": "i", "evidence": [], "fix": "f"}]
+    tr = {"severity": "medium", "title": "q1 slowed down", "source": "agent", "provider": "ollama", "model": "m", "confidence": "high",
+          "findings": findings, "heuristics": heur}
+    tr["agreement"] = agreement(tr, heur)
+    st.put_json(f"{SID}/triage.json", tr)
+    app = App(config(tmp_path), st, False, None)
+    page = app.snapshot(SID).decode()
+    assert "<span class='mark both'" in page and "<span class='mark model_only'" in page
+    assert page.index("<span class='mark both'") < page.index("sql_id q1") < page.index("<span class='mark model_only'") < page.index("Load is up")
+    below = page.split("<span class='lbl'>Rules found, not in the review</span>")[1]
+    assert "3 sessions blocked by pid 42" in below and "<span class='sev high'>" in below and "<code class='where'>blocking</code>" in below
+    assert "<summary>1 low-severity rules finding not in the review</summary>" in below and "public.t has 12% dead rows" in below
+    assert "Agreement: 1 both · 1 model only · 2 rules only" in below and "q1 regressed 4x" not in below  # matched: not dropped
+    assert "style=" not in page.split("<ol class='flist'>")[1].split("filesrow")[0]  # colours come from the theme tokens
+    rows, _ = app.snapshot_rows("demo", 10, 0)
+    assert rows[0]["rules_dropped"] == 1 and rows[1]["rules_dropped"] is None  # the older snapshot is a rules-only review
+    # a rules-only review says so; a review stored before the marks existed renders with none of this
+    st.put_json(f"{SID}/triage.json", {"severity": "medium", "title": "x", "source": "rules", "findings": findings, "heuristics": heur, "agreement": None})
+    page = app.snapshot(SID).decode()
+    assert "Rules-only review; there is no model review to compare with." in page and "class='mark" not in page and "Rules found, not in the review" not in page
+    st.put_json(f"{SID}/triage.json", {"severity": "medium", "title": "x", "source": "agent", "findings": findings, "heuristics": heur})
+    page = app.snapshot(SID).decode()
+    assert "q1 slowed down" in page and "class='mark" not in page and "class='dropped'" not in page and "Agreement:" not in page
