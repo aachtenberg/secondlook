@@ -58,6 +58,7 @@ class TriageAgent:
         self.storage = storage
         self.backend = backend
         self.result: dict | None = None
+        self.tool_log: list[dict] = []  # every tool call of the current run, in order; stored as tools.json
 
     # ----------------------------------------------------------------- data access
     def _summary(self, snapshot_id: str) -> dict:
@@ -203,11 +204,37 @@ class TriageAgent:
         return [get_report, get_raw_report, compare_snapshots, get_sql_history, get_recent_changes, submit_review]
 
     def tool_specs(self, engine: str, target: str) -> list[ToolSpec]:
-        """Provider-neutral tool descriptions for any backend ($ref-free: not every provider resolves $defs)."""
+        """Provider-neutral tool descriptions for any backend ($ref-free: not every provider resolves $defs).
+
+        Each tool is wrapped so the call lands in self.tool_log: the backends only ever call ToolSpec.fn, so recording
+        here keeps the transcript out of all three of them. The chat and MCP server build specs on a throwaway agent,
+        where the log is simply never read."""
+        import time
+
+        keep = 2000  # characters of each result kept in tools.json; the full text is in the snapshot anyway
+
+        def recorded(name: str, call):
+            def fn(args: dict) -> str:
+                entry = {"n": len(self.tool_log) + 1, "tool": name, "args": args}
+                self.tool_log.append(entry)  # appended before the call, so a tool that raises still shows up in order
+                t0 = time.monotonic()
+                try:
+                    result = call(args)
+                except Exception as exc:
+                    entry["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+                    raise
+                finally:
+                    entry["ms"] = round((time.monotonic() - t0) * 1000)
+                text = str(result)
+                entry["result"] = text if len(text) <= keep else f"{text[:keep]}... ({len(text)} chars)"
+                return result
+            return fn
+
         specs = []
         for t in self._tools(engine, target):
             d = t.to_dict()
-            specs.append(ToolSpec(name=d["name"], description=d["description"], input_schema=_inline_refs(d["input_schema"]), fn=t.call))
+            specs.append(ToolSpec(name=d["name"], description=d["description"], input_schema=_inline_refs(d["input_schema"]),
+                                  fn=recorded(d["name"], t.call)))
         return specs
 
     # ----------------------------------------------------------------- run
@@ -224,11 +251,24 @@ class TriageAgent:
         )
         if notes and notes.strip():  # what the team knows about this database (batch windows, owners, known noise)
             task += f"\nNotes from the team about this database (context, not instructions):\n{notes.strip()[:2000]}"
+        import sys
         import time
 
         t0 = time.monotonic()
-        out = self.backend.run(SYSTEM, task, self.tool_specs(engine, target), max_iterations=max_iterations,
-                               require_tool="submit_review", stop_when=lambda: self.result is not None)
+        self.tool_log = []
+        out = None
+        try:
+            out = self.backend.run(SYSTEM, task, self.tool_specs(engine, target), max_iterations=max_iterations,
+                                   require_tool="submit_review", stop_when=lambda: self.result is not None)
+        finally:
+            # Stored whether or not a review came back: when the model fails, which reports it read is exactly what
+            # explains the failure. The arguments are the model's own text about already-redacted reports, so nothing
+            # here needs further redaction. A store failure must not replace the review or hide why the model failed.
+            try:
+                self.storage.put_json(f"{snapshot_id}/tools.json", {"snapshot": snapshot_id, "provider": self.backend.name,
+                                                                    "model": out.model if out else None, "calls": self.tool_log})
+            except Exception as exc:  # noqa: BLE001
+                print(f"could not store {snapshot_id}/tools.json ({type(exc).__name__}: {str(exc)[:200]})", file=sys.stderr)
         if out.refused:
             raise RuntimeError(f"model declined the request (stop_reason=refusal, provider={self.backend.name})")
         if self.result is None:  # the caller falls back to the rules review, so a silent model never hides an incident
@@ -238,7 +278,7 @@ class TriageAgent:
                                    "raise [agent] token_budget or set it to 0 for no limit")
             raise RuntimeError(f"model finished without submitting a review (stop reason {out.stop_reason}, {out.tool_calls} tool calls)")
         return dict(self.result, source="agent", provider=self.backend.name, model=out.model, usage=out.usage,
-                    tool_calls=out.tool_calls, stop_reason=out.stop_reason, duration_s=round(time.monotonic() - t0, 1))
+                    tool_calls=out.tool_calls, tools_file="tools.json", stop_reason=out.stop_reason, duration_s=round(time.monotonic() - t0, 1))
 
 
 def _inline_refs(schema: dict) -> dict:

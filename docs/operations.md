@@ -138,8 +138,9 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
   summary, in Oracle's raw data, and as quoted values in the AWR and ADDM report text (`mask_report_literals = false`
   keeps the original reports). Postgres and MySQL already report SQL without them. The reviewer can open only the
   snapshot's listed reports.
-- **A full record.** Every run keeps what triggered it and why (`manifest.json`), what was compared (`compare.json`), and
-  what was said (`triage.json`, discussions).
+- **A full record.** Every run keeps what triggered it and why (`manifest.json`), what was compared (`compare.json`),
+  what was said (`triage.json`, discussions), and what the model read to say it (`tools.json`: every tool call with its
+  arguments and the first 2000 characters of its result, kept even when the model failed to submit a review).
 - **People decide.** dbtriage recommends fixes and never applies them. Automatic fixes, if ever added, belong
   behind an approval step with a ready rollback.
 
