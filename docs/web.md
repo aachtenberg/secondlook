@@ -23,7 +23,9 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
   Incidents or Scheduled.
 - **Snapshot.** The review with its findings, wait-time and load charts, the top SQL (click a column header to
   sort by it), links to every stored file (opened in a side panel), and the discussion panel.
-- **Compare.** Any two snapshots of a database side by side.
+- **Compare.** Any two snapshots of a database side by side, with the parameters that changed between them in
+  their own table (each one is also a low `setting_changed` finding, and its name is written into the evidence of
+  any SQL regression, plan change or wait shift in the same window).
 - **SQL.** One statement's history across snapshots, with plan changes marked.
 - **Search.** Database names, SQL ids and snapshot ids.
 
