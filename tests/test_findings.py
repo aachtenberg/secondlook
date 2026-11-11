@@ -78,3 +78,11 @@ def test_agreement_rows_point_at_both_lists():
     assert rules_dropped({"agreement": None}) is None and rules_dropped({}) is None and rules_dropped(None) is None
     assert agreement({"source": "agent", "findings": []}, []) == [] and rules_dropped({"agreement": []}) == 0
     assert agreement({"source": "agent"}, None) == [] and dropped(None) == []
+
+
+def test_engine_findings_are_identified_by_their_message_not_their_task_id():
+    a = {"kind": "engine_information", "evidence": {"engine_finding": {"id": "ADDM:1_422", "message": "There was no significant database activity to run the ADDM."}}}
+    b = {"kind": "engine_information", "evidence": {"engine_finding": {"id": "ADDM:1_423", "message": "There was no significant database activity to run the ADDM."}}}
+    c = {"kind": "engine_information", "evidence": {"engine_finding": {"id": "ADDM:1_424", "finding": "SQL statements consuming significant database time were found."}}}
+    assert same_finding(a, b) and not same_finding(a, c)
+    assert subject_of(c).startswith("SQL statements consuming")

@@ -140,3 +140,17 @@ def test_setting_findings_are_capped_with_a_summary():
     summary = next(x for x in f if "parameter" not in x["evidence"])
     assert summary["title"] == "3 more settings changed" and summary["evidence"]["parameters"] == ["p5", "p6", "p7"]
     assert summary["detail"] == "p5, p6, p7"
+
+
+def test_identical_engine_findings_are_said_once():
+    """Two ADDM tasks in one AWR window both report "no significant activity": one rules finding, not two."""
+    def awr(sid):
+        return {"engine": "oracle", "metrics_kind": "interval", "id": sid, "captured_at": T0.isoformat(),
+                "counters_since": (T0 - timedelta(seconds=3600)).isoformat(),
+                "load_profile": {"elapsed_s": 3600, "db_time_ms": 1000}, "top_sql": [], "wait_events": [], "settings": {},
+                "findings": [{"type": "INFORMATION", "message": "There was no significant database activity to run the ADDM.", "id": "ADDM:1_422"},
+                             {"type": "INFORMATION", "message": "There was no significant database activity to run the ADDM.", "id": "ADDM:1_423"},
+                             {"type": "PROBLEM", "message": "SQL statements consuming significant database time were found.", "id": "ADDM:1_423b", "impact_pct": 40}]}
+    found = compare(awr("cur"), awr("base"))["findings"]
+    engine = [(f["kind"], f["title"]) for f in found if f["kind"].startswith("engine_")]
+    assert len(engine) == 2 and engine.count(("engine_information", "There was no significant database activity to run the ADDM.")) == 1

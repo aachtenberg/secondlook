@@ -43,6 +43,9 @@ def subject_of(f: dict) -> str:
         for k in SUBJECT_KEYS:
             if e.get(k):
                 return str(e[k])
+        if isinstance(e.get("engine_finding"), dict):  # ADDM: the sentence is the identity; task ids change every interval
+            ef = e["engine_finding"]
+            return str(ef.get("message") or ef.get("finding") or "")[:160]
     return ""
 
 

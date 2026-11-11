@@ -358,10 +358,14 @@ def diff(ref: dict | None, cur: dict) -> dict:
             findings.append(_f(40, "seq_scans", f"{name}: sequential scans up {row['seq_scan_pct']:.0f}% on a {live:,}-row table", "",
                                {"table": name, "seq_scan": t.get("seq_scan"), "idx_scan": t.get("idx_scan")}))
 
+    seen_engine = set()
     for f in cur.get("findings", []):  # engine-native findings (ADDM) get a seat at the table
+        kind, message = "engine_" + f.get("type", "finding").lower(), f.get("message") or f.get("finding")
+        if (kind, message) in seen_engine:  # one ADDM task per AWR interval repeats the same sentence; say it once
+            continue
+        seen_engine.add((kind, message))
         impact = f.get("impact_pct") or 0
-        findings.append(_f(20 + impact * 0.6, "engine_" + f.get("type", "finding").lower(),
-                           f.get("message") or f.get("finding"), f.get("detail", ""), {"engine_finding": f}))
+        findings.append(_f(20 + impact * 0.6, kind, message, f.get("detail", ""), {"engine_finding": f}))
 
     # settings: the start of the current window against its end (cumulative engines carry both ends), else the
     # reference snapshot against the current one. A change here is low on its own, and it is written into the
