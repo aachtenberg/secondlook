@@ -47,10 +47,56 @@ says so; reviews stored before the marks existed render as before.
 ## Branding
 
 On the Settings page, or in `[web]`: `brand`, `title`, `logo` (a file or a URL), `accent`, `theme` (dark,
-light or auto, with a toggle in the header), `footer`, `refresh_seconds` and `page_size`. Only in `[web]`:
+light or auto, with a toggle in the header), `footer`, `refresh_seconds`, `page_size` and `files`, the stored files
+a snapshot page links to (`*` for every one). Only in `[web]`:
 `severity_colors`, `custom_css`, which adds your own styles, and `templates_dir`, which replaces page templates
 file by file. Start a replacement from a copy of the built-in one in `src/dbtriage/templates/`; `base.html` in
 particular carries the page scripts. `examples/branding/` has a logo and a theme. Per-database `links` (say, a Grafana dashboard) show up next to each database.
+
+## What the Settings page can change
+
+Every key `targets.toml` accepts, and where it is in the web view. "targets.toml only" keys are file-only on
+purpose; the reason is in the row. Credentials are never typed into the page: every `*_env` field holds the name
+of an environment variable, and the value is read from the process at run time.
+
+| Section | Key | In the UI |
+|---|---|---|
+| `[storage]` | `url` | targets.toml only (or `DBTRIAGE_STORAGE`): where every snapshot lives; moving the store is a deployment, not a setting |
+| `[agent]` | `provider`, `model` | Settings › Agent: Provider, Model (the list the provider offers, or a typed id) |
+| `[agent]` | `region`, `project_id`, `resource`, `aws_profile`, `base_url` | Settings › Agent: Region, Project (Vertex), Resource (Foundry / Azure OpenAI), AWS profile, Base URL |
+| `[agent]` | `api_key_env` | Settings › Agent: API key env var (the variable's name only) |
+| `[agent]` | `api_key_cmd` | targets.toml only: it runs a command on the server |
+| `[agent]` | `effort`, `max_iterations`, `token_budget` | Settings › Agent: Effort, Max iterations, Token budget per review |
+| `[agent]` | `max_tokens` | Settings › Agent: Max tokens per model call |
+| `[agent]` | `fallback_models` | Settings › Agent: Fallback models (comma-separated; `none` turns the chain off) |
+| `[agent]` | `scheduled_provider`, `scheduled_model`, `scheduled_base_url`, `scheduled_api_key_env` | Settings › Agent › Scheduled runs |
+| `[agent.extra]` | any | targets.toml only: free-form request fields passed to the provider unchanged |
+| `[delivery]` | `channels` | Settings › Delivery: Enabled channels |
+| `[delivery]` | `min_severity` | Settings › Delivery: Below this severity only stdout fires |
+| `[delivery]` | `gone_after_runs` | Settings › Delivery: A finding is gone after |
+| `[delivery.ntfy]` | `url`, `topic`, `token_env`, `min_severity` | Settings › Delivery › ntfy |
+| `[delivery.slack]`, `[delivery.teams]` | `webhook_url`, `webhook_url_env`, `min_severity` | Settings › Delivery › slack, teams (a typed URL is masked afterwards) |
+| `[delivery.email]` | `smtp_host`, `smtp_port`, `starttls`, `from`, `to`, `user_env`, `password_env`, `min_severity` | Settings › Delivery › email |
+| `[delivery.jira]` | `base_url`, `project_key`, `issue_type`, `user_env`, `token_env`, `min_severity` | Settings › Delivery › jira |
+| `[delivery.plane]` | `base_url`, `workspace`, `project_id`, `project_identifier`, `api_key_env`, `min_severity` | Settings › Delivery › plane |
+| `[delivery.webhook]` | `url`, `min_severity` | Settings › Delivery › webhook |
+| `[delivery.webhook.headers]` | any | targets.toml only: header values name secrets with `$VARIABLES` |
+| `[delivery.pushgateway]` | `url`, `job`, `min_severity` | Settings › Delivery › pushgateway |
+| `[web]` | `title`, `brand`, `logo`, `accent`, `theme`, `refresh_seconds`, `page_size`, `footer` | Settings › Look and feel |
+| `[web]` | `files` | Settings › Look and feel: Files shown on a snapshot page |
+| `[web]` | `custom_css`, `templates_dir` | targets.toml only: files on the server |
+| `[web]` | `severity_colors` | targets.toml only: a nested table, set once with the brand |
+| `[web]` | `settings_file` | targets.toml only (or `DBTRIAGE_SETTINGS`): where the page's own changes are kept |
+| `[web]` | port, host | neither: `dbtriage web --port --host` on the command line |
+| `[collect]` | `allow_db_writes` | targets.toml only: the file's owner decides whether dbtriage may write to databases; the API refuses it |
+| `[mcp]` | `enabled`, `allow_run`, `tools` | targets.toml only: whether another process may read the store and start runs; the API refuses it |
+| `[targets.X]` | `engine`, `dsn`, `dsn_env`, `user`, `password` | Settings › Targets › edit: Engine, DSN (masked afterwards), DSN from env var, Oracle user, Oracle password |
+| `[targets.X]` | `top_n`, `diagnostics_pack`, `create_snapshot` | edit: Top N SQL, Diagnostics Pack, Snapshot on the database before collecting |
+| `[targets.X]` | `baseline_policy`, `baseline` | edit: Baseline policy, Pinned baseline snapshot (picked from the stored snapshots) |
+| `[targets.X]` | `changes_file`, `[targets.X.changes]` (`source`, `path`, `repo`, `project`, `environment`, `token_env`, `base_url`, `releases`, `lookback_hours`, `correlate_minutes`) | edit › Change feed, with Test feed; a file feed with default numbers is saved as `changes_file` |
+| `[targets.X]` | `links`, `notes` | edit: Links, Notes for the reviewer |
+| `[targets.X]` | `schedule`, `schedule_window`, `schedule_paused` | Settings › Schedule card |
+| `[targets.X]` | `call_timeout_ms`, `connect_timeout_s`, `min_snapshot_age_min`, `mask_report_literals` | edit › Engine limits |
 
 ## Who can see it
 
@@ -60,8 +106,9 @@ rebinding) cannot use it.
 
 Reading is open to whoever can reach it. Each kind of change is off until you start it with its flag:
 `--allow-run` for runs, `--allow-edit` for settings, targets, schedules and the test buttons, `--allow-chat` for
-discussions. A few things can never be changed from the web view at all: `api_key_cmd` and `allow_db_writes`
-live in `targets.toml` only.
+discussions. A few things can never be changed from the web view at all: `api_key_cmd`, `allow_db_writes`,
+`[mcp]`, the store and settings locations and the files the page is built from live in `targets.toml` only
+(the table above says why for each).
 
 `DBTRIAGE_WEB_TOKEN` turns on a simple password (HTTP Basic). In an enterprise, put the web view behind the
 single sign-on proxy you already run and leave the token unset. Listening beyond loopback with runs, editing or

@@ -42,7 +42,8 @@ stores, so they are refused too. The same rule applies to databases added on the
 
 `gone_after_runs` is the one threshold behind a finding's life (operations.md, "A finding's life"): how many of its
 own periods a finding must be missing before the review says it is gone and its ticket is told it cleared, or how
-many runs while it has no period yet. It sits under `[delivery]` because flapping is a channel problem. Blank means 3.
+many runs while it has no period yet. It sits under `[delivery]` because flapping is a channel problem, and on the
+Settings page's Delivery card for the same reason. Blank means 3.
 
 ## Connecting to a database
 
@@ -103,6 +104,10 @@ store and a review written later sees exactly what was known at capture time. A 
 to `correlate_minutes` before it, is written into the evidence of every regressed or new statement, plan change
 and wait shift in the comparison, next to the settings that changed, and the rules review says it in one line:
 "deploy billing@1.4.2 to production landed 6 minutes before the window".
+
+The feed is set up per database on its edit page in the web view (the **Change feed** fields show only the chosen
+source's; **Test feed** reads the last 48 hours as typed and shows the items, or the error, without saving), or in
+the file:
 
 ```toml
 [targets.prod-db-3.changes]
@@ -172,8 +177,10 @@ create_snapshot = "always"    # this database: "incident" for incident runs only
 ```
 
 `allow_db_writes` can only be set in `targets.toml`. The Settings page shows whether it is on but cannot change it,
-and the settings API refuses it. `create_snapshot` can be set per database on its edit page. While writes are off,
-a database set to take snapshots takes none, and each of its snapshots says why.
+and the settings API refuses it. `create_snapshot` can be set per database on its edit page, as can the Oracle and
+SQL Server limits (`call_timeout_ms`, `connect_timeout_s`, `min_snapshot_age_min`, `mask_report_literals`; see
+`recipes/reference.toml`) under **Engine limits**. While writes are off, a database set to take snapshots takes none,
+and each of its snapshots says why.
 
 - **Oracle** (built in) needs `diagnostics_pack = true` and `EXECUTE` on `DBMS_WORKLOAD_REPOSITORY`, which reading
   the AWR report already needs. It skips the snapshot when the newest one is younger than `min_snapshot_age_min`
@@ -196,8 +203,8 @@ the snapshot page shows it next to the run mode.
 ## Picking the baseline
 
 A review compares a snapshot with a baseline: the "normal moment". You choose how that baseline is picked, per
-database (`baseline_policy`, or on the Settings page) or per run (`--baseline-policy`, the Capture now dialog,
-or the API).
+database (`baseline_policy`, or on the database's edit page, where a pinned snapshot is picked from the stored
+ones) or per run (`--baseline-policy`, the Capture now dialog, or the API).
 
 | Policy | Compares with | Good for |
 |---|---|---|
