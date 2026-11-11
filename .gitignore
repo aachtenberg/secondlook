@@ -3,6 +3,8 @@ data/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 .pytest_cache/
 dbtriage-settings.json
 dbtriage-settings.cache.json

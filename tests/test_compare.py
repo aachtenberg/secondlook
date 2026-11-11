@@ -88,3 +88,69 @@ def test_interval_engine_compares_windows_directly():
     assert f["sql_regressed"]["evidence"]["plan_changed"] is True
     assert "engine_problem" in f
     assert out["load_profile"]["xact_commit"]["current_per_s"] == out["load_profile"]["xact_commit"]["reference_per_s"]
+
+
+def test_setting_change_is_a_finding_and_listed():
+    s0, s1 = snap(0, {"q1": (0, 0)}), snap(10, {"q1": (100, 1000)})
+    s2 = snap(20, {"q1": (200, 2000)})
+    s1["settings"] = {"work_mem": "4MB", "max_connections": 100, "jit": "on"}
+    s2["settings"] = {"work_mem": "64MB", "max_connections": "100", "shared_buffers": "1GB"}  # 100 == "100"
+    out = compare(s2, s1, s0)
+    assert out["settings_changed"] == [{"name": "jit", "before": "on", "after": None},
+                                       {"name": "shared_buffers", "before": None, "after": "1GB"},
+                                       {"name": "work_mem", "before": "4MB", "after": "64MB"}]
+    f = [x for x in out["findings"] if x["kind"] == "setting_changed"]
+    assert len(f) == 3 and all(x["severity"] == "low" for x in f)
+    wm = next(x for x in f if x["evidence"]["parameter"] == "work_mem")
+    assert wm["title"] == "parameter work_mem changed from 4MB to 64MB"
+    assert wm["evidence"] == {"parameter": "work_mem", "before": "4MB", "after": "64MB"}
+
+
+def test_unchanged_settings_produce_nothing():
+    s1, s2 = snap(10, {"q1": (100, 1000)}), snap(20, {"q1": (200, 2000)})
+    s1["settings"] = {"work_mem": "4MB", "max_connections": 100}
+    s2["settings"] = {"work_mem": " 4MB ", "max_connections": "100"}
+    out = compare(s2, s1, snap(0, {"q1": (0, 0)}))
+    assert out["settings_changed"] == [] and not any(f["kind"] == "setting_changed" for f in out["findings"])
+    del s1["settings"]  # no settings on one side (an older snapshot): nothing to say either
+    assert compare(s2, s1, None)["settings_changed"] == []
+
+
+def test_regression_in_same_window_carries_the_settings_change():
+    s0 = snap(0, {"q1": (0, 0), "q2": (0, 0)})
+    s1 = snap(10, {"q1": (1000, 10000), "q2": (1000, 1000)})
+    s2 = snap(20, {"q1": (2000, 60000), "q2": (2000, 2000)})
+    s1["settings"], s2["settings"] = {"work_mem": "4MB", "jit": "on"}, {"work_mem": "64MB", "jit": "off"}
+    out = compare(s2, s1, s0)
+    kinds = {f["kind"]: f for f in out["findings"]}
+    assert kinds["sql_regressed"]["evidence"]["settings_changed"] == ["jit", "work_mem"]
+    assert kinds["wait_shift"]["evidence"]["settings_changed"] == ["jit", "work_mem"]
+    assert "settings_changed" not in kinds["setting_changed"]["evidence"]
+    out = compare(s2, s1, s0 | {"settings": {"work_mem": "4MB", "jit": "on"}})  # the change still sits in the current window
+    assert {f["kind"]: f for f in out["findings"]}["sql_regressed"]["evidence"]["settings_changed"] == ["jit", "work_mem"]
+
+
+def test_setting_findings_are_capped_with_a_summary():
+    s1, s2 = snap(10, {"q1": (100, 1000)}), snap(20, {"q1": (200, 2000)})
+    s1["settings"] = {f"p{i}": i for i in range(8)}
+    s2["settings"] = {f"p{i}": i + 1 for i in range(8)}
+    out = compare(s2, s1, snap(0, {"q1": (0, 0)}))
+    f = [x for x in out["findings"] if x["kind"] == "setting_changed"]
+    assert len(out["settings_changed"]) == 8 and len(f) == 6
+    summary = next(x for x in f if "parameter" not in x["evidence"])
+    assert summary["title"] == "3 more settings changed" and summary["evidence"]["parameters"] == ["p5", "p6", "p7"]
+    assert summary["detail"] == "p5, p6, p7"
+
+
+def test_identical_engine_findings_are_said_once():
+    """Two ADDM tasks in one AWR window both report "no significant activity": one rules finding, not two."""
+    def awr(sid):
+        return {"engine": "oracle", "metrics_kind": "interval", "id": sid, "captured_at": T0.isoformat(),
+                "counters_since": (T0 - timedelta(seconds=3600)).isoformat(),
+                "load_profile": {"elapsed_s": 3600, "db_time_ms": 1000}, "top_sql": [], "wait_events": [], "settings": {},
+                "findings": [{"type": "INFORMATION", "message": "There was no significant database activity to run the ADDM.", "id": "ADDM:1_422"},
+                             {"type": "INFORMATION", "message": "There was no significant database activity to run the ADDM.", "id": "ADDM:1_423"},
+                             {"type": "PROBLEM", "message": "SQL statements consuming significant database time were found.", "id": "ADDM:1_423b", "impact_pct": 40}]}
+    found = compare(awr("cur"), awr("base"))["findings"]
+    engine = [(f["kind"], f["title"]) for f in found if f["kind"].startswith("engine_")]
+    assert len(engine) == 2 and engine.count(("engine_information", "There was no significant database activity to run the ADDM.")) == 1

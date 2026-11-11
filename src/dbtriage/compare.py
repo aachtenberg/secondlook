@@ -129,6 +129,7 @@ def interval_of(summary: dict) -> dict:
         "tables": {t["name"]: t for t in summary.get("tables", [])},
         "sessions": summary.get("sessions", []),
         "findings": summary.get("findings", []),
+        "settings": summary.get("settings"),
     }
 
 
@@ -178,6 +179,8 @@ def interval_between(a: dict, b: dict) -> dict:
         "start": a["captured_at"], "end": b["captured_at"], "elapsed_s": elapsed, "counters_reset": reset,
         "load_profile": lp, "sql": sql, "waits": _wait_shares(waits),
         "tables": tables, "sessions": b.get("sessions", []), "findings": b.get("findings", []),
+        # both ends: a parameter changed inside this window is the change that sits beside its regression
+        "settings": b.get("settings"), "settings_before": a.get("settings"),
     }
 
 
@@ -219,7 +222,7 @@ def diff(ref: dict | None, cur: dict) -> dict:
         "load_profile": {}, "sql": {"new": [], "gone": [], "changed": [], "top": []},
         "waits": {"current": cur["waits"]["classes"], "reference": ref["waits"]["classes"] if ref else None, "shifts": []},
         "tables": [], "sessions": cur.get("sessions", []), "engine_findings": cur.get("findings", []),
-        "findings": [],
+        "settings_changed": [], "findings": [],
     }
     findings: list[dict] = out["findings"]
     ec, er = cur["elapsed_s"], (ref or {}).get("elapsed_s")
@@ -355,14 +358,62 @@ def diff(ref: dict | None, cur: dict) -> dict:
             findings.append(_f(40, "seq_scans", f"{name}: sequential scans up {row['seq_scan_pct']:.0f}% on a {live:,}-row table", "",
                                {"table": name, "seq_scan": t.get("seq_scan"), "idx_scan": t.get("idx_scan")}))
 
+    seen_engine = set()
     for f in cur.get("findings", []):  # engine-native findings (ADDM) get a seat at the table
+        kind, message = "engine_" + f.get("type", "finding").lower(), f.get("message") or f.get("finding")
+        if (kind, message) in seen_engine:  # one ADDM task per AWR interval repeats the same sentence; say it once
+            continue
+        seen_engine.add((kind, message))
         impact = f.get("impact_pct") or 0
-        findings.append(_f(20 + impact * 0.6, "engine_" + f.get("type", "finding").lower(),
-                           f.get("message") or f.get("finding"), f.get("detail", ""), {"engine_finding": f}))
+        findings.append(_f(20 + impact * 0.6, kind, message, f.get("detail", ""), {"engine_finding": f}))
+
+    # settings: the start of the current window against its end (cumulative engines carry both ends), else the
+    # reference snapshot against the current one. A change here is low on its own, and it is written into the
+    # evidence of every regression in the same window so the correlation travels with the finding.
+    before = cur.get("settings_before")
+    if before is None and ref is not None:
+        before = ref.get("settings")
+    changed = settings_changed(before, cur.get("settings"))
+    out["settings_changed"] = changed
+    for c in changed[:SETTINGS_FINDINGS_CAP]:
+        findings.append(_f(20, "setting_changed", f"parameter {c['name']} changed from {_show(c['before'])} to {_show(c['after'])}", "",
+                           {"parameter": c["name"], "before": c["before"], "after": c["after"]}))
+    if len(changed) > SETTINGS_FINDINGS_CAP:
+        rest = [c["name"] for c in changed[SETTINGS_FINDINGS_CAP:]]
+        findings.append(_f(20, "setting_changed", f"{len(rest)} more settings changed", ", ".join(rest), {"parameters": rest}))
+    if changed:
+        names = [c["name"] for c in changed]
+        for f in findings:
+            if f["kind"] in CORRELATED_KINDS:
+                f["evidence"]["settings_changed"] = names
 
     findings.sort(key=lambda f: -f["score"])
     out["severity"] = findings[0]["severity"] if findings else "info"
     return out
+
+
+SETTINGS_FINDINGS_CAP = 5  # one finding per changed parameter up to here, then a single "N more" line
+CORRELATED_KINDS = ("sql_regressed", "plan_change", "wait_shift")  # the regressions a parameter change can explain
+
+
+def settings_changed(before: dict | None, after: dict | None) -> list[dict]:
+    """Parameters whose value differs between two snapshots: added, removed or changed, compared as stripped strings
+    so 100 and "100" agree. Nothing is excluded on purpose: every key the collectors store under settings (postgres
+    pg_settings, mysql global variables, oracle v$parameter, sql server sys.configurations plus database options,
+    cpu_count and physical_memory_mb) is configuration, a version or a host size, and any of them changing is worth
+    a line. Counters and timestamps live in load_profile, never here."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return []
+
+    def norm(v):
+        return None if v is None else str(v).strip()
+
+    return [{"name": k, "before": before.get(k), "after": after.get(k)}
+            for k in sorted(set(before) | set(after)) if norm(before.get(k)) != norm(after.get(k))]
+
+
+def _show(v) -> str:
+    return "unset" if v is None else str(v)
 
 
 def _f(score: float, kind: str, title: str, detail: str, evidence: dict) -> dict:

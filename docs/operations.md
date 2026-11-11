@@ -16,6 +16,8 @@
 | `dbtriage mcp` | the MCP server, for MCP clients such as Claude Code; off unless `[mcp] enabled = true` (see mcp.md) |
 | `dbtriage serve --port 8080` | receive alert webhooks; listens on all interfaces, so set `DBTRIAGE_WEBHOOK_TOKEN` (without it anyone who can reach the port can start runs, and it warns at start) |
 | `dbtriage flush-spool` | push work saved during a store outage now |
+| `dbtriage deliver <snapshot> [--force]` | re-send a stored review; `--force` ignores the severity gates and finding life and posts it as it stands |
+| `dbtriage rebuild-ledger -t <db>` | recompute the database's ledger of open findings from its stored reviews (below, "A finding's life") |
 | `dbtriage copy-store --from URL --to URL`, `dbtriage copy-settings --from X --to Y` | move snapshots or settings, for example from files into Postgres |
 
 `--baseline-policy` and `--baseline` work on `run`, `compare` and `triage` (see configuration.md).
@@ -113,9 +115,15 @@ The request is the same everywhere: which database, which mode, how many minutes
 Pick channels in `[delivery] channels` or on the Settings page, where each has a **Send test** button:
 `stdout`, `ntfy`, `slack`, `teams`, `email`, `jira`, `plane`, `webhook`, `pushgateway`.
 
-- `min_severity` keeps quiet results quiet. Tickets (Jira, Plane) default to high only.
+- `min_severity` keeps quiet results quiet. Tickets (Jira, Plane) default to high only. Once a database has a
+  ledger of open findings (below) the gate is on the finding, not the run: a channel fires when some finding is
+  **new** or **worse** at or above its gate, so a still-open medium does not repost every hour. `stdout` always
+  prints, and `pushgateway` always records the run, so an alert on "runs stopped" keeps working.
+- Jira and Plane remember the ticket they opened. A finding that gets worse is a comment on its ticket, not a new
+  issue; a finding that is gone gets a "cleared" comment. Plane keys read `OPS-12` when `project_identifier` is set.
 - `pushgateway` exposes `dbtriage_severity{target,engine}` and `dbtriage_last_run_timestamp_seconds`, so Prometheus
-  can alert on a bad result or on runs that stopped.
+  can alert on a bad result or on runs that stopped, and `dbtriage_rules_dropped`, the number of rules findings at
+  medium or above the model's review left out (a rising number is a prompt or model problem to look at).
 - `webhook` posts the review as JSON to anything else, such as the Datadog or Dynatrace events API.
 
 ## Safety rules
@@ -138,10 +146,64 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
   summary, in Oracle's raw data, and as quoted values in the AWR and ADDM report text (`mask_report_literals = false`
   keeps the original reports). Postgres and MySQL already report SQL without them. The reviewer can open only the
   snapshot's listed reports.
-- **A full record.** Every run keeps what triggered it and why (`manifest.json`), what was compared (`compare.json`), and
-  what was said (`triage.json`, discussions).
+- **A full record.** Every run keeps what triggered it and why (`manifest.json`), what was compared (`compare.json`),
+  what was said (`triage.json`, discussions), and what the model read to say it (`tools.json`: every tool call with its
+  arguments and the first 2000 characters of its result, kept even when the model failed to submit a review).
 - **People decide.** dbtriage recommends fixes and never applies them. Automatic fixes, if ever added, belong
   behind an approval step with a ready rollback.
+
+## A finding's life
+
+Every run writes a fresh review, but a finding is not fresh just because the run is. Each database keeps a ledger
+of its open findings (`<engine>/<database>/findings.json` in the store), and every review says, next to each
+finding, what its life is:
+
+| State | Meaning |
+|---|---|
+| **new** | not in the ledger before this run |
+| **still open** | seen again at the same severity; shown with "open since" and its ticket |
+| **worse** | seen again at a higher severity than last run; delivery fires, and the ticket gets a comment |
+| **quiet** | seen again, but below its own severity last run; nothing is posted |
+| **returned** | back after being absent, or after being reported gone within the last seven days; delivery fires, and an existing ticket gets a comment instead of a new issue |
+| **recurring** | returned at about the same interval as last time: the nightly batch, the Monday job. Shown with "about every 24h"; nothing is posted unless it is worse |
+| **gone** | absent for `gone_after_runs` times its own period, or that many runs when it has no period yet (default 3); said once, its ticket told, then kept as a tombstone for seven days |
+
+Two findings are the same finding when they share a `kind` and a `subject` (the sql_id, table, wait class or
+parameter named), whatever the wording. Presence comes from the rules, which run on every snapshot, so the model
+choosing different words, or not mentioning a finding this time, does not make it new or gone.
+
+*Gone* is decided by cadence, not by counting runs, because runs are hourly and batch jobs are not. A finding's
+period is the median gap between its returns. A statement present in every hourly run has a period of an hour and
+is gone after three; a statement that appears only in the 02:00 run has, from its second night, a period of a day,
+so three quiet hours do not clear it and its ticket is not told "cleared" every morning. On its first night it has
+no period and the run count applies, which is why the tombstone exists: when it comes back the next night it is the
+same finding, returned, with its ticket and its first-seen date. For a target with a batch cycle, also set its
+baseline policy to `same-time-yesterday` or `same-time-last-week` (configuration.md) so the batch window is compared
+with itself and the relative findings do not fire at all.
+
+The review still caps at five findings, and an open finding never takes a slot from a new one: open findings that
+did not make the five are listed under **Still open** after them, with how long they have been open and how many
+runs since they were last seen. They are gated like the five: one that got worse, or came back, pages even though
+the review did not name it, and its ticket gets the comment. A finding that cleared this run is named under
+**Cleared**. Reviews stored before findings had a kind are not tracked: a rebuild takes presence from their rules
+findings, which always had one.
+
+One run's new findings share one Jira or Plane issue. When one of them clears while another on the same issue is
+still open, the comment says so instead of "cleared".
+
+Runs of one database take turns within a process (the web view and the scheduler refuse a second run; `dbtriage
+serve` queues it). The ledger file carries a generation: a save goes ahead only when nobody saved in between, and
+is redone on the new state if someone did; a copy that lost the race is never written. The outage spool replays
+the ledger under the same per-database lock and drops its copy when the store already holds a newer generation,
+so coming out of an outage cannot put an older ledger over a fresh run. Two separate processes writing one
+database's ledger at the same instant can still race (no store has a conditional put), so run one scheduler per
+store; `dbtriage rebuild-ledger` repairs the file from the stored reviews.
+
+The ledger is derived data. It is written through the same store as the snapshots, so an outage spools it like
+any other file, and `dbtriage rebuild-ledger -t <db>` recomputes it from the stored `triage.json` and
+`compare.json` files, tickets included. Losing it is a rebuild, not a loss. A run that cannot read the store
+reviews without a life (and delivers on the run's severity, as before) rather than start a ledger that would
+overwrite the real one.
 
 ## The review format
 
@@ -153,6 +215,9 @@ two snapshots compared.
 
 The model fills in this structure by calling one tool, `submit_review`, and `report.py` turns it into text. So
 every review looks the same whichever model, or the rules, wrote it, and the same text goes to every channel.
+Each finding also carries a `kind` from the rules' vocabulary (`sql_regressed`, `plan_change`, `wait_shift`, ...)
+and a `subject`, the exact sql_id, table, wait class or parameter it names; `findings.py` joins on those two to say
+when the model and the rules found the same thing, or when a finding is the same one as in the previous snapshot.
 
 The reviewer's tools are `get_report`, `get_raw_report` (pages through the AWR text), `compare_snapshots`,
 `get_sql_history`, `get_recent_changes` and `submit_review`. Reports are never pasted into the prompt; the model
@@ -178,7 +243,9 @@ src/dbtriage/
   chat.py         discussing a review
   scheduler.py    schedules
   report.py       turning a review into text
-  deliver.py      the delivery channels
+  findings.py     what makes two findings the same finding (kind and subject)
+  ledger.py       the per-database ledger of open findings: new, still open, worse, quiet, gone
+  deliver.py      the delivery channels, and the finding-level gate
   triggers.py     webhook receiver and Lambda handler
   mcp_server.py   the MCP server (off unless [mcp] enabled = true)
   web.py, charts.py, templates/   the web view

@@ -1,4 +1,4 @@
-"""Command line: collect | compare | triage | run | list | show | serve."""
+"""Command line: collect | compare | triage | run | deliver | list | show | serve | web | rebuild-ledger ..."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,10 @@ from dbtriage import dbsnap
 from dbtriage.collectors import get_collector
 from dbtriage.collectors.base import Window
 from dbtriage.config import Config, load_config
+from dbtriage import ledger
+from dbtriage.locks import target_lock
 from dbtriage.deliver import deliver
+from dbtriage.findings import agreement
 from dbtriage.report import render_markdown
 from dbtriage.storage import Storage, open_storage
 from dbtriage.baseline import POLICIES
@@ -123,6 +126,8 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
     result.update({"snapshot": sid, "baseline": baseline, "target": target, "engine": engine, "mode": mode,
                    "baseline_policy": how[0] if how else None, "baseline_reason": how[1] if how else None,
                    "ts": int(time.time()), "heuristics": (comparison or {}).get("findings", [])})
+    result["agreement"] = agreement(result, result["heuristics"])  # None for a rules-only review; the markdown shows the marks
+    ledger.attach(result, store, cfg, comparison, manifest)  # new / still open / worse / quiet / gone, against the target's ledger
     md = render_markdown(result, comparison)
     store.put_json(f"{sid}/triage.json", result)
     store.put_text(f"{sid}/triage.md", md)
@@ -138,10 +143,12 @@ def run_request(req: TriageRequest, cfg: Config | None = None, use_llm: bool | N
     cfg.target(req.target)  # fail early on an unknown target
     if use_llm is None:
         use_llm = os.environ.get("DBTRIAGE_NO_LLM", "") == ""
-    sid = collect(cfg, store, req)
-    baseline, policy, reason = pick_baseline(cfg, store, sid, req.baseline_policy, baseline or req.baseline)
-    result, comparison = triage(cfg, store, sid, baseline, req.mode, use_llm, (policy, reason), source=req.source)
-    result["delivered"] = deliver(cfg.delivery, result, render_markdown(result, comparison), req.channels)
+    with target_lock(req.target):
+        sid = collect(cfg, store, req)
+        baseline, policy, reason = pick_baseline(cfg, store, sid, req.baseline_policy, baseline or req.baseline)
+        result, comparison = triage(cfg, store, sid, baseline, req.mode, use_llm, (policy, reason), source=req.source)
+        result["delivered"] = deliver(cfg.delivery, result, render_markdown(result, comparison), req.channels)
+        ledger.record_tickets(store, result)  # a ticket a channel opened stays with the finding for its later runs
     return result
 
 
@@ -188,6 +195,7 @@ def main(argv=None):
     sp = sub.add_parser("deliver", help="re-send a stored review to delivery channels")
     sp.add_argument("snapshot")
     sp.add_argument("--channel", help="comma-separated channel names (default: configured channels)")
+    sp.add_argument("--force", action="store_true", help="post regardless of severity gates and finding life (a fresh issue on ticket channels)")
     sp = sub.add_parser("list", help="list stored snapshots")
     sp.add_argument("--target", "-t", required=True)
     sp = sub.add_parser("show", help="print a stored file (summary.json, compare.json, triage.md, awr.txt ...)")
@@ -207,6 +215,8 @@ def main(argv=None):
     sp.add_argument("--schedule", action="store_true", help="run the built-in scheduler in this process (needs --allow-run)")
     sub.add_parser("mcp", help="MCP server over stdio for MCP clients (Claude Code, Claude Desktop ...): read the stored "
                                "snapshots and reviews; off unless [mcp] enabled = true in targets.toml (uv sync --extra mcp)")
+    sp = sub.add_parser("rebuild-ledger", help="recompute a target's ledger of open findings (<engine>/<target>/findings.json) from its stored reviews")
+    sp.add_argument("--target", "-t", required=True)
     sp = sub.add_parser("flush-spool", help="push snapshots spooled during a store outage to the store now")
     sp = sub.add_parser("copy-store", help="copy every object from one store URL to another (e.g. file://./data -> postgres://...)")
     sp.add_argument("--from", dest="src", required=True)
@@ -248,7 +258,8 @@ def main(argv=None):
         if not store.exists(f"{args.snapshot}/triage.json"):
             sys.exit(f"{args.snapshot}: not triaged yet")
         tr, md = store.get_json(f"{args.snapshot}/triage.json"), store.get(f"{args.snapshot}/triage.md").decode()
-        done = deliver(cfg.delivery, tr, md, args.channel.split(",") if args.channel else None)
+        done = deliver(cfg.delivery, tr, md, args.channel.split(",") if args.channel else None, force=args.force)
+        ledger.record_tickets(store, tr)
         print(f"delivered to: {', '.join(done) or 'nothing'}", file=sys.stderr)
     elif args.cmd == "compare":
         t = cfg.target(args.target)
@@ -264,6 +275,7 @@ def main(argv=None):
         md = render_markdown(result, comparison)
         if args.deliver:
             result["delivered"] = deliver(cfg.delivery, result, md)
+            ledger.record_tickets(store, result)
         if not args.deliver or "stdout" not in result["delivered"]:
             print(md)
     elif args.cmd == "run":
@@ -295,6 +307,10 @@ def main(argv=None):
         from dbtriage import mcp_server
 
         raise SystemExit(mcp_server.main(cfg, store))
+    elif args.cmd == "rebuild-ledger":
+        t = cfg.target(args.target)
+        led = ledger.rebuild(store, t.engine, t.name, ledger.gone_after(cfg.delivery))
+        print(f"{ledger.key(t.engine, t.name)}: {len(led['entries'])} open finding(s)" + (f", as of {led['updated']}" if led["updated"] else ""))
     elif args.cmd == "flush-spool":
         if not hasattr(store, "flush"):
             print("this store is local; nothing is ever spooled")

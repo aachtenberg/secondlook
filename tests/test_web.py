@@ -23,7 +23,8 @@ def store(tmp_path):
         st.put_json(f"{sid}/summary.json", {"captured_at": f"2026-11-05T{9 + i:02d}:00:00+00:00", "metrics_kind": "interval", "mode": "adhoc",
                                             "load_profile": {"elapsed_s": 60, "xact_commit": 10 + i, "avg_active_sessions": 1.0 + i},
                                             "top_sql": [{"sql_id": "q1", "calls": 3, "total_time_ms": 30 + i, "mean_time_ms": 1.0 + i, "plan_hash": 100 + i, "text": "select 1"}],
-                                            "wait_events": [], "tables": [], "sessions": [], "findings": []})
+                                            "wait_events": [], "tables": [], "sessions": [], "findings": [],
+                                            "settings": {"work_mem": "4MB" if i == 0 else "64MB", "jit": "on"}})
         st.put_json(f"{sid}/triage.json", {"severity": "high", "title": "Bad query", "source": "rules"})
         st.put_text(f"{sid}/triage.md", "**[HIGH] demo** - Bad query\n- evidence")
         st.put_text(f"{sid}/awr.txt", "WORKLOAD REPOSITORY")
@@ -379,6 +380,7 @@ def test_finding_cell_status_and_compare_search(tmp_path):
     page = app.compare_page("demo", None, None).decode()
     assert "<h1>Compare</h1>" in page and page.count("<option value='postgres/demo/2026-11-05/20261105T100000Z'") == 2 and "selected>2026-11-05 10:00:00" in page
     assert "Heuristic findings" in page and "<figure class='chart'>" in page and "Baseline</span>" in page
+    assert "<h2>Settings changed</h2>" in page and "<td><code>work_mem</code></td><td class=mono>4MB</td><td class=mono>64MB</td>" in page and "<code>jit</code>" not in page
     assert "pick two different snapshots" in app.compare_page("demo", SID, SID).decode()
     s = app.search("dem").decode()
     assert "<a class='btn' href='/t/demo'>demo</a>" in s and "Nothing matched" not in s
@@ -682,3 +684,37 @@ def test_agent_card_save_keeps_fields_the_card_does_not_have(server):
     assert _req(f"{server}/settings/agent", "POST", form.encode())[0] == 200
     agent = json.loads(_req(f"{server}/api/settings")[1])["agent"]
     assert agent["model"] == "m2" and agent["max_tokens"] == 9000
+
+
+def test_agreement_marks_and_dropped_rules_findings(tmp_path):
+    """Both / model only on the model's findings, and the rules findings the model dropped stay on the page."""
+    from dbtriage.findings import agreement
+
+    st = store(tmp_path)
+    heur = [{"severity": "high", "kind": "blocking", "title": "3 sessions blocked by pid 42", "detail": "", "evidence": {"sessions": [{"pid": 42}]}},
+            {"severity": "medium", "kind": "sql_regressed", "title": "q1 regressed 4x", "evidence": {"sql_id": "q1"}},
+            {"severity": "low", "kind": "bloat", "title": "public.t has 12% dead rows", "evidence": {"table": "public.t"}}]
+    findings = [{"severity": "medium", "kind": "sql_regressed", "subject": "q1", "where": "sql_id q1", "summary": "q1 slowed down", "impact": "i", "evidence": ["e"], "fix": "f"},
+                {"severity": "low", "kind": "other", "subject": "", "where": "general", "summary": "Load is up", "impact": "i", "evidence": [], "fix": "f"}]
+    tr = {"severity": "medium", "title": "q1 slowed down", "source": "agent", "provider": "ollama", "model": "m", "confidence": "high",
+          "findings": findings, "heuristics": heur}
+    tr["agreement"] = agreement(tr, heur)
+    st.put_json(f"{SID}/triage.json", tr)
+    app = App(config(tmp_path), st, False, None)
+    page = app.snapshot(SID).decode()
+    assert "<span class='mark both'" in page and "<span class='mark model_only'" in page
+    assert page.index("<span class='mark both'") < page.index("sql_id q1") < page.index("<span class='mark model_only'") < page.index("Load is up")
+    below = page.split("<span class='lbl'>Rules found, not in the review</span>")[1]
+    assert "3 sessions blocked by pid 42" in below and "<span class='sev high'>" in below and "<code class='where'>blocking</code>" in below
+    assert "<summary>1 low-severity rules finding not in the review</summary>" in below and "public.t has 12% dead rows" in below
+    assert "Agreement: 1 both · 1 model only · 2 rules only" in below and "q1 regressed 4x" not in below  # matched: not dropped
+    assert "style=" not in page.split("<ol class='flist'>")[1].split("filesrow")[0]  # colours come from the theme tokens
+    rows, _ = app.snapshot_rows("demo", 10, 0)
+    assert rows[0]["rules_dropped"] == 1 and rows[1]["rules_dropped"] is None  # the older snapshot is a rules-only review
+    # a rules-only review says so; a review stored before the marks existed renders with none of this
+    st.put_json(f"{SID}/triage.json", {"severity": "medium", "title": "x", "source": "rules", "findings": findings, "heuristics": heur, "agreement": None})
+    page = app.snapshot(SID).decode()
+    assert "Rules-only review; there is no model review to compare with." in page and "class='mark" not in page and "Rules found, not in the review" not in page
+    st.put_json(f"{SID}/triage.json", {"severity": "medium", "title": "x", "source": "agent", "findings": findings, "heuristics": heur})
+    page = app.snapshot(SID).decode()
+    assert "q1 slowed down" in page and "class='mark" not in page and "class='dropped'" not in page and "Agreement:" not in page

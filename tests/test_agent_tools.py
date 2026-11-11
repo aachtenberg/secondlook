@@ -44,8 +44,10 @@ def test_tools_read_compare_history_changes_submit(tmp_path):
     ch = json.loads(tools["get_recent_changes"].call({"snapshot_id": ids[-1], "hours": 48}))
     assert [c["description"] for c in ch] == ["v2"]
 
-    bad = {"severity": "critical", "where": "q1", "summary": "s", "impact": "i", "evidence": [], "fix": "f"}
+    bad = {"severity": "critical", "kind": "sql_regressed", "subject": "q1", "where": "q1", "summary": "s", "impact": "i", "evidence": [], "fix": "f"}
     assert "severity must be" in tools["submit_review"].call({"findings": [bad], "summary": "s", "checked": "c", "confidence": "low"})
+    odd = dict(bad, severity="low", kind="slow_query")
+    assert "kind must be one of" in tools["submit_review"].call({"findings": [odd], "summary": "s", "checked": "c", "confidence": "low"})
     low = dict(bad, severity="low"); high = dict(bad, severity="high", summary="High one")
     assert tools["submit_review"].call({"findings": [low, high], "summary": "s", "checked": "c", "confidence": "high"}) == "recorded"
     assert agent.result["severity"] == "high" and agent.result["title"] == "High one"
@@ -54,6 +56,40 @@ def test_tools_read_compare_history_changes_submit(tmp_path):
     rules = rule_based_triage(cmp)
     assert rules["severity"] == cmp["severity"] and rules["source"] == "rules"
     assert rules["findings"][0]["fix"] and rules["findings"][0]["where"].startswith("sql_id ")
+    assert rules["findings"][0]["kind"] == "sql_regressed" and rules["findings"][0]["where"] == f"sql_id {rules['findings'][0]['subject']}"
+
+
+def test_run_stores_the_tool_transcript(tmp_path):
+    """tools.json next to triage.json: every call in order, with its arguments and a truncated result."""
+    from dbtriage import llm
+
+    st = _store(tmp_path)
+    ids = st.list_snapshots("postgres", "demo")
+    st.put_text(f"{ids[-1]}/awr.txt", "AWR REPORT " * 500)  # 5500 chars: longer than one stored result may be
+
+    class Scripted:
+        name = "fake"
+
+        def run(self, system, task, tools, max_iterations=25, require_tool=None, stop_when=None):
+            by = {t.name: t.fn for t in tools}
+            by["compare_snapshots"]({"snapshot_id": ids[-1], "baseline_id": ids[-2]})
+            by["get_raw_report"]({"snapshot_id": ids[-1], "name": "awr.txt", "offset": 0, "length": 5000})
+            by["get_raw_report"]({"snapshot_id": ids[-1], "name": "missing.txt"})
+            finding = {"severity": "high", "kind": "sql_regressed", "subject": "q1", "where": "sql_id q1", "summary": "Slow", "impact": "i", "evidence": [], "fix": "f"}
+            by["submit_review"]({"findings": [finding], "summary": "s", "checked": "c", "confidence": "high"})
+            return llm.AgentResult(text="", stop_reason="tool_use", model="m", tool_calls=4)
+
+    result = TriageAgent(st, Scripted()).run("postgres", "demo", ids[-1], ids[-2], "adhoc")
+    assert result["tool_calls"] == 4 and result["tools_file"] == "tools.json"
+    log = st.get_json(f"{ids[-1]}/tools.json")
+    assert log["snapshot"] == ids[-1] and log["provider"] == "fake" and log["model"] == "m"
+    calls = log["calls"]
+    assert [c["n"] for c in calls] == [1, 2, 3, 4]
+    assert [c["tool"] for c in calls] == ["compare_snapshots", "get_raw_report", "get_raw_report", "submit_review"]
+    assert calls[0]["args"] == {"snapshot_id": ids[-1], "baseline_id": ids[-2]} and all(isinstance(c["ms"], int) for c in calls)
+    long = calls[1]["result"]
+    assert long.startswith("[chars 0-5000 of 5500]") and long.endswith("... (5023 chars)") and len(long) < 2100
+    assert calls[2]["result"].startswith("no report 'missing.txt'") and calls[3]["result"] == "recorded"  # short results are kept whole
 
 
 def test_triage_falls_back_to_rules_when_provider_fails(tmp_path, monkeypatch, capsys):
@@ -74,6 +110,7 @@ def test_triage_falls_back_to_rules_when_provider_fails(tmp_path, monkeypatch, c
     ids = st.list_snapshots("postgres", "demo")
     result, comparison = cli.triage(cfg, st, ids[-1], ids[-2], "adhoc", use_llm=True)
     assert result["source"] == "rules" and "401" in result["agent_error"] and comparison["findings"]
+    assert result["agreement"] is None and st.get_json(f"{ids[-1]}/triage.json")["agreement"] is None  # rules only: nothing to agree with
     assert "using rules-based triage" in capsys.readouterr().err
     assert "agent unavailable" in st.get(f"{ids[-1]}/triage.md").decode()
 
@@ -94,6 +131,31 @@ def test_render_review_markdown():
     assert "ollama:m · 3 tool calls · 1,200 in / 50 out tokens · 4.2s · confidence high · 2 heuristic findings · snapshot `s2` vs `s1`" in md
     none = render_markdown(dict(t, severity="info", findings=[], source="rules"), None)
     assert "✅ **No significant change.**" in none and "rules-based (no model)" in none
+
+
+def test_render_markdown_agreement_section():
+    from dbtriage.report import render_markdown
+
+    heur = [{"severity": "high", "kind": "deadlocks", "title": "4 deadlocks in the window", "evidence": {"deadlocks": 4}},
+            {"severity": "medium", "kind": "sql_regressed", "title": "q1 regressed", "evidence": {"sql_id": "q1"}},
+            {"severity": "low", "kind": "bloat", "title": "t is bloated", "evidence": {"table": "t"}}]
+    t = {"target": "demo", "engine": "postgres", "severity": "medium", "source": "agent", "snapshot": "s2", "confidence": "high",
+         "findings": [{"severity": "medium", "kind": "sql_regressed", "subject": "q1", "where": "q1", "summary": "slow"},
+                      {"severity": "low", "kind": "other", "subject": "", "where": "x", "summary": "added"}],
+         "heuristics": heur,
+         "agreement": [{"mark": "both", "kind": "sql_regressed", "subject": "q1", "model": 0, "rules": 1, "severity": "medium"},
+                       {"mark": "model_only", "kind": "other", "subject": "", "model": 1, "rules": None, "severity": "low"},
+                       {"mark": "rules_only", "kind": "deadlocks", "subject": "", "model": None, "rules": 0, "severity": "high"},
+                       {"mark": "rules_only", "kind": "bloat", "subject": "t", "model": None, "rules": 2, "severity": "low"}]}
+    md = render_markdown(t, {"findings": heur})
+    assert "**Agreement:** 1 both, 1 model only, 2 rules only" in md
+    clean = render_markdown(dict(t, findings=[], heuristics=[], agreement=[], severity="info"), {"findings": []})
+    assert "Agreement" not in clean  # nothing to agree about: no line of zeros
+    assert "- ⚠️ rules found, not in the review: 🔴 **High** · 4 deadlocks in the window" in md
+    assert "t is bloated" not in md and "q1 regressed" not in md  # low and matched ones stay out of Slack
+    assert md.index("**Agreement:**") < md.index("confidence high · 3 heuristic findings")  # before the footer
+    assert "Agreement" not in render_markdown(dict(t, source="rules", agreement=None), None)
+    assert "Agreement" not in render_markdown({k: v for k, v in t.items() if k != "agreement"}, None)
 
 
 def test_agent_settings_reach_the_reviewer(tmp_path, monkeypatch):
@@ -143,12 +205,15 @@ def test_silent_model_and_missing_key_fall_back_to_the_rules(tmp_path, monkeypat
 
     class Silent:
         name = "silent"
-        def run(self, *a, **k):
-            return llm.AgentResult(text="I think it is fine.", stop_reason="end_turn", model="m", tool_calls=2)
+        def run(self, system, task, tools, **k):
+            next(t for t in tools if t.name == "compare_snapshots").fn({"snapshot_id": sid, "baseline_id": base})
+            return llm.AgentResult(text="I think it is fine.", stop_reason="end_turn", model="m", tool_calls=1)
 
     monkeypatch.setattr(llm, "make_backend", lambda c: Silent())
     r, _ = triage(cfg, st, sid, base, "adhoc", True)
     assert r["source"] == "rules" and "without submitting a review" in r["agent_error"] and r["findings"], r
+    log = st.get_json(f"{sid}/tools.json")  # the transcript is what explains a silent model, so it is kept anyway
+    assert [c["tool"] for c in log["calls"]] == ["compare_snapshots"] and log["model"] == "m"
     monkeypatch.setattr(llm, "make_backend", lambda c: (_ for _ in ()).throw(SystemExit("[agent] GROQ_API_KEY is not set")))
     r, _ = triage(cfg, st, sid, base, "adhoc", True)
     assert r["source"] == "rules" and "GROQ_API_KEY is not set" in r["agent_error"]

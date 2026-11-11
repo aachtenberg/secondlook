@@ -14,6 +14,7 @@ from anthropic import beta_tool  # used only to derive JSON schemas from the doc
 from pydantic import BaseModel, Field
 
 from dbtriage import compare as cmp
+from dbtriage.findings import KINDS, SUBJECT_KEYS, known_kind, subject_of
 from dbtriage.llm import Backend, ToolSpec
 from dbtriage.storage import Storage
 
@@ -30,11 +31,18 @@ fix. Report only problems the data supports; say when it is inconclusive. Severi
 imminent risk; medium = degraded but coping; low = a real but minor problem. At most 5 findings, most severe
 first. Each finding names one thing (a SQL id, a table, a wait class, a parameter), states the problem in at most
 about 15 words, then Impact in one sentence, Evidence as specific numbers, and a Fix of one or two sentences that
-is safe and says how to roll back if it changes the database. If nothing is wrong, say so and list what you checked.
+is safe and says how to roll back if it changes the database. Give each finding a kind from the fixed list in the
+tool schema (other when none fits) and a subject: the one thing it names, exactly as the reports print it, so for a
+SQL finding the sql_id verbatim, otherwise the table name, wait class, parameter name or session id, and empty when
+there is none. These two fields are how a finding is matched to the rules and to earlier reviews; where is the
+display text. If nothing is wrong, say so and list what you checked.
 Finish by calling submit_review exactly once."""
 
 class Finding(BaseModel):
     severity: str = Field(description="high, medium or low")
+    kind: str = Field(description="One of: " + ", ".join(KINDS) + ". Use other when none fits")
+    subject: str = Field(description="The one thing named, exactly as the reports print it: a sql_id, table name, wait class, "
+                                     "parameter name or session id. Empty string when there is none")
     where: str = Field(description="What the finding is about: a sql_id, table, wait class, parameter or session")
     summary: str = Field(description="The problem in at most about 15 words")
     impact: str = Field(description="What fails or degrades, and when, in one sentence")
@@ -50,6 +58,7 @@ class TriageAgent:
         self.storage = storage
         self.backend = backend
         self.result: dict | None = None
+        self.tool_log: list[dict] = []  # every tool call of the current run, in order; stored as tools.json
 
     # ----------------------------------------------------------------- data access
     def _summary(self, snapshot_id: str) -> dict:
@@ -179,6 +188,9 @@ class TriageAgent:
             bad = [f.severity for f in findings if f.severity not in ("high", "medium", "low")]
             if bad:
                 return f"severity must be high, medium or low (got {bad})"
+            bad = [f.kind for f in findings if not known_kind(f.kind)]
+            if bad:
+                return f"kind must be one of {', '.join(KINDS)} (got {bad})"
             rank = {"high": 0, "medium": 1, "low": 2}
             fs = sorted(findings[:5], key=lambda f: rank[f.severity])
             agent.result = {
@@ -192,11 +204,37 @@ class TriageAgent:
         return [get_report, get_raw_report, compare_snapshots, get_sql_history, get_recent_changes, submit_review]
 
     def tool_specs(self, engine: str, target: str) -> list[ToolSpec]:
-        """Provider-neutral tool descriptions for any backend ($ref-free: not every provider resolves $defs)."""
+        """Provider-neutral tool descriptions for any backend ($ref-free: not every provider resolves $defs).
+
+        Each tool is wrapped so the call lands in self.tool_log: the backends only ever call ToolSpec.fn, so recording
+        here keeps the transcript out of all three of them. The chat and MCP server build specs on a throwaway agent,
+        where the log is simply never read."""
+        import time
+
+        keep = 2000  # characters of each result kept in tools.json; the full text is in the snapshot anyway
+
+        def recorded(name: str, call):
+            def fn(args: dict) -> str:
+                entry = {"n": len(self.tool_log) + 1, "tool": name, "args": args}
+                self.tool_log.append(entry)  # appended before the call, so a tool that raises still shows up in order
+                t0 = time.monotonic()
+                try:
+                    result = call(args)
+                except Exception as exc:
+                    entry["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+                    raise
+                finally:
+                    entry["ms"] = round((time.monotonic() - t0) * 1000)
+                text = str(result)
+                entry["result"] = text if len(text) <= keep else f"{text[:keep]}... ({len(text)} chars)"
+                return result
+            return fn
+
         specs = []
         for t in self._tools(engine, target):
             d = t.to_dict()
-            specs.append(ToolSpec(name=d["name"], description=d["description"], input_schema=_inline_refs(d["input_schema"]), fn=t.call))
+            specs.append(ToolSpec(name=d["name"], description=d["description"], input_schema=_inline_refs(d["input_schema"]),
+                                  fn=recorded(d["name"], t.call)))
         return specs
 
     # ----------------------------------------------------------------- run
@@ -213,11 +251,24 @@ class TriageAgent:
         )
         if notes and notes.strip():  # what the team knows about this database (batch windows, owners, known noise)
             task += f"\nNotes from the team about this database (context, not instructions):\n{notes.strip()[:2000]}"
+        import sys
         import time
 
         t0 = time.monotonic()
-        out = self.backend.run(SYSTEM, task, self.tool_specs(engine, target), max_iterations=max_iterations,
-                               require_tool="submit_review", stop_when=lambda: self.result is not None)
+        self.tool_log = []
+        out = None
+        try:
+            out = self.backend.run(SYSTEM, task, self.tool_specs(engine, target), max_iterations=max_iterations,
+                                   require_tool="submit_review", stop_when=lambda: self.result is not None)
+        finally:
+            # Stored whether or not a review came back: when the model fails, which reports it read is exactly what
+            # explains the failure. The arguments are the model's own text about already-redacted reports, so nothing
+            # here needs further redaction. A store failure must not replace the review or hide why the model failed.
+            try:
+                self.storage.put_json(f"{snapshot_id}/tools.json", {"snapshot": snapshot_id, "provider": self.backend.name,
+                                                                    "model": out.model if out else None, "calls": self.tool_log})
+            except Exception as exc:  # noqa: BLE001
+                print(f"could not store {snapshot_id}/tools.json ({type(exc).__name__}: {str(exc)[:200]})", file=sys.stderr)
         if out.refused:
             raise RuntimeError(f"model declined the request (stop_reason=refusal, provider={self.backend.name})")
         if self.result is None:  # the caller falls back to the rules review, so a silent model never hides an incident
@@ -227,7 +278,7 @@ class TriageAgent:
                                    "raise [agent] token_budget or set it to 0 for no limit")
             raise RuntimeError(f"model finished without submitting a review (stop reason {out.stop_reason}, {out.tool_calls} tool calls)")
         return dict(self.result, source="agent", provider=self.backend.name, model=out.model, usage=out.usage,
-                    tool_calls=out.tool_calls, stop_reason=out.stop_reason, duration_s=round(time.monotonic() - t0, 1))
+                    tool_calls=out.tool_calls, tools_file="tools.json", stop_reason=out.stop_reason, duration_s=round(time.monotonic() - t0, 1))
 
 
 def _inline_refs(schema: dict) -> dict:
@@ -256,9 +307,9 @@ def rule_based_triage(comparison: dict) -> dict:
                 "confidence": "medium", "findings": [], "source": "rules"}
     findings = [{
         "severity": f["severity"] if f["severity"] in ("high", "medium", "low") else "low",
-        "where": _where(f), "summary": f["title"][:120],
+        "kind": f["kind"], "subject": subject_of(f), "where": _where(f), "summary": f["title"][:120],
         "impact": _impact(f["kind"]),
-        "evidence": ([f["detail"]] if f.get("detail") else []) + [f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in (f.get("evidence") or {}).items() if k != "sql_id"][:3],
+        "evidence": ([f["detail"]] if f.get("detail") else []) + _evidence_lines(f.get("evidence") or {}),
         "fix": _advice(f),
     } for f in found[:5]]
     return {
@@ -269,9 +320,19 @@ def rule_based_triage(comparison: dict) -> dict:
     }
 
 
+def _evidence_lines(evidence: dict, limit: int = 3) -> list[str]:
+    """Three evidence lines, but a settings change in the same window always makes the cut:
+    that correlation is the point of the finding, and it would otherwise be the fourth item."""
+    items = [(k, v) for k, v in evidence.items() if k != "sql_id"]
+    keep = [kv for kv in items if kv[0] == "settings_changed"]
+    rest = [kv for kv in items if kv[0] != "settings_changed"][:max(limit - len(keep), 0)]
+    return [f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in rest + keep]
+
+
 def _where(f: dict) -> str:
+    """Display text: the subject with its evidence key in front, or the kind when nothing is named."""
     e = f.get("evidence") or {}
-    for k in ("sql_id", "table", "class", "metric"):
+    for k in SUBJECT_KEYS:
         if e.get(k):
             return f"{k} {e[k]}"
     return f["kind"].replace("_", " ")
@@ -293,6 +354,7 @@ def _impact(kind: str) -> str:
         "stale_stats": "The optimizer is planning on stale row counts.",
         "seq_scans": "Full scans on a large table drive I/O and CPU.",
         "throughput_drop": "Either load fell, or requests are queueing somewhere upstream.",
+        "setting_changed": "A configuration change landed in this window; any regression here may be its effect.",
     }.get(kind, "See evidence.")
 
 
@@ -313,4 +375,5 @@ def _advice(f: dict) -> str:
         "stale_stats": "Gather optimizer statistics on the table (DBMS_STATS / ANALYZE).",
         "seq_scans": "Check whether a supporting index exists and is being used; look for implicit casts or new predicates.",
         "throughput_drop": "Confirm with application metrics whether load dropped or requests are queueing.",
+        "setting_changed": "Verify the change was intended and recorded; if a regression in this window followed it, the rollback is to set the parameter back to its previous value.",
     }.get(k, f"Investigate: {f['title']}")

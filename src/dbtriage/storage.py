@@ -406,8 +406,36 @@ class ResilientStorage(Storage):
             self.spool._p(key).unlink(missing_ok=True)
         self.flush()
 
+    @staticmethod
+    def _ledger_key(key: str) -> str | None:
+        """The target name when `key` is a database's ledger (<engine>/<target>/findings.json), else None. That file
+        is the one object two writers share, so it carries a generation and gets the checks below."""
+        parts = key.split("/")
+        return parts[1] if len(parts) == 3 and parts[2] == "findings.json" else None
+
+    @staticmethod
+    def _generation(data: bytes | None) -> int:
+        try:
+            return int((json.loads(data or b"{}") or {}).get("generation") or 0)
+        except (ValueError, TypeError, AttributeError):
+            return 0
+
+    def _spool_is_stale(self, key: str) -> bool:
+        """For a ledger key only: the store already holds a newer generation than the spooled copy (another run saved
+        after the outage, or another process). Then the spooled copy is dropped and never replayed."""
+        if self._ledger_key(key) is None or self._down():
+            return False
+        try:
+            remote = self._call(self.primary.get, key)
+        except (FileNotFoundError, StorageUnavailable):
+            return False
+        if self._generation(remote) >= self._generation(self.spool.get(key)):
+            self.spool._p(key).unlink(missing_ok=True)
+            return True
+        return False
+
     def get(self, key: str) -> bytes:
-        if self.spool.exists(key):
+        if self.spool.exists(key) and not self._spool_is_stale(key):
             return self.spool.get(key)
         return self._call(self.primary.get, key)
 
@@ -436,6 +464,11 @@ class ResilientStorage(Storage):
         try:
             # manifests last: a snapshot only becomes visible in the store once all its files are there
             for key in sorted(keys, key=lambda k: (k.endswith("/manifest.json"), k)):
+                if (target := self._ledger_key(key)) is not None:
+                    if not self._push_ledger(key, target):
+                        continue  # a run holds that database right now; this file waits for the next flush
+                    pushed += 1
+                    continue
                 try:
                     self._call(self.primary.put, key, self.spool.get(key))
                 except StorageUnavailable:
@@ -449,6 +482,28 @@ class ResilientStorage(Storage):
         finally:
             self._flush_lock.release()
         return pushed, len(keys) - pushed
+
+    def _push_ledger(self, key: str, target: str) -> bool:
+        """Replay a spooled ledger under the database's lock, unless a newer generation is already in the store.
+        True when the spooled copy is gone (pushed or dropped), False when the file has to wait."""
+        from dbtriage.locks import target_lock
+
+        lock = target_lock(target)
+        if not lock.acquire(blocking=False):
+            return False
+        try:
+            if not self.spool.exists(key):  # the run that held the lock saved and cleared it meanwhile
+                return True
+            if self._spool_is_stale(key):
+                return True
+            try:
+                self._call(self.primary.put, key, self.spool.get(key))
+            except StorageUnavailable:
+                return False
+            self.spool._p(key).unlink(missing_ok=True)
+            return True
+        finally:
+            lock.release()
 
 
 def open_storage(url: str, spool_dir: str | os.PathLike | None = None) -> Storage:
