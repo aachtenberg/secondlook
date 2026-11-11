@@ -576,14 +576,51 @@ class ResilientStorage(Storage):
         """The store's conditional write; a Conflict comes straight through. When the store is down the object goes to
         the spool like any put: a spooled write cannot be conditional, and its replay is governed instead by the
         ledger's generation (`_push_ledger` drops a copy the store has since overtaken) under the database's lock."""
+        if self._inbox_key(key):
+            data = self._inbox_union(key, data)  # the copy this process read may predate an outage; keep the store's items too
         try:
             self._call(self.primary.put_if, key, data, expected)
         except StorageUnavailable:
+            if self._inbox_key(key) and self.spool.exists(key):
+                data = self._union_bytes(data, self.spool.get(key))  # two appends in one outage: keep both
             self.spool.put(key, data)
             return
         if self.spool.exists(key):
             self.spool._p(key).unlink(missing_ok=True)
         self.flush()
+
+    @staticmethod
+    def _inbox_key(key: str) -> bool:
+        """<engine>/<target>/changes-inbox.json: an append-only list. Two copies of it are merged, never chosen between,
+        so a write made from a stale copy (during or just after an outage) cannot drop items the store already holds."""
+        parts = key.split("/")
+        return len(parts) == 3 and parts[2] == "changes-inbox.json"
+
+    def _inbox_union(self, key: str, data: bytes) -> bytes:
+        """`data` plus every item the store holds for this inbox that `data` lacks, oldest first. Items are compared
+        whole (time, kind, description, link, source); the generation is the larger of the two. Unreadable copies
+        are left as they are."""
+        if self._down():
+            return data
+        try:
+            return self._union_bytes(data, self._call(self.primary.get, key))
+        except (FileNotFoundError, StorageUnavailable):
+            return data
+
+    @staticmethod
+    def _union_bytes(data: bytes, other: bytes | None) -> bytes:
+        try:
+            mine = json.loads(data or b"{}") or {}
+            theirs = json.loads(other or b"{}") or {}
+        except ValueError:
+            return data
+        seen = {json.dumps(i, sort_keys=True, default=str) for i in mine.get("items") or []}
+        extra = [i for i in theirs.get("items") or [] if json.dumps(i, sort_keys=True, default=str) not in seen]
+        if not extra:
+            return data
+        items = sorted([*(mine.get("items") or []), *extra], key=lambda i: str(i.get("time") or ""))
+        merged = dict(mine, items=items, generation=max(int(mine.get("generation") or 0), int(theirs.get("generation") or 0)))
+        return json.dumps(merged, indent=1, default=str).encode()
 
     @staticmethod
     def _ledger_key(key: str) -> str | None:
@@ -649,7 +686,10 @@ class ResilientStorage(Storage):
                     pushed += 1
                     continue
                 try:
-                    self._call(self.primary.put, key, self.spool.get(key))
+                    data = self.spool.get(key)
+                    if self._inbox_key(key):
+                        data = self._inbox_union(key, data)  # replaying an inbox adds its items; it never replaces the store's
+                    self._call(self.primary.put, key, data)
                 except StorageUnavailable:
                     break
                 self.spool._p(key).unlink(missing_ok=True)

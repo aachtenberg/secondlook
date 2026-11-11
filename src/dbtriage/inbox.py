@@ -70,10 +70,9 @@ def record(store: Storage, target, items: list[dict], now: datetime | None = Non
     keeps at most MAX_ITEMS, the newest.
 
     Through ResilientStorage an outage spools the object like any file (version_of answers None, put_if writes the
-    spool). Appending makes that safe enough without the ledger's generation check, but it has a limit: the append
-    starts from the copy this process can read, the spool's or nothing, so items the store took that are not in
-    that copy are overwritten when the spool is replayed, and two appends spooled in one outage keep only the last.
-    A deploy posted during a store outage can therefore go missing from the feed; the capture itself is unaffected."""
+    spool). The store treats this file as append-only: a write made from a stale copy, a second append spooled in
+    the same outage, and the replay itself are each merged with what is already there, item by item, so a deploy
+    posted during an outage is not lost. Only the pruning can differ between copies, and the next write settles it."""
     if not items:
         return []
     k = changes.inbox_key(target.engine, target.name)

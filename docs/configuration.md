@@ -145,8 +145,8 @@ what another tool deployed, and one without a `changes` table has a feed as soon
 `lookback_hours` governs the inbox too: it is what a capture reads before its window, so an item older than the
 lookback plus a day can reach no feed and is dropped on the next post; the inbox keeps at most a few hundred
 items, the newest. Two pipelines posting at the same moment both land (the write is a compare-and-set, like the
-ledger's). While the store is unreachable the post is spooled like any other file and may be lost if the store
-took an item meanwhile; an alert run is not.
+ledger's). While the store is unreachable the post is spooled, and the store merges inbox copies item by item on
+replay rather than choosing between them, so a deploy posted during an outage still reaches the feed.
 
 Cloud or on-premises makes no difference: dbtriage needs a network path and a credential. RDS, Cloud SQL and
 Azure Database for PostgreSQL or MySQL work as they are. For Oracle on RDS, set `diagnostics_pack` to match the

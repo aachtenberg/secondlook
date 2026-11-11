@@ -235,3 +235,49 @@ def test_collect_stores_posted_items_with_the_snapshot(tmp_path, monkeypatch):
     cfg = Config(storage_url="", targets={"billing-db": tgt(changes={"source": "github", "repo": "acme/billing"})}, base_dir=str(tmp_path))
     m = st.get_json(f"{cli.collect(cfg, st, req)}/manifest.json")
     assert m["changes_sources"] == ["github", "webhook"]
+
+
+def test_an_inbox_is_merged_not_replaced_across_an_outage(tmp_path):
+    """The store treats the inbox as append-only: a write from a stale copy, a second append spooled in the same
+    outage, and the replay are each merged with what is already there."""
+    from dbtriage.storage import LocalStorage, ResilientStorage
+
+    class Flaky(LocalStorage):
+        down = False
+
+        def _check(self):
+            if self.down:
+                from dbtriage.storage import StorageUnavailable
+                raise StorageUnavailable("down")
+
+        def put(self, key, data):
+            self._check(); super().put(key, data)
+
+        def put_if(self, key, data, expected):
+            self._check(); super().put_if(key, data, expected)
+
+        def get(self, key):
+            self._check(); return super().get(key)
+
+        def version_of(self, key):
+            self._check(); return super().version_of(key)
+
+        def exists(self, key):
+            self._check(); return super().exists(key)
+
+    primary = Flaky(tmp_path / "primary")
+    st = ResilientStorage(primary, LocalStorage(tmp_path / "spool"))
+    st.RETRY_S = 0
+    k = "postgres/demo/changes-inbox.json"
+    item = lambda n: {"time": f"2026-11-11T0{n}:00:00+00:00", "kind": "deploy", "description": f"d{n}", "link": None, "source": "webhook"}  # noqa: E731
+    st.put_json_if(k, {"items": [item(1)], "generation": 1}, None)
+    assert [i["description"] for i in primary.get_json(k)["items"]] == ["d1"]
+    primary.down = True
+    st.put_json_if(k, {"items": [item(2)], "generation": 1}, None)  # appended from a copy that lacks d1 (spool had nothing)
+    st.put_json_if(k, {"items": [item(3)], "generation": 1}, None)  # a second append in the same outage
+    assert sorted(i["description"] for i in st.spool.get_json(k)["items"]) == ["d2", "d3"]  # both kept in the spool
+    primary.down = False
+    assert st.flush()[0] == 1
+    assert [i["description"] for i in primary.get_json(k)["items"]] == ["d1", "d2", "d3"]  # replay merged, nothing lost
+    st.put_json_if(k, {"items": [item(4)], "generation": 2}, st.version_of(k))  # a write from a stale copy after recovery
+    assert [i["description"] for i in primary.get_json(k)["items"]] == ["d1", "d2", "d3", "d4"]
