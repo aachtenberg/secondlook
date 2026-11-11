@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 import sys
-import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +15,7 @@ from dbtriage.collectors import get_collector
 from dbtriage.collectors.base import Window
 from dbtriage.config import Config, load_config
 from dbtriage import ledger
+from dbtriage.locks import target_lock
 from dbtriage.deliver import deliver
 from dbtriage.findings import agreement
 from dbtriage.report import render_markdown
@@ -134,18 +134,6 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
     if comparison is not None:
         store.put_json(f"{sid}/compare.json", comparison)
     return result, comparison
-
-
-_target_locks: dict[str, threading.Lock] = {}
-_target_locks_guard = threading.Lock()
-
-
-def target_lock(name: str) -> threading.Lock:
-    """One lock per target in this process: two runs of one database (two alerts, a webhook beside the schedule)
-    take turns, so the ledger's read-modify-write and the ticket bookkeeping never interleave. The web view and
-    the scheduler already refuse a second run; `dbtriage serve` starts a thread per POST and relies on this."""
-    with _target_locks_guard:
-        return _target_locks.setdefault(name, threading.Lock())
 
 
 def run_request(req: TriageRequest, cfg: Config | None = None, use_llm: bool | None = None, baseline: str | None = None) -> dict:

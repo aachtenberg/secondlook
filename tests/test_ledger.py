@@ -204,6 +204,107 @@ def test_runs_of_one_target_take_turns():
     assert target_lock("pg") is target_lock("pg") and target_lock("pg") is not target_lock("ora")
 
 
+def test_a_copy_that_lost_every_race_is_never_written(tmp_path, monkeypatch):
+    st = LocalStorage(tmp_path)
+    run(st, 0, [rule("plan_change")])
+    real_load = ledger.load
+
+    def load_then_rival_always_writes(store, engine, target):
+        led = real_load(store, engine, target)
+        rival = dict(real_load(store, engine, target), updated=sid(0))  # someone else saves every time (an older-looking id so ours still applies)
+        rival["entries"][0]["title"] = "rival"
+        ledger.save(store, engine, target, rival)
+        return led
+
+    monkeypatch.setattr(ledger, "load", load_then_rival_always_writes)
+    import pytest
+    with pytest.raises(ledger.LedgerContended):
+        run(st, 1, [rule("deadlocks", None)])
+    monkeypatch.setattr(ledger, "load", real_load)
+    led = ledger.load(st, ENGINE, TARGET)
+    assert led["entries"][0]["title"] == "rival" and [e["kind"] for e in led["entries"]] == ["plan_change"]  # the winner's file, untouched
+
+
+def test_declined_updates_do_not_write(tmp_path):
+    st = LocalStorage(tmp_path)
+    run(st, 0, [rule("plan_change")]); run(st, 1, [])
+    gen = ledger.load(st, ENGINE, TARGET)["generation"]
+    assert ledger.update(st, ENGINE, TARGET, sid(0), at(0), [], []) is None  # an older snapshot
+    ledger.record_tickets(st, {"engine": ENGINE, "target": TARGET, "snapshot": None, "findings": [review(rule("bloat", "t"))],
+                              "life": [{"tickets": {"jira": {"key": "DBA-0"}}}], "still_open": []})  # matches no entry
+    assert ledger.load(st, ENGINE, TARGET)["generation"] == gen
+
+
+def test_re_triaging_the_latest_snapshot_keeps_tickets_recorded_since(tmp_path):
+    """Rules review, delivery opens a ticket, then the model review of the same snapshot: the ticket survives."""
+    st = LocalStorage(tmp_path)
+    run(st, 0, [rule("plan_change")])
+    out = run(st, 1, [rule("plan_change")])
+    ledger.record_tickets(st, {"engine": ENGINE, "target": TARGET, "snapshot": None, "findings": [review(rule("plan_change"))],
+                              "life": [dict(out["life"][0], tickets={"jira": {"key": "DBA-4"}})], "still_open": []})
+    out = run(st, 1, [rule("plan_change")])  # the same snapshot again
+    assert out["life"][0]["tickets"]["jira"]["key"] == "DBA-4"
+    assert ledger.load(st, ENGINE, TARGET)["entries"][0]["tickets"]["jira"]["key"] == "DBA-4"
+
+
+def test_gone_rows_carry_the_cadence(tmp_path):
+    st = LocalStorage(tmp_path)
+    batch = [rule("sql_top", "b", "low")]
+    hourly(st, 0, 2, batch); hourly(st, 0, 5, []); hourly(st, 1, 2, batch)
+    out = None
+    for day in (2, 3, 4):
+        for h in range(0, 24):
+            out = hourly(st, day, h, [])
+            if out["gone"]:
+                break
+        if out["gone"]:
+            break
+    assert out["gone"][0]["period_s"] == 86400.0 and out["gone"][0]["returns"] == 1 and out["gone"][0]["title"]
+
+
+def test_rebuild_starts_over_when_a_run_lands_meanwhile(tmp_path, monkeypatch):
+    st = LocalStorage(tmp_path)
+    st.put_json(f"{sid(0)}/manifest.json", {"captured_at": at(0)}); st.put_json(f"{sid(0)}/compare.json", {"findings": [rule("plan_change")]})
+    st.put_json(f"{sid(0)}/triage.json", {"findings": [review(rule("plan_change"))], "source": "rules"})
+    run(st, 0, [rule("plan_change")])
+    real, calls = ledger._rebuilt, {"n": 0}
+
+    def rebuilt_while_a_run_lands(store, engine, target, gone_after):
+        calls["n"] += 1
+        led = real(store, engine, target, gone_after)
+        if calls["n"] == 1:  # a run saves while we were reading
+            st.put_json(f"{sid(1)}/manifest.json", {"captured_at": at(1)}); st.put_json(f"{sid(1)}/compare.json", {"findings": []})
+            st.put_json(f"{sid(1)}/triage.json", {"findings": [], "source": "rules"})
+            run(st, 1, [])
+        return led
+
+    monkeypatch.setattr(ledger, "_rebuilt", rebuilt_while_a_run_lands)
+    led = ledger.rebuild(st, ENGINE, TARGET)
+    assert calls["n"] == 2 and led["updated"] == sid(1) and led["entries"][0]["misses"] == 1  # the second pass saw the new run
+
+
+def test_spool_never_replays_an_older_ledger_over_a_newer_one(tmp_path):
+    """Coming out of an outage: the spooled ledger is dropped when the store already has a newer generation,
+    pushed when it is the newer one, and a read never returns the stale copy."""
+    primary = LocalStorage(tmp_path / "primary")
+    st = ResilientStorage(primary, LocalStorage(tmp_path / "spool"))
+    k = ledger.key(ENGINE, TARGET)
+    st.spool.put_json(k, {"entries": [{"kind": "old"}], "tombstones": [], "updated": sid(0), "prior": None, "generation": 2})
+    primary.put_json(k, {"entries": [{"kind": "newer"}], "tombstones": [], "updated": sid(1), "prior": None, "generation": 3})
+    assert ledger.load(st, ENGINE, TARGET)["entries"] == [{"kind": "newer"}]  # the read prefers the newer generation
+    assert not st.spool.exists(k)  # and the stale copy is gone
+    st.spool.put_json(k, {"entries": [{"kind": "fresh"}], "tombstones": [], "updated": sid(2), "prior": None, "generation": 4})
+    assert st.flush() == (1, 0) and primary.get_json(k)["generation"] == 4 and not st.spool.exists(k)
+    st.spool.put_json(k, {"entries": [{"kind": "stale"}], "tombstones": [], "updated": sid(0), "prior": None, "generation": 1})
+    assert st.flush() == (1, 0) and primary.get_json(k)["generation"] == 4  # dropped, not replayed
+    # while a run holds the database, the ledger file waits for the next flush
+    from dbtriage.locks import target_lock
+    st.spool.put_json(k, {"entries": [{"kind": "waiting"}], "tombstones": [], "updated": sid(3), "prior": None, "generation": 5})
+    with target_lock(TARGET):
+        assert st.flush() == (0, 1)
+    assert st.flush() == (1, 0) and primary.get_json(k)["entries"] == [{"kind": "waiting"}]
+
+
 def test_still_open_rows_carry_the_cadence(tmp_path):
     st = LocalStorage(tmp_path)
     batch = [rule("sql_top", "b", "low")]

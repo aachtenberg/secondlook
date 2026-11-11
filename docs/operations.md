@@ -192,9 +192,12 @@ One run's new findings share one Jira or Plane issue. When one of them clears wh
 still open, the comment says so instead of "cleared".
 
 Runs of one database take turns within a process (the web view and the scheduler refuse a second run; `dbtriage
-serve` queues it), and the ledger's save checks that nobody saved in between and applies again if someone did.
-Two separate processes writing one database's ledger through a store outage still end last-write-wins, so run one
-scheduler per store; `dbtriage rebuild-ledger` repairs the file from the stored reviews.
+serve` queues it). The ledger file carries a generation: a save goes ahead only when nobody saved in between, and
+is redone on the new state if someone did; a copy that lost the race is never written. The outage spool replays
+the ledger under the same per-database lock and drops its copy when the store already holds a newer generation,
+so coming out of an outage cannot put an older ledger over a fresh run. Two separate processes writing one
+database's ledger at the same instant can still race (no store has a conditional put), so run one scheduler per
+store; `dbtriage rebuild-ledger` repairs the file from the stored reviews.
 
 The ledger is derived data. It is written through the same store as the snapshots, so an outage spools it like
 any other file, and `dbtriage rebuild-ledger -t <db>` recomputes it from the stored `triage.json` and

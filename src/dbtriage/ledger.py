@@ -81,24 +81,32 @@ def _generation(store: Storage, engine: str, target: str) -> int:
         return 0
 
 
+class LedgerContended(RuntimeError):
+    """The ledger changed under every attempt to save it; nothing was written."""
+
+
 def commit(store: Storage, engine: str, target: str, mutate, attempts: int = 3):
     """Read-modify-write the ledger with an optimistic check: `mutate(ledger)` runs on a fresh load, and the save
-    goes ahead only when nobody else saved in between (the stored generation is still the one loaded); otherwise
-    the whole thing is done again on the new state. Returns what `mutate` returned on the saved attempt.
+    goes ahead only when nobody else saved in between (the stored generation is still the one loaded). If it
+    moved, the whole thing is done again on the new state; a copy that lost the race is never written, and after
+    `attempts` losses LedgerContended is raised. `mutate` returning None declines: nothing is saved (an older
+    snapshot, a ticket that matches no entry). Returns what `mutate` returned on the saved attempt.
 
-    The window between the check and the put is not closed (no store here has a conditional put), and the outage
-    spool replays whole files, so two processes writing one target through an outage still end last-write-wins.
-    `run_request` holds a per-target lock in-process; across processes, run one scheduler per store, and
-    `rebuild-ledger` repairs the file from the stored reviews."""
-    for attempt in range(attempts):
+    The window between the check and the put is not closed (no store here has a conditional put). In one process
+    `run_request` holds a per-target lock, and the spool flush compares generations before replaying this file;
+    across processes, run one scheduler per store, and `rebuild-ledger` repairs the file from the stored reviews."""
+    for _ in range(attempts):
         ledger = load(store, engine, target)
         gen = ledger["generation"]
         out = mutate(ledger)
-        if _generation(store, engine, target) != gen and attempt < attempts - 1:
+        if out is None:
+            return None
+        if _generation(store, engine, target) != gen:
             print(f"ledger: {engine}/{target} changed under us; applying again", file=sys.stderr)
             continue
         save(store, engine, target, ledger)
         return out
+    raise LedgerContended(f"ledger {engine}/{target}: changed under {attempts} attempts; not saved")
 
 
 def tracked(f: dict) -> bool:
@@ -182,8 +190,13 @@ def apply(ledger: dict, snapshot_id: str, captured_at: str | None, rules_finding
     review_findings = review_findings or []
     if ledger.get("updated") == snapshot_id and ledger.get("prior") is not None:
         # the same snapshot triaged again (a model review after the rules, a re-run): start from where it stood
-        # before, or every re-triage would count as another run the open findings were missing from
+        # before, or every re-triage would count as another run the open findings were missing from. Tickets
+        # recorded since that save (delivery ran after the first apply) are kept, or the next run opens duplicates.
+        tickets = {(e["kind"], e["subject"]): e.get("tickets") for e in [*ledger["entries"], *(ledger.get("tombstones") or [])] if e.get("tickets")}
         ledger["entries"], ledger["tombstones"] = deepcopy(ledger["prior"]["entries"]), deepcopy(ledger["prior"]["tombstones"])
+        for e in [*ledger["entries"], *ledger["tombstones"]]:
+            if t := tickets.get((e["kind"], e["subject"])):
+                e["tickets"] = {**(e.get("tickets") or {}), **t}
     ledger["prior"] = {"entries": deepcopy(ledger["entries"]), "tombstones": deepcopy(ledger.get("tombstones") or [])}
     entries = {(e["kind"], e["subject"]): e for e in ledger["entries"]}
     tombstones = {(e["kind"], e["subject"]): e for e in ledger.get("tombstones") or []}
@@ -251,7 +264,7 @@ def apply(ledger: dict, snapshot_id: str, captured_at: str | None, rules_finding
                                            "returns": 0, "period_s": None, "tickets": {}})
     # display rows in the same shape as `life` (period_s, returns as a count), plus what names the finding
     still_open = [dict(e, **_life_of(e)) for e in ledger["entries"] if (e["kind"], e["subject"]) not in reviewed]
-    return {"life": life, "still_open": still_open, "gone": [dict(e) for e in gone]}
+    return {"life": life, "still_open": still_open, "gone": [dict(e, **_life_of(e)) for e in gone]}
 
 
 def _life_of(e: dict) -> dict:
@@ -306,9 +319,12 @@ def record_tickets(store: Storage, result: dict) -> None:
     engine, target = result["engine"], result["target"]
 
     def mutate(ledger: dict):
-        for e in ledger["entries"]:
+        hit = False
+        for e in [*ledger["entries"], *(ledger.get("tombstones") or [])]:
             if t := new.get((e["kind"], e["subject"])):
                 e["tickets"] = {**(e.get("tickets") or {}), **t}
+                hit = True
+        return True if hit else None  # None: nothing to save
 
     try:
         commit(store, engine, target, mutate)
@@ -318,14 +334,28 @@ def record_tickets(store: Storage, result: dict) -> None:
         store.put_json(f"{result['snapshot']}/triage.json", result)
 
 
-def rebuild(store: Storage, engine: str, target: str, gone_after: int = DEFAULT_GONE_AFTER) -> dict:
+def rebuild(store: Storage, engine: str, target: str, gone_after: int = DEFAULT_GONE_AFTER, attempts: int = 3) -> dict:
     """Recompute the ledger from every stored review of a target, oldest first, and store it.
 
     A snapshot counts when it has a compare.json (the run had something to compare against), exactly the runs
     `attach` recorded. Tickets come back from the `life` each triage.json kept, so the rebuilt ledger equals the
-    one built run by run.
+    one built run by run. A run that lands while the snapshots are being read moves the generation; the rebuild
+    then starts over so it cannot publish a ledger that misses that run.
     """
-    ledger = {"entries": [], "tombstones": [], "updated": None, "prior": None, "generation": _generation(store, engine, target)}
+    for _ in range(attempts):
+        gen = _generation(store, engine, target)
+        ledger = _rebuilt(store, engine, target, gone_after)
+        ledger["generation"] = gen
+        if _generation(store, engine, target) != gen:
+            print(f"ledger: {engine}/{target} changed during the rebuild; starting over", file=sys.stderr)
+            continue
+        save(store, engine, target, ledger)
+        return ledger
+    raise LedgerContended(f"ledger {engine}/{target}: changed under {attempts} rebuild attempts; not saved")
+
+
+def _rebuilt(store: Storage, engine: str, target: str, gone_after: int) -> dict:
+    ledger = {"entries": [], "tombstones": [], "updated": None, "prior": None, "generation": 0}
     for sid in store.list_snapshots(engine, target):
         if not store.exists(f"{sid}/compare.json") or not store.exists(f"{sid}/triage.json"):
             continue
@@ -344,5 +374,4 @@ def rebuild(store: Storage, engine: str, target: str, gone_after: int = DEFAULT_
         for e in ledger["entries"]:
             if t := tickets.get((e["kind"], e["subject"])):
                 e["tickets"] = {**(e.get("tickets") or {}), **t}
-    save(store, engine, target, ledger)
     return ledger
