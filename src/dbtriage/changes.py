@@ -8,7 +8,9 @@ and every tool read only the store. A target names its source in a [targets.X.ch
 fetch() never raises: a source that fails leaves one `other` item saying so, so the review can
 say the feed was unreachable instead of silently having no changes.
 
-webhook: items that arrive through `dbtriage serve` are not a source yet.
+The webhook inbox is the one source every target has: deploys a CI job POSTs to `dbtriage serve` (/changes) are
+kept in <engine>/<target>/changes-inbox.json (dbtriage.inbox writes it) and merged into the feed whatever the
+configured source, so a GitHub target still sees what another tool deployed. Those items carry source "webhook".
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ KIND_ALIASES = {"deployment": "deploy", "release": "deploy", "rollout": "deploy"
                 "settings": "parameter", "maintenance": "job", "stats": "job", "batch": "job", "backup": "job",
                 "switchover": "failover", "restart": "failover"}
 SOURCES = ("file", "github", "gitlab")
+INBOX_FILE = "changes-inbox.json"   # per target, beside the ledger: {"items": [...], "generation": n}
 DEFAULT_LOOKBACK_HOURS = 48    # how far before the window the feed is read
 DEFAULT_CORRELATE_MINUTES = 30  # a change this long before the window still sits beside its regression
 TIMEOUT = 10                   # seconds per request: a slow forge must not hold up the capture
@@ -53,22 +56,48 @@ def correlate_minutes(spec: dict | None) -> int:
     return DEFAULT_CORRELATE_MINUTES if v in (None, "") else int(v)
 
 
-def fetch(target, window_start: datetime, window_end: datetime, base_dir: str | None = None) -> list[dict]:
-    """Every change between window_start and window_end from the target's feed, oldest first. Never raises."""
+def fetch(target, window_start: datetime, window_end: datetime, base_dir: str | None = None, store=None) -> list[dict]:
+    """Every change between window_start and window_end from the target's feed, oldest first. Never raises.
+
+    The configured source's items and, when a store is given, the webhook inbox's are merged: a source that fails
+    leaves its one error item and the other still counts."""
+    out: list[dict] = []
     spec = spec_of(target)
-    if not spec:
+    if spec:
+        source = str(spec.get("source"))
+        fn = {"file": _file, "github": _github, "gitlab": _gitlab}.get(source)
+        try:
+            if fn is None:
+                raise ValueError(f"unknown source {source!r}; choose from {', '.join(SOURCES)}")
+            out += within(fn(spec, window_start, window_end, base_dir), window_start, window_end, source)
+        except Exception as exc:  # noqa: BLE001 - the capture goes on without the feed
+            out.append(error_item(source, _err(exc), window_end))
+            print(f"changes feed {source} for {target.name}: {_err(exc)}", file=sys.stderr)
+    if store is not None:
+        try:
+            out += within(inbox(store, target.engine, target.name), window_start, window_end, "webhook")
+        except Exception as exc:  # noqa: BLE001 - an unreadable inbox (a store outage) is one item too
+            out.append(error_item("webhook", _err(exc), window_end))
+            print(f"changes inbox for {target.name}: {_err(exc)}", file=sys.stderr)
+    return sorted(out, key=lambda i: i["time"])
+
+
+def _err(exc: Exception) -> str:
+    return str(exc)[:200] if isinstance(exc, (ValueError, FileNotFoundError)) else f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def inbox_key(engine: str, target: str) -> str:
+    return f"{engine}/{target}/{INBOX_FILE}"
+
+
+def inbox(store, engine: str, target: str) -> list[dict]:
+    """The webhook inbox's items, unfiltered; none when no deploy was ever posted for the target."""
+    k = inbox_key(engine, target)
+    if not store.exists(k):
         return []
-    source = str(spec.get("source"))
-    fn = {"file": _file, "github": _github, "gitlab": _gitlab}.get(source)
-    try:
-        if fn is None:
-            raise ValueError(f"unknown source {source!r}; choose from {', '.join(SOURCES)}")
-        items = fn(spec, window_start, window_end, base_dir)
-    except Exception as exc:  # noqa: BLE001 - the capture goes on without the feed
-        err = f"{type(exc).__name__}: {str(exc)[:200]}" if not isinstance(exc, (ValueError, FileNotFoundError)) else str(exc)[:200]
-        print(f"changes feed {source} for {target.name}: {err}", file=sys.stderr)
-        return [error_item(source, err, window_end)]
-    return within(items, window_start, window_end, source)
+    data = store.get_json(k)
+    items = data.get("items") if isinstance(data, dict) else None
+    return [{**it, "source": "webhook"} for it in items or [] if isinstance(it, dict)]
 
 
 def error_item(source: str, err: str, at: datetime) -> dict:

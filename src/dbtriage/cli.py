@@ -52,20 +52,22 @@ def collect(cfg: Config, store: Storage, req: TriageRequest) -> str:
         store.put_text(f"{sid}/{name}", text)
     files = ["summary.json", "raw.json"]
     spec = changes.spec_of(target)
-    if spec:  # the feed is read now and kept with the snapshot, so the review never reads outside the store
-        try:
-            store.put_json(f"{sid}/changes.json", changes.fetch(target, window.start - changes.lookback(spec), captured, cfg.base_dir))
+    feed: list[dict] = []
+    try:  # the feed is read now and kept with the snapshot, so the review never reads outside the store
+        feed = changes.fetch(target, window.start - changes.lookback(spec), captured, cfg.base_dir, store)
+        if spec or feed:  # a target without a feed still has a webhook inbox: the file is kept once something was posted
+            store.put_json(f"{sid}/changes.json", feed)
             files.append("changes.json")
-        except Exception as exc:  # noqa: BLE001 - fetch never raises; a store that cannot take the file must not lose the capture
-            print(f"{target.name}: could not store changes.json ({type(exc).__name__}: {str(exc)[:200]})", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - fetch never raises; a store that cannot take the file must not lose the capture
+        print(f"{target.name}: could not store changes.json ({type(exc).__name__}: {str(exc)[:200]})", file=sys.stderr)
     store.put_json(f"{sid}/manifest.json", {
         "id": sid, "engine": target.engine, "target": target.name, "captured_at": snap.summary["captured_at"],
         "window": window.as_dict(), "metrics_kind": snap.summary.get("metrics_kind", "cumulative"),
         "trigger": {"source": req.source, "reason": req.reason, **({"actor": req.actor} if req.actor else {})},
         "files": files, "reports": sorted(snap.reports),
         "changes_file": target.changes_file,
-        "changes_sources": [str(spec["source"])] if spec else [],
-        **({"correlate_minutes": changes.correlate_minutes(spec)} if spec else {}),
+        "changes_sources": ([str(spec["source"])] if spec else []) + (["webhook"] if any(i.get("source") == "webhook" for i in feed) else []),
+        **({"correlate_minutes": changes.correlate_minutes(spec)} if "changes.json" in files else {}),
         **({"db_snapshot": db_snapshot} if db_snapshot else {}),
     })
     return sid
@@ -307,7 +309,7 @@ def main(argv=None):
 
         if args.no_llm:
             os.environ["DBTRIAGE_NO_LLM"] = "1"
-        serve(args.host, args.port, os.environ.get("DBTRIAGE_WEBHOOK_TOKEN"))
+        serve(args.host, args.port, os.environ.get("DBTRIAGE_WEBHOOK_TOKEN"), store=store, config_path=args.config)
     elif args.cmd == "ask":
         from dbtriage import chat
         from dbtriage.llm import make_backend

@@ -123,8 +123,30 @@ form of that. Kinds are `deploy`, `parameter`, `job`, `failover` and `other`; a 
 (`release`, `maintenance`, `config`, `switchover`) are mapped onto them. Only the first four are evidence: `other`
 holds notes and the one line a feed leaves when it could not be read, so an unreachable forge never fails a
 capture and the review can say the feed was down. The feed is read through the same proxy and trust store as every
-other outbound call (`HTTPS_PROXY`, `AWS_CA_BUNDLE`), with a ten-second timeout. Items that arrive through
-`dbtriage serve` are not a source yet.
+other outbound call (`HTTPS_PROXY`, `AWS_CA_BUNDLE`), with a ten-second timeout.
+
+**Telling it about a deploy yourself.** A deploy tool that is not GitHub or GitLab (Jenkins, Octopus, Ansible, a
+shell script) posts the deploy to the webhook receiver, `dbtriage serve`, on `POST /changes`. The body is one
+object or a list of them, `{"target", "time", "kind", "description", "link"}`: `target` is the database's name in
+`targets.toml` (an unknown one is a 404), `description` is required, `time` is ISO 8601 and defaults to now
+(UTC when no offset is given), `kind` is one of the five above and defaults to `deploy`, `link` is optional.
+The receiver's bearer token, `DBTRIAGE_WEBHOOK_TOKEN`, is the same one alerts use. It answers 202 with what it
+recorded. From a CI job, after the deploy step:
+
+```sh
+curl -sS -X POST "https://secondlook.example.com:8080/changes" \
+  -H "Authorization: Bearer $DBTRIAGE_WEBHOOK_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"target\": \"prod-db-3\", \"kind\": \"deploy\", \"description\": \"billing@$CI_COMMIT_TAG to production\", \"link\": \"$CI_JOB_URL\"}"
+```
+
+Posted items land in the database's inbox in the store (`<engine>/<db>/changes-inbox.json`) with `source =
+"webhook"`, and every snapshot reads that inbox beside the configured source, so a database on GitHub still sees
+what another tool deployed, and one without a `changes` table has a feed as soon as something is posted.
+`lookback_hours` governs the inbox too: it is what a capture reads before its window, so an item older than the
+lookback plus a day can reach no feed and is dropped on the next post; the inbox keeps at most a few hundred
+items, the newest. Two pipelines posting at the same moment both land (the write is a compare-and-set, like the
+ledger's). While the store is unreachable the post is spooled like any other file and may be lost if the store
+took an item meanwhile; an alert run is not.
 
 Cloud or on-premises makes no difference: dbtriage needs a network path and a credential. RDS, Cloud SQL and
 Azure Database for PostgreSQL or MySQL work as they are. For Oracle on RDS, set `diagnostics_pack` to match the
