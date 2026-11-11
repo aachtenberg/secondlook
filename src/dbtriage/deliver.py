@@ -178,9 +178,17 @@ def _fires(triage: dict, min_sev: int) -> list[int]:
     return out
 
 
+def _fires_open(triage: dict, min_sev: int) -> list[dict]:
+    """The still-open ledger entries (open findings that did not make the review's five) that justify a post on
+    their own: a finding can get worse, or come back, without the review naming it, and that must still page."""
+    return [e for e in triage.get("still_open") or []
+            if e.get("state") in FIRING and RANK.get(e.get("severity"), 0) >= min_sev]
+
+
 def _comment_text(f: dict, l: dict, triage: dict, markdown: str) -> str:
     since = (l.get("first_seen_at") or l.get("first_seen") or "")[:10]
-    head = f"{l.get('state', 'open').replace('_', ' ')}: {f.get('severity', '')} · {f.get('where', '')}: {f.get('summary', '')}"
+    what = f"{f.get('where', '')}: {f.get('summary', '')}" if f.get("summary") else f"{f.get('kind', '')} {f.get('subject', '')}: {f.get('title', '')}"
+    head = f"{l.get('state', 'open').replace('_', ' ')}: {f.get('severity', '')} · {what}"
     return f"{head}\nopen since {since} · snapshot {triage.get('snapshot', '')}\n\n{markdown}"
 
 
@@ -191,17 +199,19 @@ def _ticket_run(name: str, cfg: dict, triage: dict, markdown: str, min_sev: int)
     ledger. Returns whether anything was sent."""
     findings, life = triage.get("findings") or [], triage.get("life") or []
     fires = _fires(triage, min_sev)
-    create = [i for i in fires if not (life[i].get("tickets") or {}).get(name)]
-    comment = [i for i in fires if (life[i].get("tickets") or {}).get(name)]
+    # the review's findings and the open ones outside the five, as (finding, life) pairs sharing one ticket dict
+    firing = [(findings[i], life[i]) for i in fires] + [(e, e) for e in _fires_open(triage, min_sev)]
+    create = [(f, l) for f, l in firing if not (l.get("tickets") or {}).get(name)]
+    comment = [(f, l) for f, l in firing if (l.get("tickets") or {}).get(name)]
     sent = False
     if create:
         ticket = CHANNELS[name](cfg, triage, markdown)
         sent = True
         if ticket:
-            for i in create:
-                life[i].setdefault("tickets", {})[name] = ticket
-    for i in comment:
-        COMMENTS[name](cfg, life[i]["tickets"][name], _comment_text(findings[i], life[i], triage, markdown))
+            for _, l in create:
+                l.setdefault("tickets", {})[name] = ticket
+    for f, l in comment:
+        COMMENTS[name](cfg, l["tickets"][name], _comment_text(f, l, triage, markdown))
         sent = True
     for e in triage.get("gone") or []:
         if t := (e.get("tickets") or {}).get(name):
@@ -231,7 +241,8 @@ def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str]
     failures are reported on stderr and never abort the run.
 
     The gate is on the finding, not the run, when the review carries `life` (dbtriage.ledger): a channel fires
-    when some finding is new or worse at or above its min_severity, so a still-open medium does not repost.
+    when some finding is new, returned or worse at or above its min_severity, so a still-open medium does not repost.
+    Open findings outside the review's five count too: one that got worse pages even when the review did not name it.
     A review without `life` (a first snapshot, an older store) keeps the whole-run gate. stdout always fires.
     Ticket channels also comment on the tickets of findings that got worse or cleared; the tickets they create
     are written to triage["life"] for the caller to keep (ledger.record_tickets).
@@ -261,7 +272,7 @@ def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str]
                     continue
             else:
                 whole_run = not per_finding or name == "stdout" or name in RUN_GATED
-                if (sev < min_sev) if whole_run else not _fires(triage, min_sev):
+                if (sev < min_sev) if whole_run else not (_fires(triage, min_sev) or _fires_open(triage, min_sev)):
                     continue
                 fn(cfg, triage, markdown)
             ok.append(name)

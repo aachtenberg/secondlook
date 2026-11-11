@@ -183,7 +183,10 @@ with itself and the relative findings do not fire at all.
 
 The review still caps at five findings, and an open finding never takes a slot from a new one: open findings that
 did not make the five are listed under **Still open** after them, with how long they have been open and how many
-runs since they were last seen. A finding that cleared this run is named under **Cleared**.
+runs since they were last seen. They are gated like the five: one that got worse, or came back, pages even though
+the review did not name it, and its ticket gets the comment. A finding that cleared this run is named under
+**Cleared**. Reviews stored before findings had a kind are not tracked: a rebuild takes presence from their rules
+findings, which always had one.
 
 The ledger is derived data. It is written through the same store as the snapshots, so an outage spools it like
 any other file, and `dbtriage rebuild-ledger -t <db>` recomputes it from the stored `triage.json` and

@@ -416,6 +416,51 @@ def test_force_posts_regardless_of_the_gates(monkeypatch):
     assert len(seen) == 1 and seen[0][0].endswith("/rest/api/2/issue")
 
 
+def test_an_open_finding_outside_the_five_that_got_worse_still_fires(monkeypatch):
+    seen = fake_post(monkeypatch, {"/rest/api/2/issue": {"id": "1", "key": "DBA-7"}})
+    medium = review(rule("plan_change", severity="medium"))
+    quiet_five = [{"state": "still_open", "first_seen": sid(0), "tickets": {}}]
+    worse_outside = {"kind": "blocking", "subject": "", "title": "3 sessions blocked", "severity": "high", "state": "worse", "first_seen": sid(0), "tickets": {}}
+    slack = {"channels": ["slack"], "min_severity": "low", "slack": {"webhook_url": "https://s"}}
+    assert d.deliver(slack, triage(quiet_five, [medium], still_open=[dict(worse_outside, state="still_open")]), "md") == []
+    assert d.deliver(slack, triage(quiet_five, [medium], still_open=[worse_outside]), "md") == ["slack"]
+    # a ticket channel opens an issue for it and the ticket lands on the still-open entry, where record_tickets finds it
+    t = triage(quiet_five, [medium], still_open=[dict(worse_outside)])
+    assert d.deliver({"channels": ["jira"], "jira": JIRA}, t, "md") == ["jira"]
+    assert t["still_open"][0]["tickets"]["jira"]["key"] == "DBA-7"
+    # next time it gets worse again, its ticket hears about it instead of a new issue
+    n = len(seen)
+    t2 = triage(quiet_five, [medium], still_open=[dict(worse_outside, tickets={"jira": {"key": "DBA-7", "id": "1", "url": "u"}})])
+    assert d.deliver({"channels": ["jira"], "jira": JIRA}, t2, "md") == ["jira"]
+    assert seen[n][0].endswith("/issue/DBA-7/comment") and "blocking" in seen[n][1]["body"]
+
+
+def test_record_tickets_keeps_a_still_open_entry_ticket(tmp_path):
+    st = LocalStorage(tmp_path)
+    out = run(st, 0, [rule("sql_regressed", f"q{i}") for i in range(6)])
+    result = {"engine": ENGINE, "target": TARGET, "snapshot": sid(0), "findings": [], "life": [], "still_open": out["still_open"]}
+    result["still_open"][0]["tickets"] = {"jira": {"key": "DBA-9", "id": "9", "url": "u"}}
+    ledger.record_tickets(st, result)
+    by = {e["subject"]: e for e in ledger.load(st, ENGINE, TARGET)["entries"]}
+    assert by["q5"]["tickets"]["jira"]["key"] == "DBA-9"
+
+
+def test_legacy_findings_without_a_kind_are_not_an_identity(tmp_path):
+    """A review stored before kinds existed: a rebuild must not fold its findings into one ("other", "") entry."""
+    st = LocalStorage(tmp_path)
+    legacy = [{"severity": "high", "where": "sql_id q1", "summary": "slow", "impact": "", "evidence": [], "fix": ""},
+              {"severity": "medium", "where": "table t", "summary": "bloat", "impact": "", "evidence": [], "fix": ""}]
+    rules = [rule("sql_regressed", "q1", "high")]
+    st.put_json(f"{sid(0)}/manifest.json", {"captured_at": at(0)})
+    st.put_json(f"{sid(0)}/compare.json", {"findings": rules})
+    st.put_json(f"{sid(0)}/triage.json", {"findings": legacy, "source": "agent"})
+    led = ledger.rebuild(st, ENGINE, TARGET)
+    assert [(e["kind"], e["subject"]) for e in led["entries"]] == [("sql_regressed", "q1")]
+    out = ledger.apply({"entries": [], "tombstones": [], "updated": None}, sid(1), at(1), rules, legacy)
+    assert [l["state"] for l in out["life"]] == ["untracked", "untracked"]  # parallel to the findings, says nothing
+    assert d.deliver({"channels": ["slack"], "slack": {"webhook_url": "https://s"}}, {"severity": "high", "findings": legacy, "life": out["life"], "still_open": []}, "md") == []
+
+
 def test_legacy_reviews_keep_the_whole_run_gate_and_stdout_always_fires(monkeypatch, capsys):
     seen = fake_post(monkeypatch)
     cfg = {"channels": ["stdout", "slack", "pushgateway"], "min_severity": "low", "slack": {"webhook_url": "https://s"}, "pushgateway": {"url": "http://pg"}}

@@ -93,7 +93,7 @@ def agreement_lines(triage: dict) -> list[str]:
     one line per rules finding at medium or above that the model left out, so the prose cannot hide it.
     Nothing for a rules-only review or one stored before the marks existed."""
     rows = triage.get("agreement")
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or not rows:  # a clean review has nothing to agree about; the page hides it too
         return []
     from dbtriage.findings import dropped
 

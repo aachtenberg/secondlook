@@ -149,6 +149,8 @@ def test_render_markdown_agreement_section():
                        {"mark": "rules_only", "kind": "bloat", "subject": "t", "model": None, "rules": 2, "severity": "low"}]}
     md = render_markdown(t, {"findings": heur})
     assert "**Agreement:** 1 both, 1 model only, 2 rules only" in md
+    clean = render_markdown(dict(t, findings=[], heuristics=[], agreement=[], severity="info"), {"findings": []})
+    assert "Agreement" not in clean  # nothing to agree about: no line of zeros
     assert "- ⚠️ rules found, not in the review: 🔴 **High** · 4 deadlocks in the window" in md
     assert "t is bloated" not in md and "q1 regressed" not in md  # low and matched ones stay out of Slack
     assert md.index("**Agreement:**") < md.index("confidence high · 3 heuristic findings")  # before the footer

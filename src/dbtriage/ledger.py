@@ -71,6 +71,11 @@ def save(store: Storage, engine: str, target: str, ledger: dict) -> None:
     store.put_json(key(engine, target), ledger)
 
 
+def tracked(f: dict) -> bool:
+    """Only a finding with a kind has an identity; reviews stored before kinds existed are not tracked."""
+    return bool(f.get("kind"))
+
+
 def _sev(f: dict) -> str:
     s = f.get("severity")
     return s if s in RANK else "low"
@@ -147,9 +152,11 @@ def apply(ledger: dict, snapshot_id: str, captured_at: str | None, rules_finding
     review_findings = review_findings or []
     entries = {(e["kind"], e["subject"]): e for e in ledger["entries"]}
     tombstones = {(e["kind"], e["subject"]): e for e in ledger.get("tombstones") or []}
-    # what is present this run, with the review's finding first where it matched (title and severity come from it)
+    # what is present this run, with the review's finding first where it matched (title and severity come from it).
+    # A review finding without a kind was stored before kinds existed; it has no identity, so it is not presence
+    # (otherwise every such finding would collapse into one phantom ("other", "") entry on a rebuild).
     present: dict[tuple[str, str], dict] = {}
-    for f in list(review_findings) + list(rules_findings or []):
+    for f in [f for f in review_findings if tracked(f)] + list(rules_findings or []):
         present.setdefault(identity(f), f)
 
     for ident, f in present.items():
@@ -199,6 +206,9 @@ def apply(ledger: dict, snapshot_id: str, captured_at: str | None, rules_finding
     reviewed = set()
     life = []
     for f in review_findings:
+        if not tracked(f):  # legacy finding: life stays parallel to the findings, but says nothing and never fires
+            life.append({"state": "untracked", "first_seen": None, "first_seen_at": None, "misses": 0, "returns": 0, "period_s": None, "tickets": {}})
+            continue
         ident = identity(f)
         reviewed.add(ident)
         e = entries.get(ident)
@@ -242,7 +252,10 @@ def record_tickets(store: Storage, result: dict) -> None:
     review again so the ticket is part of the record (and of a rebuild). Nothing happens when no ticket was made."""
     life = result.get("life") or []
     findings = result.get("findings") or []
-    new = {identity(f): l["tickets"] for f, l in zip(findings, life) if l.get("tickets")}
+    new = {identity(f): l["tickets"] for f, l in zip(findings, life) if l.get("tickets") and tracked(f)}
+    for e in result.get("still_open") or []:  # an open finding outside the five that fired and got a ticket
+        if e.get("tickets") and e.get("kind"):
+            new[(e["kind"], e["subject"])] = {**new.get((e["kind"], e["subject"]), {}), **e["tickets"]}
     if not new:
         return
     engine, target = result["engine"], result["target"]
@@ -279,7 +292,10 @@ def rebuild(store: Storage, engine: str, target: str, gone_after: int = DEFAULT_
             captured = None
         findings = tr.get("findings") or []
         apply(ledger, sid, captured, rules, findings, gone_after)
-        tickets = {identity(f): l["tickets"] for f, l in zip(findings, tr.get("life") or []) if l.get("tickets")}
+        tickets = {identity(f): l["tickets"] for f, l in zip(findings, tr.get("life") or []) if l.get("tickets") and tracked(f)}
+        for so in tr.get("still_open") or []:
+            if so.get("tickets") and so.get("kind"):
+                tickets[(so["kind"], so["subject"])] = {**tickets.get((so["kind"], so["subject"]), {}), **so["tickets"]}
         for e in ledger["entries"]:
             if t := tickets.get((e["kind"], e["subject"])):
                 e["tickets"] = {**(e.get("tickets") or {}), **t}
