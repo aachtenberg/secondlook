@@ -213,11 +213,14 @@ def _pct(before, after):
     return round((after - before) / abs(before) * 100, 1)
 
 
-def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correlate_minutes: int = CORRELATE_MINUTES) -> dict:
+def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correlate_minutes: int = CORRELATE_MINUTES,
+         band: dict | None = None) -> dict:
     """Compare the current interval with a reference interval (same hour last week,
     the previous run, the pre-deploy snapshot ...). ref may be None: then only the
     current interval is described and findings are 'what is heavy now'.
-    `changes` is the snapshot's stored change feed; the ones in or just before the window are evidence."""
+    `changes` is the snapshot's stored change feed; the ones in or just before the window are evidence.
+    `band` is the target's usual band for this hour (dbtriage.band.usual_band): a sentence in the evidence of the
+    findings about a banded metric, and out["band"] for the page. The reference stays the narrative baseline."""
     out: dict[str, Any] = {
         "current": {"snapshot": cur.get("snapshot"), "start": cur["start"], "end": cur["end"], "elapsed_s": cur["elapsed_s"],
                     "counters_reset": cur.get("counters_reset", False)},
@@ -226,7 +229,7 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
         "load_profile": {}, "sql": {"new": [], "gone": [], "changed": [], "top": []},
         "waits": {"current": cur["waits"]["classes"], "reference": ref["waits"]["classes"] if ref else None, "shifts": []},
         "tables": [], "sessions": cur.get("sessions", []), "engine_findings": cur.get("findings", []),
-        "settings_changed": [], "changes": [], "findings": [],
+        "settings_changed": [], "changes": [], "band": None, "findings": [],
     }
     findings: list[dict] = out["findings"]
     ec, er = cur["elapsed_s"], (ref or {}).get("elapsed_s")
@@ -401,9 +404,52 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
             if f["kind"] in CORRELATED_KINDS or f["kind"] == "sql_new":  # a new statement is what a deploy brings
                 f["evidence"]["changes"] = brief
 
+    if band:
+        out["band"] = attach_band(band, cur, findings)
+
     findings.sort(key=lambda f: -f["score"])
     out["severity"] = findings[0]["severity"] if findings else "info"
     return out
+
+
+BAND_WINDOW_RATIO = 2  # a window this many times longer or shorter than the band's is not the same hour
+
+
+def attach_band(band: dict, cur: dict, findings: list[dict]) -> dict:
+    """The current interval against the usual band: a position per metric, one sentence for the whole interval (total
+    SQL time), and the sentence for its own metric written into each throughput, load, wait-shift and regression
+    finding. A current window much longer than the band's windows (a week-long interval under same-time-last-week)
+    gets no sentences, only the note why: a rate over a week is not a rate over an hour."""
+    from dbtriage import band as usual
+
+    info = {k: band.get(k) for k in ("label", "weeks", "weeks_used", "high_is", "window_s", "skipped")}
+    ec, bw = cur.get("elapsed_s") or 0, band.get("window_s") or 0
+    if not ec or not bw or not 1 / BAND_WINDOW_RATIO <= ec / bw <= BAND_WINDOW_RATIO:
+        info.update(applies=False, note=f"the current window is {ec / 3600:.1f}h long and the band is built from "
+                                        f"{bw / 3600:.1f}h windows, so they are not compared")
+        return info
+    now = usual.measures(cur)
+    info["applies"] = True
+    info["metrics"] = {k: {"current": now[k], "position": usual.position(band, k, now[k]), **m}
+                       for k, m in band["metrics"].items() if k in now}
+    info["sentence"] = usual.sentence(band, "sql_time_ms", now.get("sql_time_ms"), "total SQL time", " ms/s")
+    info["above"] = usual.position(band, "sql_time_ms", now.get("sql_time_ms")) in ("above", "above_all")
+    for f in findings:
+        k, e = f["kind"], f["evidence"]
+        if k == "throughput_drop":
+            line = usual.sentence(band, "xact_commit", now.get("xact_commit"), "commits", "/s")
+        elif k.startswith("load_"):
+            line = usual.sentence(band, k[5:], now.get(k[5:]), k[5:], "/s")
+        elif k == "wait_shift" and e.get("class"):
+            line = usual.sentence(band, f"wait_share:{e['class']}", now.get(f"wait_share:{e['class']}"),
+                                  f"wait class '{e['class']}'", percent=True)
+        elif k == "sql_regressed":
+            line = info["sentence"]
+        else:
+            continue
+        if line:
+            e["band"] = line
+    return info
 
 
 SETTINGS_FINDINGS_CAP = 5  # one finding per changed parameter up to here, then a single "N more" line
@@ -465,17 +511,18 @@ def _f(score: float, kind: str, title: str, detail: str, evidence: dict) -> dict
 
 
 def compare(current: dict, baseline: dict | None, before_baseline: dict | None = None, changes: list[dict] | None = None,
-            correlate_minutes: int = CORRELATE_MINUTES) -> dict:
+            correlate_minutes: int = CORRELATE_MINUTES, band: dict | None = None) -> dict:
     """Entry point used by the CLI and the agent tool.
 
     cumulative engines: current interval = baseline->current, reference = before_baseline->baseline
     interval engines:   current interval = current, reference = baseline
     `changes` is the current snapshot's stored change feed (changes.json), when it has one.
+    `band` is the target's usual band for this hour (dbtriage.band.usual_band), when it has enough history.
     """
     if current.get("metrics_kind") == "interval":
-        return diff(interval_of(baseline) if baseline else None, interval_of(current), changes, correlate_minutes)
+        return diff(interval_of(baseline) if baseline else None, interval_of(current), changes, correlate_minutes, band)
     if baseline is None:
         raise ValueError("cumulative engine needs a baseline snapshot to form an interval")
     cur = interval_between(baseline, current)
     ref = interval_between(before_baseline, baseline) if before_baseline else None
-    return diff(ref, cur, changes, correlate_minutes)
+    return diff(ref, cur, changes, correlate_minutes, band)

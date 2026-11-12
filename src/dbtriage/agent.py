@@ -13,7 +13,7 @@ from typing import Any
 from anthropic import beta_tool  # used only to derive JSON schemas from the docstrings below
 from pydantic import BaseModel, Field
 
-from dbtriage import changes
+from dbtriage import band, changes
 from dbtriage import compare as cmp
 from dbtriage.findings import KINDS, SUBJECT_KEYS, known_kind, subject_of
 from dbtriage.llm import Backend, ToolSpec
@@ -60,6 +60,7 @@ class TriageAgent:
         self.backend = backend
         self.result: dict | None = None
         self.tool_log: list[dict] = []  # every tool call of the current run, in order; stored as tools.json
+        self.band_weeks = band.DEFAULT_WEEKS  # the target's band_weeks, set by run(); 0 leaves the usual band out of compare_snapshots
 
     # ----------------------------------------------------------------- data access
     def _summary(self, snapshot_id: str) -> dict:
@@ -129,7 +130,10 @@ class TriageAgent:
         def compare_snapshots(snapshot_id: str, baseline_id: str) -> str:
             """Compare a snapshot against a baseline: load-profile deltas (per second),
             new/changed/gone SQL with plan changes, wait-class shifts, table scan and
-            bloat changes, current sessions, and ranked heuristic findings.
+            bloat changes, current sessions, and ranked heuristic findings. "band" is the
+            usual band for this clock hour over the past weeks (median and high per metric,
+            the current value's position) when the target has enough history; findings
+            about a banded metric carry one sentence about it in their evidence.
 
             Args:
                 snapshot_id: The later / current snapshot id.
@@ -139,8 +143,9 @@ class TriageAgent:
             before = agent.storage.previous(engine, target, baseline_id)
             margin = agent.storage.get_json(f"{snapshot_id}/manifest.json").get("correlate_minutes")
             margin = cmp.CORRELATE_MINUTES if margin in (None, "") else int(margin)  # an explicit 0 is a choice, not a blank
+            usual = band.usual_band(agent.storage, engine, target, snapshot_id, weeks=agent.band_weeks) if agent.band_weeks else None
             return json.dumps(cmp.compare(cur, base, agent._summary(before) if before else None,
-                                          changes=agent._stored_changes(snapshot_id), correlate_minutes=margin), default=str)
+                                          changes=agent._stored_changes(snapshot_id), correlate_minutes=margin, band=usual), default=str)
 
         @beta_tool
         def get_sql_history(sql_id: str, limit: int = 12) -> str:
@@ -238,8 +243,9 @@ class TriageAgent:
 
     # ----------------------------------------------------------------- run
     def run(self, engine: str, target: str, snapshot_id: str, baseline_id: str | None, mode: str,
-            max_iterations: int = 25, notes: str | None = None) -> dict:
+            max_iterations: int = 25, notes: str | None = None, band_weeks: int = band.DEFAULT_WEEKS) -> dict:
         self.result = None
+        self.band_weeks = band_weeks
         manifest = self.storage.get_json(f"{snapshot_id}/manifest.json")
         task = (
             f"Review database target {target!r} (engine {engine}), run mode {mode!r}.\n"
@@ -312,21 +318,28 @@ def rule_based_triage(comparison: dict) -> dict:
         "evidence": ([f["detail"]] if f.get("detail") else []) + _evidence_lines(f.get("evidence") or {}, window_start=window_start),
         "fix": _advice(f),
     } for f in found[:5]]
+    summary = f"{len(found)} heuristic finding(s); the top one is {findings[0]['summary'][0].lower() + findings[0]['summary'][1:]}."
+    usual = comparison.get("band") or {}
+    if usual.get("above") and usual.get("sentence"):  # the whole hour is heavier than usual: that belongs in the first line
+        summary += f" The interval is heavier than usual: {usual['sentence']}."
     return {
-        "severity": findings[0]["severity"], "title": findings[0]["summary"],
-        "summary": f"{len(found)} heuristic finding(s); the top one is {findings[0]['summary'][0].lower() + findings[0]['summary'][1:]}.",
+        "severity": findings[0]["severity"], "title": findings[0]["summary"], "summary": summary,
         "checked": "load profile, top SQL, wait classes, sessions, tables against the previous snapshot (rules only)",
         "confidence": "low", "findings": findings, "source": "rules",
     }
 
 
 def _evidence_lines(evidence: dict, limit: int = 3, window_start: str | None = None) -> list[str]:
-    """Three evidence lines, but a settings change or a deploy in the same window always makes the cut:
-    that correlation is the point of the finding, and it would otherwise be the fourth item."""
+    """Three evidence lines, but a settings change, the usual band or a deploy in the same window always makes the
+    cut: that context is the point of the finding, and it would otherwise be the fourth item."""
     items = [(k, v) for k, v in evidence.items() if k not in ("sql_id", "changes")]
-    keep = [kv for kv in items if kv[0] == "settings_changed"]
-    rest = [kv for kv in items if kv[0] != "settings_changed"][:max(limit - len(keep), 0)]
-    return [f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in rest + keep] + _change_lines(evidence.get("changes"), window_start)
+    keep = [kv for kv in items if kv[0] in KEPT_EVIDENCE]
+    rest = [kv for kv in items if kv[0] not in KEPT_EVIDENCE][:max(limit - len(keep), 0)]
+    return [v if k == "band" else f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in rest + keep] \
+        + _change_lines(evidence.get("changes"), window_start)
+
+
+KEPT_EVIDENCE = ("settings_changed", "band")  # a sentence already; the band line is printed as it is
 
 
 def _change_lines(found: list[dict] | None, window_start: str | None, limit: int = 3) -> list[str]:

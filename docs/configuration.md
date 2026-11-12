@@ -217,6 +217,25 @@ A specific snapshot id given with `--baseline` always wins. If a policy finds no
 pinned snapshot was deleted), dbtriage falls back to `previous` and says so: on the snapshot page, in the
 review's footer, and in the stored `manifest.json` and `compare.json`.
 
+### The usual band
+
+One baseline is one moment, and that moment can itself be odd: last Monday's batch did not run, or ran twice.
+Once a database has a few weeks of snapshots, each review also compares its interval with the spread of the same
+clock hour and weekday over the past `band_weeks` weeks (default 6; `0` switches it off): the median and a high
+mark (the 90th percentile from five weeks on, the maximum below) per load-profile metric, for total SQL time and
+for each wait class's share. The result is one sentence in the evidence of the findings about those metrics, such
+as "commits 12/s is inside the usual Monday 02:00 band (6 weeks)", "above every same-hour window in 6 weeks" or
+"below the usual band", and a line under the review's summary for the interval as a whole. The baseline you chose
+stays the comparison the review is written against; the band only says whether this hour is unusual for this
+database.
+
+The band is honest about what it is built from. For PostgreSQL, MySQL and MariaDB a week counts only when both
+snapshots around that hour exist; for Oracle AWR one snapshot per week within an hour of the same time. A week with
+a counter reset or an instance restart inside its window is skipped, the sentence says how many weeks remain
+("4 of 6 weeks"), and below three usable weeks no band is written at all. A window much longer than the band's
+(a week-long interval under `same-time-last-week`) is not compared with hour-long ones either; `compare.json`
+notes why under `band`. It reads only the stored `summary.json` files: nothing new is collected or stored.
+
 ## How the comparison works
 
 Every engine's snapshot is turned into the same shape: load profile, top SQL (with the plan hash where the

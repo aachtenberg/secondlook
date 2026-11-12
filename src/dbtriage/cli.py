@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dbtriage import changes
+from dbtriage import band, changes
 from dbtriage import compare as cmp
 from dbtriage import dbsnap
 from dbtriage.collectors import get_collector
@@ -97,18 +97,22 @@ def pick_baseline(cfg: Config, store: Storage, sid: str, policy: str | None = No
     return store.pick_baseline(engine, name, sid, policy or extra.get("baseline_policy"), extra.get("baseline"), explicit)
 
 
-def compare_ids(store: Storage, engine: str, target: str, sid: str, baseline: str | None, how: tuple[str, str] | None = None) -> dict | None:
+def compare_ids(store: Storage, engine: str, target: str, sid: str, baseline: str | None, how: tuple[str, str] | None = None,
+                band_weeks: int = band.DEFAULT_WEEKS) -> dict | None:
     """compare() for a snapshot id, resolving the baseline and the one before it. None if nothing to compare.
-    `how` = (policy, reason) is recorded under reference so the review can say why this baseline."""
+    `how` = (policy, reason) is recorded under reference so the review can say why this baseline.
+    `band_weeks` is the target's band_weeks: the usual band for this hour is passed in when the history allows (0: never)."""
     cur = summary_of(store, sid)
     feed, margin = stored_changes(store, sid)
+    usual = band.usual_band(store, engine, target, sid, weeks=band_weeks) if band_weeks else None
     if cur.get("metrics_kind") == "interval":
-        out = cmp.compare(cur, summary_of(store, baseline) if baseline else None, changes=feed, correlate_minutes=margin)
+        out = cmp.compare(cur, summary_of(store, baseline) if baseline else None, changes=feed, correlate_minutes=margin, band=usual)
     elif not baseline:
         return None
     else:
         before = store.previous(engine, target, baseline)
-        out = cmp.compare(cur, summary_of(store, baseline), summary_of(store, before) if before else None, changes=feed, correlate_minutes=margin)
+        out = cmp.compare(cur, summary_of(store, baseline), summary_of(store, before) if before else None, changes=feed,
+                          correlate_minutes=margin, band=usual)
     if out.get("reference") is not None and how:
         out["reference"]["policy"], out["reference"]["reason"] = how
     return out
@@ -118,7 +122,9 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
            how: tuple[str, str] | None = None, source: str | None = None) -> tuple[dict, dict | None]:
     manifest = store.get_json(f"{sid}/manifest.json")
     engine, target = manifest["engine"], manifest["target"]
-    comparison = compare_ids(store, engine, target, sid, baseline, how)
+    t = cfg.targets.get(target)
+    weeks = band.weeks_of((t.extra if t else {}).get("band_weeks"))
+    comparison = compare_ids(store, engine, target, sid, baseline, how, band_weeks=weeks)
     if how:
         manifest["baseline"] = {"snapshot": baseline, "policy": how[0], "reason": how[1]}
         store.put_json(f"{sid}/manifest.json", manifest)
@@ -129,11 +135,10 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
         try:
             from dbtriage.llm import agent_for, make_backend
 
-            t = cfg.targets.get(target)
             agent = agent_for(cfg.agent, source)  # a scheduled run may use [agent] scheduled_model
             result = TriageAgent(store, make_backend(agent)).run(
                 engine, target, sid, baseline, mode, max_iterations=int(agent.get("max_iterations") or 25),
-                notes=(t.extra.get("notes") if t else None))
+                notes=(t.extra.get("notes") if t else None), band_weeks=weeks)
         except (Exception, SystemExit) as exc:  # noqa: BLE001 - an outage or a missing key must not lose the run: use the rules
             from dbtriage.awscred import note_from_error
 
@@ -288,7 +293,7 @@ def main(argv=None):
         t = cfg.target(args.target)
         sid = args.snapshot or store.latest(t.engine, t.name) or sys.exit("no snapshots yet")
         base, policy, reason = pick_baseline(cfg, store, sid, args.baseline_policy, args.baseline)
-        result = compare_ids(store, t.engine, t.name, sid, base, (policy, reason))
+        result = compare_ids(store, t.engine, t.name, sid, base, (policy, reason), band_weeks=band.weeks_of(t.extra.get("band_weeks")))
         print(json.dumps(result if result is not None else {"error": "no baseline: need two snapshots"}, indent=1, default=str))
     elif args.cmd == "triage":
         t = cfg.target(args.target)

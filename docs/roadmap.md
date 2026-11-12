@@ -33,6 +33,7 @@ The bets below lean on these facts, so they are stated once.
 - Jira and Plane delivery keeps the created issue's key, id and url on the finding's ledger entry, comments on it for worse and cleared findings, and the `min_severity` gate is per finding (new or worse) when the review carries `life`; legacy reviews keep the whole-run gate. *(Done: bet 2.)*
 - Storage is per-snapshot prefixes on local disk, S3, Azure or Postgres, with an outage spool. The one cross-snapshot object is the per-target ledger `<engine>/<target>/findings.json`, written through the same interface and rebuildable with `dbtriage rebuild-ledger`. *(Done: bet 2.)*
 - The model run stores provider, model, token usage, a tool-call count, and `tools.json`: every tool call with its arguments and a truncated result, written even when the run fails. *(Done: the prerequisite for bet 8.)*
+- `band.py` builds the usual band for a snapshot's clock hour and weekday from the stored summaries of the past `band_weeks` weeks (median and high per load-profile metric, total SQL time and wait-class share; a week with a reset or restart inside its window is skipped and named; nothing below three weeks). `compare.py` writes it as `band` in `compare.json` and as one sentence in the evidence of the findings about those metrics; the chosen baseline stays the narrative comparison. *(Done: bet 7.)*
 - There is no SQL text hash. `sql_id` is engine-specific and SQL text is redacted before storage.
 
 ## The groundwork: a finding with a kind and a subject
@@ -113,7 +114,7 @@ Findings already require a fix and, when the fix changes the database, a rollbac
 
 Still no apply button. The difference from EverSQL is that the proposal cites a before and after Second Look measured, and it stays a suggestion.
 
-### 7. The usual band
+### 7. The usual band *(landed)*
 
 Baselines today are one snapshot: previous, same time yesterday, same time last week, or a pin. A Monday batch still looks like an incident when last Monday’s run is missing or was itself odd.
 
@@ -134,7 +135,7 @@ Datadog exports charts. The model chat exports a transcript. The bundle is the r
 
 ## What to build first
 
-Status on 2026-11-11: the groundwork, bets 1, 2 and 3 and the tool transcript have landed. Next is bet 4, the fleet note, which now has the deploy id to join findings across targets.
+Status on 2026-11-11: the groundwork, bets 1, 2, 3 and 7 and the tool transcript have landed. Next is bet 4, the fleet note, which now has the deploy id to join findings across targets.
 
 The groundwork (kind and subject on the model's finding, one matcher), then bets 1 and 2, then the settings diff from bet 3, then deploy feeds.
 

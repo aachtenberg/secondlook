@@ -273,3 +273,48 @@ def test_change_lines_wording():
     ev = {"sql_id": "q1", "a": 1, "b": 2, "c": 3, "d": 4, "settings_changed": ["jit"], "changes": found[:1]}
     lines = _evidence_lines(ev, window_start=start)  # three plain lines, then the settings change, then the deploy: both always make the cut
     assert lines[:2] == ["a: 1", "b: 2"] and lines[2:] == ['settings_changed: ["jit"]', "deploy a@1 landed 1 minute before the window"]
+
+
+def test_compare_tool_passes_the_usual_band(tmp_path, monkeypatch):
+    """compare_snapshots computes the band for the target's band_weeks and hands it to compare; 0 leaves it out."""
+    from dbtriage import band as usual
+
+    st = _store(tmp_path)
+    ids = st.list_snapshots("postgres", "demo")
+    asked = []
+    fake = {"label": "Thursday 10:20 UTC", "weeks": 6, "weeks_used": 5, "high_is": "p90", "window_s": 600, "skipped": [{"week": 2, "reason": "x"}],
+            "metrics": {"sql_time_ms": {"median": 20.0, "high": 30.0, "low": 15.0, "max": 40.0, "min": 10.0, "n": 5}}}
+
+    def usual_band(store, engine, target, sid, weeks=6, hours_tolerance=1):
+        asked.append((engine, target, sid, weeks))
+        return fake
+
+    monkeypatch.setattr(usual, "usual_band", usual_band)
+    agent = TriageAgent(st, backend=None)
+    agent.band_weeks = 8
+    tools = {t.name: t for t in agent._tools("postgres", "demo")}
+    cmp = json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))
+    assert asked == [("postgres", "demo", ids[-1], 8)]
+    assert cmp["band"]["applies"] is True and cmp["band"]["weeks_used"] == 5 and cmp["band"]["skipped"] == [{"week": 2, "reason": "x"}]
+    reg = next(f for f in cmp["findings"] if f["kind"] == "sql_regressed")
+    assert reg["evidence"]["band"].startswith("total SQL time ") and "in 5 of 6 weeks" in reg["evidence"]["band"]
+    rules = rule_based_triage(cmp)
+    assert reg["evidence"]["band"] in rules["findings"][0]["evidence"]  # the line survives the three-line cut
+    assert rules["summary"].endswith(f"The interval is heavier than usual: {cmp['band']['sentence']}.")
+    from dbtriage.report import render_markdown
+
+    md = render_markdown(dict(rules, snapshot=ids[-1], baseline=ids[-2], target="demo", engine="postgres"), cmp)
+    assert f"_Usual band: {cmp['band']['sentence']}_" in md
+    agent.band_weeks = 0
+    assert json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))["band"] is None
+    assert asked == [("postgres", "demo", ids[-1], 8)]  # not asked again
+
+
+def test_evidence_lines_keep_the_band_sentence():
+    from dbtriage.agent import _evidence_lines
+
+    line = "commits 1/s is inside the usual Monday 02:00 UTC band (6 weeks): median 1/s, high 2/s"
+    ev = {"sql_id": "q1", "a": 1, "b": 2, "c": 3, "d": 4, "band": line}
+    assert _evidence_lines(ev) == ["a: 1", "b: 2", line]  # the sentence as it is, never cut, in place of the third plain line
+    ev["settings_changed"] = ["jit"]
+    assert _evidence_lines(ev) == ["a: 1", line, 'settings_changed: ["jit"]']  # both kept, one plain line left

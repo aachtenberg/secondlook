@@ -156,6 +156,9 @@ dsn_env = "EXAMPLE_PG_DSN"             # preferred: the connection string lives 
 # links = [{label = "Grafana", url = "https://grafana.example.com/d/abc"}]   shown next to the database
 # baseline_policy = "previous"         previous | same-time-yesterday | same-time-last-week | pinned
 # baseline = "postgres/example-postgres/2026-11-01/20261101T020000Z"   the snapshot to compare with when pinned
+# band_weeks = 6                       the usual band: how many past weeks of the same clock hour and weekday a review
+#                                      compares its interval with ("inside the usual Monday 02:00 band"); needs three
+#                                      usable weeks before it says anything, 0 switches it off
 # schedule = "0 * * * *"               cron in the server's local time, or "every 15m", "every 2h", "hourly", "daily"
 # schedule_window = 60                 minutes each scheduled run looks back
 # schedule_paused = false
