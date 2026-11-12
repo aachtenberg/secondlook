@@ -5,4 +5,5 @@ useDefault = true
 
 [allowlist]
 description = "lab defaults and documentation placeholders"
-stopwords = ["dbtriage", "CHANGE_ME", "PASSWORD", "example", "placeholder", "fake", "dummy"]
+stopwords = ["dbtriage", "CHANGE_ME", "PASSWORD", "example", "placeholder", "fake", "dummy",
+             "AKIAABCDEFGHIJKLMNOP"]  # the bundle test's made-up AWS key id (tests/test_bundle.py); the scan covers every branch's history
