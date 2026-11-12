@@ -20,7 +20,7 @@ from dbtriage.locks import target_lock
 from dbtriage.deliver import deliver
 from dbtriage.findings import agreement
 from dbtriage.report import render_markdown
-from dbtriage.storage import Storage, open_storage
+from dbtriage.storage import Storage, StorageUnavailable, open_storage
 from dbtriage.baseline import POLICIES
 from dbtriage.triggers import MODES, TriageRequest
 
@@ -331,9 +331,12 @@ def main(argv=None):
 
         try:
             data = bundle.build(store, args.snapshot, args.raw)
+            name = bundle.filename(store.get_json(f"{args.snapshot}/manifest.json"), args.snapshot)
         except FileNotFoundError:
             sys.exit(f"{args.snapshot}: no such snapshot")
-        out = Path(args.out) if args.out else Path(bundle.filename(store.get_json(f"{args.snapshot}/manifest.json"), args.snapshot))
+        except StorageUnavailable as exc:  # never a thinner zip: the record is exported whole or not at all
+            sys.exit(f"the store is unavailable: {exc}")
+        out = Path(args.out) if args.out else Path(name)
         out.write_bytes(data)
         print(f"{out}  {len(data):,} bytes")
     elif args.cmd == "web":

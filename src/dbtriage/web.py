@@ -1805,19 +1805,34 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 return self._error(500, f"internal error: {type(exc).__name__}", api)
             self._error(404, "not found", api)
 
+        @staticmethod
+        def _exposed(name: str, manifest: dict) -> bool:
+            """The file drawer's rule: a name in [web] files, or every name when it holds '*', or a manifest report."""
+            return name in app.web["files"] or "*" in app.web["files"] or name in (manifest.get("reports") or [])
+
         def _file(self, sid: str, name: str):
-            if "/" in name or name.startswith(".") or not (name in app.web["files"] or "*" in app.web["files"] or name in app.manifest_of(sid).get("reports", [])):
+            if "/" in name or name.startswith(".") or not self._exposed(name, app.manifest_of(sid)):
                 return self._error(404, "file not exposed", self.path.startswith("/api/"))
             data = app.store.get(f"{sid}/{name}")
             self._send(data, "application/json" if name.endswith(".json") else "text/plain; charset=utf-8")
 
         def _bundle(self, sid: str, raw: bool):
-            """The snapshot as a zip (dbtriage.bundle), behind the same gate as the file drawer: a signed-in viewer.
-            raw.json goes in only when the drawer exposes it too. An unknown snapshot is the 404 above."""
+            """The snapshot as a zip (dbtriage.bundle), behind the same gates as the file drawer: a signed-in viewer,
+            and only the files the drawer exposes, plus what the API already serves whole (triage.json on the snapshot
+            route, the threads on the chat route). The manifest is read first, so an unknown snapshot is the 404 above
+            and an outage the 503."""
             from dbtriage import bundle
 
-            data = bundle.build(app.store, sid, raw and ("raw.json" in app.web["files"] or "*" in app.web["files"]))
-            name = bundle.filename(app.manifest_of(sid), sid)
+            manifest = app.manifest_of(sid) if key_ok(sid) else None
+            if manifest is None:
+                raise FileNotFoundError(sid)
+
+            def allowed(name: str) -> bool:
+                return name == "triage.json" or name.startswith("chat/") or self._exposed(name, manifest)
+
+            data = bundle.build(app.store, sid, raw, allowed)
+            # filename() keeps to the key alphabet already; stripping again costs nothing and keeps the header whole if that changes
+            name = re.sub(r'["\r\n]', "", bundle.filename(manifest, sid))
             access.audit("bundle", sid)
             self._send(data, "application/zip", extra={"Content-Disposition": f'attachment; filename="{name}"'})
 
