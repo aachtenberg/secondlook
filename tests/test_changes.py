@@ -207,8 +207,11 @@ def test_collect_stores_the_feed_with_the_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "get_collector", lambda t: Collector())
     seen = {}
 
-    def fetch(target, start, end, base_dir=None):
+    def fetch(target, start, end, base_dir=None, store=None):
         seen.update(start=start, end=end, base_dir=base_dir)
+        assert store is st  # the inbox is read from the store the capture writes to
+        if not changes.spec_of(target):
+            return []  # what the real fetch answers with no source and an empty inbox
         return [{"time": "2026-11-05T10:14:00+00:00", "kind": "deploy", "description": "billing@1.4.2 to production", "link": None, "source": "github"}]
 
     monkeypatch.setattr(changes, "fetch", fetch)

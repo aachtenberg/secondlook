@@ -14,7 +14,7 @@
 | `dbtriage web [--allow-run] [--allow-edit] [--allow-chat] [--schedule]` | the web view (see web.md) |
 | `dbtriage scheduler` | run every database's schedule from this server, without the web view |
 | `dbtriage mcp` | the MCP server, for MCP clients such as Claude Code; off unless `[mcp] enabled = true` (see mcp.md) |
-| `dbtriage serve --port 8080` | receive alert webhooks; listens on all interfaces, so set `DBTRIAGE_WEBHOOK_TOKEN` (without it anyone who can reach the port can start runs, and it warns at start) |
+| `dbtriage serve --port 8080` | receive alert webhooks, and deploys on `POST /changes` for the change feed (configuration.md, "The change feed"); listens on all interfaces, so set `DBTRIAGE_WEBHOOK_TOKEN` (without it anyone who can reach the port can start runs, and it warns at start) |
 | `dbtriage flush-spool` | push work saved during a store outage now |
 | `dbtriage deliver <snapshot> [--force]` | re-send a stored review; `--force` ignores the severity gates and finding life and posts it as it stands |
 | `dbtriage rebuild-ledger -t <db>` | recompute the database's ledger of open findings from its stored reviews (below, "A finding's life") |

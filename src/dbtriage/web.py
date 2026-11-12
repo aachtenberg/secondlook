@@ -53,13 +53,15 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from dbtriage import access, charts, chat, dbsnap, envfile, llm, mcp_server, scheduler
+from datetime import datetime, timedelta, timezone
+
+from dbtriage import access, changes, charts, chat, dbsnap, envfile, llm, mcp_server, scheduler
 from dbtriage.baseline import LABELS, POLICIES
-from dbtriage.config import Config, top_n_of
+from dbtriage.config import Config, Target, top_n_of
 from dbtriage.findings import SEVERITY_RANK, dropped, rules_dropped
 from dbtriage.ledger import describe_period
 from dbtriage.settings import AGENT_FIELDS, AGENT_PROVIDERS, CHANNEL_FIELDS, ENGINES, SCHEDULE_FIELDS, SEVERITIES, WEB_FIELDS, Settings, mask_dsn, probe
-from dbtriage.settings import SettingsUnavailable
+from dbtriage.settings import CHANGES_FIELDS, CHANGES_NUMBERS, SettingsUnavailable, agent_value, changes_value
 from dbtriage.storage import Storage, StorageUnavailable, describe as describe_store, key_ok
 
 DEFAULTS = {
@@ -167,6 +169,9 @@ form.grid .row,form.grid div{grid-column:1/-1;display:flex;gap:8px;align-items:c
 fieldset.chan{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 14px;border:1px solid var(--line2);border-radius:8px;padding:8px 12px}
 fieldset.chan legend{font-weight:600;padding:0 4px}label.inl{display:inline-flex;flex-direction:row;align-items:center;gap:4px;margin-right:10px}
 select.sched{min-width:150px}input.cron{width:120px;font-family:var(--mono)}input.num{width:64px}td.actions{white-space:nowrap}tr.paused td{color:var(--mut)}
+form.grid label[hidden],form.grid div[hidden]{display:none}/* the grid's own display rules would otherwise beat the hidden attribute */
+ul.feed{grid-column:1/-1;list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:13px}ul.feed li{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline}
+ul.feed .when{font-family:var(--mono);font-size:12px;color:var(--mut)}ul.feed li.err .desc{color:var(--high)}
 form.run{display:grid;gap:10px}form.run label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mut)}form.run label.ck{flex-direction:row;align-items:center}form.run input[type=checkbox]{height:auto}
 dialog{border:1px solid var(--line2);border-radius:12px;background:var(--card);color:var(--fg);padding:20px;width:min(440px,92vw)}dialog::backdrop{background:rgba(0,0,0,.5)}dialog h2{margin-bottom:12px}
 /* drawer */
@@ -504,7 +509,7 @@ class App:
         """Recompute the effective config after the settings overlay changed."""
         cfg = self.settings.apply(self.seed)
         self.cfg = cfg
-        self.web = {**DEFAULTS, **{k: v for k, v in cfg.web.items() if v not in (None, "")}}  # cleared = the default
+        self.web = {**DEFAULTS, **{k: v for k, v in cfg.web.items() if v not in (None, "", [])}}  # cleared = the default
         self.web["severity_colors"] = {**DEFAULTS["severity_colors"], **cfg.web.get("severity_colors", {})}
         self.logo_path = self._local(self.web.get("logo"))
         custom = self._local(self.web.get("custom_css"))
@@ -703,10 +708,25 @@ class App:
             prev = r.get("plan_hash") or prev
         return rows
 
+    def snapshot_files(self, sid: str, manifest: dict) -> list[str]:
+        """The files the drawer links: the configured names that exist, and with "*" every stored file (the built-in
+        list first, then the engine reports and anything else under the snapshot), so "*" means more, not only reports."""
+        names = list(self.web["files"])
+        if "*" in names:
+            names = [n for n in names if n != "*"] + [n for n in DEFAULTS["files"] if n not in names]
+            try:
+                stored = sorted(k.rsplit("/", 1)[-1] for k in self.store.list_keys(f"{sid}/"))
+            except Exception:  # noqa: BLE001 - a store that cannot list still shows the known names
+                stored = []
+            for n in [*manifest.get("reports", []), *stored]:
+                if n not in names and "/" not in n and not n.startswith("."):
+                    names.append(n)
+        return [f for f in names if self.store.exists(f"{sid}/{f}")]
+
     def snapshot_detail(self, sid: str) -> dict:
         m = self.manifest_of(sid)
         detail = {"manifest": m, "triage": self.triage_of(sid), "findings": [], "top_sql": [],
-                  "files": [f for f in self.web["files"] if self.store.exists(f"{sid}/{f}")] + [r for r in m.get("reports", []) if r not in self.web["files"] and "*" in self.web["files"]]}
+                  "files": self.snapshot_files(sid, m)}
         if self.store.exists(f"{sid}/compare.json"):
             c = self.store.get_json(f"{sid}/compare.json")
             detail["findings"], detail["top_sql"] = c.get("findings", []), ((c.get("sql") or {}).get("top") or [])[:10]
@@ -1282,6 +1302,7 @@ class App:
                          web_title=html.escape(w["title"]), brand=html.escape(w["brand"]), logo=html.escape(w.get("logo") or ""),
                          accent=html.escape(w["accent"]), refresh_seconds=int(w["refresh_seconds"]), page_size=int(w["page_size"]),
                          footer=html.escape(w.get("footer") or ""), settings_file=html.escape(self.settings.where),
+                         files=html.escape(", ".join(w["files"])),
                          theme_opts="".join(f"<option{' selected' if w['theme'] == o else ''}>{o}</option>" for o in ("auto", "light", "dark")),
                          save_button=f"<button{ro} class=primary>Save</button>", schedule_card=self._schedule_card(ro),
                          aws_status=html.escape(status_line(profile_name(self.cfg.agent))),
@@ -1293,6 +1314,8 @@ class App:
         fields = {f"a_{k}": html.escape(str(a.get(k) or "")) for k in AGENT_FIELDS}
         fields["a_max_iterations"] = int(a.get("max_iterations") or 25)
         fields["a_token_budget"] = llm.token_budget(a)  # 0 is a real value here: no limit
+        chain = a.get("fallback_models")  # a list in the file; [] (off) shows as the word the card accepts for it
+        fields["a_fallback_models"] = html.escape("none" if chain == [] else ", ".join(m if isinstance(m, str) else m.get("model", "") for m in chain or []))
         return {**fields, "provider_opts": opt(a.get("provider", "anthropic"), AGENT_PROVIDERS),
                 "sched_provider_opts": opt(a.get("scheduled_provider") or "", ("", *AGENT_PROVIDERS)).replace(">(default)<", ">(same as above)<"),
                 "effort_opts": opt(a.get("effort", "high") or "", ("", "low", "medium", "high")),
@@ -1328,6 +1351,10 @@ class App:
                 if kind == "sev":
                     opts = "".join(f"<option value='{o}'{' selected' if v == o else ''}>{o or '(global)'}</option>" for o in ("", *SEVERITIES))
                     inputs.append(f"<label>{name} <select name='{ch}.{name}'>{opts}</select></label>")
+                elif kind == "bool":
+                    on = (default == "true") if v in (None, "") else v in (True, "true")
+                    opts = "".join(f"<option value='{o}'{' selected' if on == (o == 'true') else ''}>{o}</option>" for o in ("true", "false"))
+                    inputs.append(f"<label>{name} <select name='{ch}.{name}'>{opts}</select></label>")
                 elif kind == "secret":
                     inputs.append(f"<label>{name} <input name='{ch}.{name}' type=password autocomplete=off placeholder='{html.escape(str(v) or 'https://…')}'></label>")
                 else:
@@ -1336,13 +1363,14 @@ class App:
             test = f"<button{ro} class=quiet name=action value='test:{ch}'>Send test via {ch}</button>"
             blocks.append(f"<fieldset class=chan><legend>{ch}</legend>{''.join(inputs)}<div class=row>{test}</div></fieldset>")
         return {"min_sev_opts": "".join(f"<option{' selected' if d.get('min_severity', 'info') == o else ''}>{o}</option>" for o in SEVERITIES),
+                "gone_after_runs": html.escape(str(d.get("gone_after_runs") or "")),
                 "channel_toggles": toggles, "channel_blocks": "\n".join(blocks),
                 "delivery_buttons": f"<button{ro}>Save</button> <button{ro} class=quiet name=action value='test:stdout'>Send test via stdout</button>"}
 
     @staticmethod
     def parse_delivery_form(form: dict) -> dict:
         g = lambda k: form.get(k, [""])[0].strip()  # noqa: E731
-        data: dict = {"channels": form.get("channels", []), "min_severity": g("min_severity")}  # absent = every box unchecked
+        data: dict = {"channels": form.get("channels", []), "min_severity": g("min_severity"), "gone_after_runs": g("gone_after_runs")}  # absent = every box unchecked
         for ch, spec in CHANNEL_FIELDS.items():
             data[ch] = {name: g(f"{ch}.{name}") for name, _kind, _d in spec}
         return data
@@ -1372,10 +1400,10 @@ class App:
         from dbtriage.llm import test_model
 
         # only the Agent card's own fields: never api_key_cmd (a command) or anything else a request might carry
-        cfg = {**self.cfg.agent, **{k: v for k, v in (fields or {}).items() if k in AGENT_FIELDS and v not in (None, "")}}
+        cfg = {**self.cfg.agent, **{k: agent_value(k, v) for k, v in (fields or {}).items() if k in AGENT_FIELDS and v not in (None, "")}}
         return test_model(cfg)
 
-    def target_form(self, name: str | None, msg: str | None = None, kind: str = "", values: dict | None = None) -> bytes:
+    def target_form(self, name: str | None, msg: str | None = None, kind: str = "", values: dict | None = None, feed_result: str = "") -> bytes:
         v = values if values is not None else (self.settings.form_of(name, self.seed) if name else {})
         new = not name
         links = "\n".join(f"{l.get('label', '')} {l.get('url', '')}" for l in v.get("links") or [])
@@ -1386,6 +1414,8 @@ class App:
         notice = self._gate_notice(msg, kind, self.allow_edit, self.allows("edit"),
                                    "Read-only: start the web view with --allow-edit to change targets here.",
                                    "Read-only: your group cannot edit.")
+        feed = feed_form(v)
+        num = lambda k: html.escape(str(v.get(k) if v.get(k) not in (None, "") else ""))  # noqa: E731
         return self.page("target_edit.html", "add target" if new else name, active="/settings",
                          heading="Add target" if new else f"Edit target {html.escape(name)}", notice=notice,
                          tname=html.escape(name or v.get("name", "")), name_ro="" if new else "readonly",
@@ -1394,10 +1424,54 @@ class App:
                          dsn_env=html.escape(v.get("dsn_env") or ""), user=html.escape(v.get("user") or ""), password="",
                          top_n=top_n_of(v.get("top_n")), diagnostics_pack="checked" if v.get("diagnostics_pack") else "",
                          snapshot_opts=self._snapshot_opts(v.get("create_snapshot")), snapshot_note=self._db_writes_note(short=True),
-                         changes_file=html.escape(v.get("changes_file") or ""),
+                         feed_source_opts="".join(f"<option value='{s}'{' selected' if feed.get('source', '') == s else ''}>{s or 'none'}</option>"
+                                                  for s in ("", *changes.SOURCES)),
+                         **{f"feed_{k}": html.escape(str(feed.get(k) or "")) for k in ("path", "repo", "project", "environment", "token_env", "base_url",
+                                                                                      "lookback_hours", "correlate_minutes")},
+                         feed_releases="checked" if feed.get("releases") else "", feed_test=f"<button{ro} class=quiet name=action value=feed>Test feed</button>",
+                         feed_result=feed_result, lookback_default=changes.DEFAULT_LOOKBACK_HOURS, correlate_default=changes.DEFAULT_CORRELATE_MINUTES,
+                         call_timeout_ms=num("call_timeout_ms"), connect_timeout_s=num("connect_timeout_s"), min_snapshot_age_min=num("min_snapshot_age_min"),
+                         mask_report_literals="" if v.get("mask_report_literals") is False else "checked",
                          links=html.escape(links), notes=html.escape(v.get("notes") or ""), buttons=buttons,
                          baseline_opts="".join(f"<option value='{p}'{' selected' if (v.get('baseline_policy') or 'previous') == p else ''}>{LABELS[p]}</option>" for p in POLICIES),
-                         baseline=html.escape(v.get("baseline") or ""))
+                         baseline_snapshot_opts=self._baseline_snapshot_opts(v.get("engine"), name, v.get("baseline") or ""))
+
+    def _baseline_snapshot_opts(self, engine: str | None, name: str | None, current: str, limit: int = 60) -> str:
+        """The stored snapshots a pinned baseline can be chosen from, newest first, the current pin kept even when
+        its snapshot is gone (so the page shows what the file or an API call set and the policy's fallback makes sense)."""
+        ids: list[str] = []
+        if engine and name and hasattr(self.store, "list_snapshots"):
+            try:
+                ids = list(reversed(self.store.list_snapshots(engine, name)))[:limit]
+            except StorageUnavailable:  # the form must still open: the pin can be kept or cleared without the store
+                ids = []
+        opts = [f"<option value=''{' selected' if not current else ''}>(none: pick one for the pinned policy)</option>"]
+        if current and current not in ids:
+            opts.append(f"<option value='{html.escape(current)}' selected>{html.escape(current)} (not stored)</option>")
+        for sid in ids:
+            ts = sid.rsplit("/", 1)[-1]  # 20261105T152933Z
+            when = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]}" if len(ts) >= 15 and "T" in ts else ts
+            opts.append(f"<option value='{html.escape(sid)}'{' selected' if sid == current else ''}>{when} · {html.escape(sid)}</option>")
+        return "".join(opts)
+
+    def test_feed(self, name: str, fields: dict, hours: int = 48) -> tuple[bool, str]:
+        """The Test feed button: read the change feed as the form describes it, for the last `hours`, and render what
+        came back. Nothing is saved. Returns (nothing went wrong, html for the form)."""
+        t = Target(name=name or "new", engine=fields.get("engine") or "postgres", dsn="", changes_file=fields.get("changes_file") or None,
+                   extra={"changes": fields.get("changes") or {}})
+        if not changes.spec_of(t):
+            return True, "<ul class='feed'><li class='mut'>no change feed configured: pick a source first</li></ul>"
+        end = datetime.now(timezone.utc)
+        items = changes.fetch(t, end - timedelta(hours=hours), end, base_dir=self.cfg.base_dir)
+        if not items:
+            return True, f"<ul class='feed'><li class='mut'>the feed answered, with no changes in the last {hours} hours</li></ul>"
+        rows = []
+        for c in items:
+            err = bool(c.get("error"))
+            link = f" <a href='{html.escape(c['link'])}' rel='noopener'>link</a>" if isinstance(c.get("link"), str) and re.match(r"^https?://", c["link"]) else ""
+            rows.append(f"<li{' class=err' if err else ''}><span class='when'>{html.escape(_fmt_ts(c.get('time')))}</span>"
+                        f"<span class='pill2'>{html.escape(str(c.get('kind') or 'other'))}</span><span class='desc'>{html.escape(str(c.get('description') or ''))}</span>{link}</li>")
+        return not any(c.get("error") for c in items), f"<ul class='feed'>{''.join(rows)}</ul>"
 
     @staticmethod
     def _snapshot_opts(value) -> str:
@@ -1439,10 +1513,19 @@ class App:
             if line.strip():
                 label, _, url = line.strip().partition(" ")
                 links.append({"label": label, "url": url.strip()})
+        # The change feed: the table is the long form; a file feed with default numbers stays the short form, changes_file,
+        # so a target seeded that way round-trips unchanged. Any other source drops changes_file.
+        feed = changes_value({"source": g("changes.source"), "releases": "changes.releases" in form,
+                              **{k: g(f"changes.{k}") for k in ("path", "repo", "project", "environment", "token_env", "base_url", *CHANGES_NUMBERS)}})
+        changes_file = ""
+        if feed.get("source") == "file" and not any(k in feed for k in CHANGES_NUMBERS):
+            changes_file, feed = feed.get("path", ""), {}
         return g("name"), {"engine": g("engine"), "dsn": g("dsn"), "dsn_env": g("dsn_env"), "user": g("user"), "password": g("password"),
                            "top_n": g("top_n") or 25, "diagnostics_pack": "diagnostics_pack" in form, "create_snapshot": g("create_snapshot") or "off",
-                           "changes_file": g("changes_file"), "links": links, "notes": g("notes"),
-                           "baseline_policy": g("baseline_policy") if g("baseline_policy") != "previous" else "", "baseline": g("baseline")}
+                           "changes_file": changes_file, "changes": feed, "links": links, "notes": g("notes"),
+                           "baseline_policy": g("baseline_policy") if g("baseline_policy") != "previous" else "", "baseline": g("baseline"),
+                           "call_timeout_ms": g("call_timeout_ms"), "connect_timeout_s": g("connect_timeout_s"), "min_snapshot_age_min": g("min_snapshot_age_min"),
+                           "mask_report_literals": "mask_report_literals" in form}
 
     def save_target(self, name: str, fields: dict, keep_secrets: bool = True) -> list[str]:
         """Blank dsn/password on an edit means 'keep what is stored'."""
@@ -1481,6 +1564,17 @@ class App:
                 "targets": {n: {"engine": t.engine, "dsn": mask_dsn(t.dsn), "top_n": t.top_n, "diagnostics_pack": t.diagnostics_pack,
                                 "origin": self.settings.origin(n, self.seed), **{k: v for k, v in t.extra.items() if k not in ("password", "dsn")}}
                             for n, t in sorted(self.cfg.targets.items())}}
+
+
+def feed_form(v: dict) -> dict:
+    """What the edit page shows for the change feed: the target's changes table when it names a source, else its
+    changes_file as a file feed, else nothing."""
+    table = v.get("changes")
+    if isinstance(table, dict) and table.get("source"):
+        return table
+    if v.get("changes_file"):
+        return {"source": "file", "path": v["changes_file"]}
+    return {}
 
 
 def _db_snapshot_note(d: dict | None) -> str:
@@ -1821,7 +1915,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 access.audit("settings", path)
                 return self._send(app.settings_page("saved", "good"))
             if path == "/settings/agent":
-                fields = {k: form[k][0].strip() for k in AGENT_FIELDS if k in form}  # the card has no max_tokens input
+                fields = {k: form[k][0].strip() for k in AGENT_FIELDS if k in form}  # only what the card has: absent is "not given"
                 if form.get("action", [""])[0] == "test":
                     ok, msg = app.test_agent(fields)
                     return self._send(app.settings_page(f"model {'ok: ' if ok else 'failed: '}{msg}", "good" if ok else "bad"))
@@ -1844,10 +1938,14 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 return self._send(app.settings_page("delivery settings saved", "good"))
             if path == "/targets/save":
                 name, fields = app.parse_target_form(form)
+                known = name if name in app.cfg.targets or name in app.settings.data["targets"] else None
                 if form.get("action", [""])[0] == "probe":
                     ok, msg = app.probe_target(name, fields)
-                    return self._send(app.target_form(name if name in app.cfg.targets or name in app.settings.data["targets"] else None,
-                                                      f"connection {'ok: ' if ok else 'failed: '}{msg}", "good" if ok else "bad", values={**fields, "name": name}))
+                    return self._send(app.target_form(known, f"connection {'ok: ' if ok else 'failed: '}{msg}", "good" if ok else "bad", values={**fields, "name": name}))
+                if form.get("action", [""])[0] == "feed":  # shows the items under the feed fields; nothing is saved
+                    ok, items = app.test_feed(name, fields)
+                    return self._send(app.target_form(known, f"change feed {'read: see below' if ok else 'failed: see below'}", "good" if ok else "bad",
+                                                      values={**fields, "name": name}, feed_result=items))
                 problems = app.save_target(name, fields)
                 if problems:
                     return self._send(app.target_form(name if name in app.cfg.targets else None, "; ".join(problems), "bad", values={**fields, "name": name}), code=400)
@@ -1872,7 +1970,8 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 sections = body if any(k in body for k in ("web", "agent", "delivery")) else {"web": body}
                 problems = []
                 if "web" in sections:
-                    app.settings.put_web({k: str(v) for k, v in sections["web"].items() if k in WEB_FIELDS}, base={**DEFAULTS, **app.seed.web})
+                    app.settings.put_web({k: v if isinstance(v, list) else str(v) for k, v in sections["web"].items() if k in WEB_FIELDS},
+                                         base={**DEFAULTS, **app.seed.web})
                 if "agent" in sections:
                     problems += app.settings.put_agent(dict(sections["agent"]), base=app.seed.agent)
                 if "delivery" in sections:

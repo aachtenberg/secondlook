@@ -34,9 +34,10 @@ document.addEventListener('change', function (e) {  // delegated: schedule rows 
 <label>Refresh (s) <input name="refresh_seconds" type="number" min="0" value="$refresh_seconds"></label>
 <label>Page size <input name="page_size" type="number" min="1" value="$page_size"></label>
 <label>Footer <input name="footer" value="$footer"></label>
+<label>Files shown on a snapshot page <input name="files" value="$files" placeholder="triage.md, compare.json, … · * shows every stored file"><small class="mut">Names separated by commas; <code>*</code> exposes every stored file; blank restores the built-in list.</small></label>
 <div>$save_button</div>
 </form>
-<p class="mut">Stored in <code>$settings_file</code>; values here override <code>[web]</code> in targets.toml. Logo files, custom CSS and template overrides stay in the file.</p>
+<p class="mut">Stored in <code>$settings_file</code>; values here override <code>[web]</code> in targets.toml. Logo files, custom CSS, template overrides and the severity colours stay in the file.</p>
 </div>
 <div class="card">
 <h2>Agent (model that writes the review)</h2>
@@ -53,6 +54,8 @@ document.addEventListener('change', function (e) {  // delegated: schedule rows 
 <label>Effort (Claude) <select name="effort">$effort_opts</select></label>
 <label>Max iterations <input name="max_iterations" type="number" min="1" max="100" value="$a_max_iterations"></label>
 <label>Token budget per review <input name="token_budget" type="number" min="0" step="10000" value="$a_token_budget" title="Input and output tokens one review (or one discussion answer) may use, all model calls together. Near the limit the model is asked to finish with what it has. 0 = no limit."></label>
+<label>Max tokens per model call <input name="max_tokens" type="number" min="1" step="1000" value="$a_max_tokens" placeholder="blank: 16000 for Claude, 4096 for bedrock-converse"><small class="mut">The longest answer one model call may give; OpenAI-style providers use their own limit.</small></label>
+<label>Fallback models (Claude on a cloud platform) <input name="fallback_models" value="$a_fallback_models" placeholder="claude-opus-4-8, … · none" autocomplete="off"><small class="mut">Tried in turn when a request is declined; blank keeps the provider's default chain, <code>none</code> turns it off.</small></label>
 <fieldset class="chan"><legend>Scheduled runs (optional: a cheaper or local model for the schedule)</legend>
 <label>Provider <select name="scheduled_provider">$sched_provider_opts</select></label>
 <label>Model <input name="scheduled_model" value="$a_scheduled_model" placeholder="blank: the model above" autocomplete="off"></label>
@@ -69,6 +72,7 @@ document.addEventListener('change', function (e) {  // delegated: schedule rows 
 <h2>Delivery (where reviews are posted)</h2>
 <form method="post" action="/settings/delivery" class="grid" data-ajax>
 <label>Below this severity only stdout fires <select name="min_severity">$min_sev_opts</select></label>
+<label>A finding is gone after <input name="gone_after_runs" type="number" min="1" max="1000" value="$gone_after_runs" placeholder="3"><small class="mut">Periods of a finding's own cadence it must be missing before the review says it is gone and its ticket is told, or runs before it has a cadence; blank = 3.</small></label>
 <div class="row"><span class="mut">Enabled channels:</span> $channel_toggles</div>
 $channel_blocks
 <div class="row">$delivery_buttons</div>

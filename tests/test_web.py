@@ -727,3 +727,197 @@ def test_agreement_marks_and_dropped_rules_findings(tmp_path):
     st.put_json(f"{SID}/triage.json", {"severity": "medium", "title": "x", "source": "agent", "findings": findings, "heuristics": heur})
     page = app.snapshot(SID).decode()
     assert "q1 slowed down" in page and "class='mark" not in page and "class='dropped'" not in page and "Agreement:" not in page
+
+
+# --------------------------------------------------------------------------- every knob on the Settings pages
+def test_delivery_card_has_gone_after_runs_and_a_gate_per_channel(tmp_path):
+    from dbtriage.settings import CHANNEL_FIELDS
+
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    s = app.settings_page().decode()
+    assert 'name="gone_after_runs" type="number" min="1" max="1000" value=""' in s and "blank = 3" in s
+    for ch in CHANNEL_FIELDS:
+        if ch != "stdout":
+            assert f"name='{ch}.min_severity'" in s, ch
+    assert "<option value='true' selected>true</option>" in s.split("name='email.starttls'")[1] and "name='plane.project_identifier'" in s
+    form = {"channels": ["stdout", "ntfy", "email"], "min_severity": ["info"], "gone_after_runs": ["5"], "ntfy.min_severity": ["low"],
+            "email.starttls": ["false"], "email.to": ["a@x"], "plane.project_identifier": ["OPS"]}
+    assert app.settings.put_delivery(app.parse_delivery_form(form), base=app.seed.delivery) == []
+    app.reload()
+    d = app.cfg.delivery
+    assert d["gone_after_runs"] == 5 and d["ntfy"]["min_severity"] == "low" and d["email"]["starttls"] is False and d["plane"]["project_identifier"] == "OPS"
+    s = app.settings_page().decode()
+    assert 'name="gone_after_runs" type="number" min="1" max="1000" value="5"' in s and "<option value='false' selected>" in s.split("name='email.starttls'")[1]
+    assert "<option value='low' selected>" in s.split("name='ntfy.min_severity'")[1].split("</select>")[0]
+    # the rendered card round-trips: saving it unchanged stores nothing new
+    from tests.test_overlay_semantics import form_as_rendered
+
+    before = json.dumps(app.settings.data["delivery"], sort_keys=True)
+    assert app.settings.put_delivery(app.parse_delivery_form(form_as_rendered(s, "/settings/delivery")), base=app.seed.delivery) == []
+    assert json.dumps(app.settings.data["delivery"], sort_keys=True) == before
+    # blank = the default (3); bad values are refused, not stored
+    assert app.settings.put_delivery({"gone_after_runs": ""}) == [] and "gone_after_runs" not in app.settings.data["delivery"]
+    assert app.settings.put_delivery({"gone_after_runs": "0"}) == ["gone_after_runs: 1 to 1000"]
+    assert app.settings.put_delivery({"gone_after_runs": "x"}) == ["gone_after_runs must be a whole number"]
+    assert app.settings.put_delivery({"email": {"starttls": "maybe"}}) == ["email.starttls: true or false"]
+    assert app.api_settings()["delivery"]["ntfy"]["min_severity"] == "low"
+
+
+def test_change_feed_on_the_target_form(tmp_path):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    form = app.target_form("demo").decode()
+    assert "<legend>Change feed</legend>" in form and "<option value='' selected>none</option>" in form and 'name="changes.repo"' in form and "Test feed" in form
+    # github: the table is saved, changes_file is dropped; fields of other sources are not kept
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["postgres"], "dsn": ["x"], "changes.source": ["github"], "changes.repo": ["acme/billing"],
+                                          "changes.environment": ["production"], "changes.token_env": ["GH_TOKEN"], "changes.releases": ["on"],
+                                          "changes.lookback_hours": ["24"], "changes.project": ["ignored"], "changes.path": ["ignored"]})
+    assert fields["changes"] == {"source": "github", "repo": "acme/billing", "environment": "production", "token_env": "GH_TOKEN", "releases": True, "lookback_hours": 24}
+    assert fields["changes_file"] == "" and app.save_target("demo", fields) == []
+    t = app.cfg.targets["demo"]
+    assert t.extra["changes"]["repo"] == "acme/billing" and t.changes_file is None
+    form = app.target_form("demo").decode()
+    assert "<option value='github' selected>" in form and 'name="changes.repo" value="acme/billing"' in form and 'name="changes.releases" checked' in form
+    assert 'name="changes.lookback_hours" type="number" min="1" max="8760" value="24"' in form
+    # a file feed with the default numbers stays the short form, changes_file; with a number of its own it is the table
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["postgres"], "dsn": ["x"], "changes.source": ["file"], "changes.path": ["changes/demo.json"]})
+    assert fields["changes_file"] == "changes/demo.json" and fields["changes"] == {}
+    assert app.save_target("demo", fields) == [] and app.cfg.targets["demo"].changes_file == "changes/demo.json" and not app.cfg.targets["demo"].extra.get("changes")
+    assert "<option value='file' selected>" in app.target_form("demo").decode() and 'name="changes.path" value="changes/demo.json"' in app.target_form("demo").decode()
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["postgres"], "dsn": ["x"], "changes.source": ["file"], "changes.path": ["changes/demo.json"],
+                                          "changes.correlate_minutes": ["5"]})
+    assert fields["changes_file"] == "" and fields["changes"] == {"source": "file", "path": "changes/demo.json", "correlate_minutes": 5}
+    assert app.save_target("demo", fields) == [] and app.cfg.targets["demo"].extra["changes"]["correlate_minutes"] == 5 and app.cfg.targets["demo"].changes_file is None
+    # none clears both
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["postgres"], "dsn": ["x"], "changes.source": [""], "changes.path": ["left over"]})
+    assert app.save_target("demo", fields) == [] and app.cfg.targets["demo"].changes_file is None and not app.cfg.targets["demo"].extra.get("changes")
+    # what the API may send is checked the same way
+    put = lambda c: app.settings.put_target("demo", {"engine": "postgres", "dsn": "x", "changes": c})  # noqa: E731
+    assert put({"source": "github"}) == ["changes: a github feed needs repo"]
+    assert put({"source": "gitlab", "project": "g/p", "token_env": "lower"}) == ["changes.token_env: an environment variable name like GITHUB_TOKEN"]
+    assert put({"source": "file", "path": "x", "lookback_hours": 0}) == ["changes.lookback_hours: 1 to 8760 hours"]
+    assert put({"source": "jenkins"}) == ["changes.source: one of file, github, gitlab"]
+    assert put("x") == ["changes must be a table"]
+    assert put({"source": "github", "repo": "a/b", "base_url": "ftp://x"}) == ["changes.base_url must start with http(s)://"]
+    assert put({"source": "gitlab", "project": "g/p", "base_url": "https://gitlab.example.com", "correlate_minutes": "15"}) == []
+    app.reload()
+    assert app.api_settings()["targets"]["demo"]["changes"] == {"source": "gitlab", "project": "g/p", "base_url": "https://gitlab.example.com", "correlate_minutes": 15}
+
+
+def test_seeded_feed_round_trips_unchanged(tmp_path):
+    """A changes_file from targets.toml shows as a file feed, a changes table as its source; saving either form as
+    rendered stores nothing, so the file keeps feeding through."""
+    from tests.test_overlay_semantics import form_as_rendered
+
+    t = Target("demo", "postgres", "dsn", changes_file=str(tmp_path / "changes.json"))
+    g = Target("gh", "postgres", "dsn", extra={"changes": {"source": "github", "repo": "acme/billing", "lookback_hours": 24}})
+    app = App(Config(storage_url="x", targets={"demo": t, "gh": g}, base_dir=str(tmp_path)), store(tmp_path), False, None, allow_edit=True)
+    for name, source in (("demo", "file"), ("gh", "github")):
+        form = form_as_rendered(app.target_form(name).decode(), "/targets/save")
+        assert form["changes.source"] == [source] and form["mask_report_literals"] == ["on"] and form["baseline"] == [""]
+        n, fields = App.parse_target_form(form)
+        assert app.save_target(n, fields) == [] and app.settings.data["targets"][name] == {}, name
+    assert app.cfg.targets["demo"].changes_file == str(tmp_path / "changes.json") and app.cfg.targets["gh"].extra["changes"]["lookback_hours"] == 24
+
+
+def test_test_feed_reads_the_feed_as_the_form_describes_it(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    now = datetime.now(timezone.utc)
+    (tmp_path / "changes.json").write_text(json.dumps([
+        {"time": (now - timedelta(hours=2)).isoformat(), "kind": "deploy", "description": "billing@1.4.2 to production", "link": "https://ci/1"},
+        {"time": (now - timedelta(days=4)).isoformat(), "kind": "deploy", "description": "ancient deploy"}]))
+    ok, out = app.test_feed("demo", {"engine": "postgres", "changes_file": "changes.json", "changes": {}})  # relative to targets.toml
+    assert ok and "billing@1.4.2 to production" in out and "href='https://ci/1'" in out and "ancient" not in out and "<span class='pill2'>deploy</span>" in out
+    ok, out = app.test_feed("demo", {"engine": "postgres", "changes_file": "", "changes": {"source": "file", "path": "missing.json"}})
+    assert not ok and "<li class=err>" in out and "missing.json" in out
+    ok, out = app.test_feed("demo", {"engine": "postgres", "changes_file": "", "changes": {}})
+    assert ok and "no change feed configured" in out
+    (tmp_path / "empty.json").write_text("[]")
+    ok, out = app.test_feed("new", {"engine": "postgres", "changes_file": "empty.json", "changes": {}})
+    assert ok and "no changes in the last 48 hours" in out
+    assert "changes" not in app.settings.data["targets"].get("demo", {})  # nothing was saved
+
+
+def test_server_feed_button_and_files_list(server, tmp_path):
+    (tmp_path / "changes.json").write_text("[]")
+    form = "name=demo&engine=postgres&changes.source=file&changes.path=changes.json&action=feed"
+    status, body = _req(f"{server}/targets/save", "POST", form.encode())
+    assert status == 200 and b"change feed read: see below" in body and b"<ul class='feed'>" in body and b"<option value='file' selected>" in body
+    status, body = _req(f"{server}/targets/save", "POST", b"name=demo&engine=postgres&changes.source=file&changes.path=nope.json&action=feed")
+    assert status == 200 and b"change feed failed" in body and b"<li class=err>" in body and b"nope.json" in body
+    assert "changes_file" not in json.loads(_req(f"{server}/api/settings")[1])["targets"]["demo"]  # a test never saves
+    status, body = _req(f"{server}/api/settings", "PUT", json.dumps({"web": {"files": ["triage.md", "awr.txt"]}}).encode())
+    assert status == 200 and json.loads(body)["web"]["files"] == ["triage.md", "awr.txt"]
+    assert json.loads(_req(f"{server}/api/snapshots/{SID}")[1])["files"] == ["triage.md", "awr.txt"]
+
+
+def test_pinned_baseline_is_picked_from_stored_snapshots(tmp_path):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    pick = lambda page: page.split('<select name="baseline">')[1].split("</select>")[0]  # noqa: E731
+    sel = pick(app.target_form("demo").decode())
+    assert sel.index("20261105T100000Z") < sel.index("20261105T090000Z") and "<option value='' selected>" in sel  # newest first
+    assert "2026-11-05 10:00:00 · postgres/demo/2026-11-05/20261105T100000Z</option>" in sel
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["postgres"], "dsn": ["x"], "baseline_policy": ["pinned"], "baseline": ["postgres/demo/2026-11-05/20261105T090000Z"]})
+    assert app.save_target("demo", fields) == [] and app.cfg.targets["demo"].extra["baseline"].endswith("090000Z")
+    sel = pick(app.target_form("demo").decode())
+    assert "value='postgres/demo/2026-11-05/20261105T090000Z' selected" in sel and sel.count(" selected") == 1
+    assert app.save_target("demo", {"baseline": "postgres/demo/2026-01-01/20260101T000000Z"}) == []  # the API may pin a snapshot since deleted
+    sel = pick(app.target_form("demo").decode())
+    assert "20260101T000000Z (not stored)</option>" in sel and sel.count(" selected") == 1
+    assert pick(app.target_form(None).decode()) == "<option value='' selected>(none: pick one for the pinned policy)</option>"  # a new target has none yet
+
+
+def test_engine_limits_save_and_reload(tmp_path):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    form = app.target_form("demo").decode()
+    assert "<legend>Engine limits</legend>" in form and 'name="mask_report_literals" checked' in form
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["oracle"], "dsn": ["h/x"], "call_timeout_ms": ["30000"], "connect_timeout_s": ["5"], "min_snapshot_age_min": ["0"]})
+    assert fields["mask_report_literals"] is False and app.save_target("demo", fields) == []
+    t = app.cfg.targets["demo"]
+    assert t.extra["call_timeout_ms"] == 30000 and t.extra["connect_timeout_s"] == 5 and t.extra["min_snapshot_age_min"] == 0 and t.extra["mask_report_literals"] is False
+    t = App(config(tmp_path), store(tmp_path), False, None).cfg.targets["demo"]  # a restart reads the same overlay
+    assert t.extra["mask_report_literals"] is False and t.extra["call_timeout_ms"] == 30000
+    form = app.target_form("demo").decode()
+    assert 'name="call_timeout_ms" type="number" min="1000" max="3600000" step="1000" value="30000"' in form and 'name="mask_report_literals" >' in form
+    # ticking the box again and blanking the numbers drops them from the overlay
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["oracle"], "dsn": ["h/x"], "mask_report_literals": ["on"]})
+    assert app.save_target("demo", fields) == [] and not any(k in app.settings.data["targets"]["demo"] for k in ("mask_report_literals", "call_timeout_ms", "connect_timeout_s"))
+    assert app.settings.put_target("demo", {"engine": "oracle", "dsn": "x", "call_timeout_ms": 10}) == ["call_timeout_ms: 1000 to 3600000 ms"]
+    assert app.settings.put_target("demo", {"engine": "oracle", "dsn": "x", "connect_timeout_s": "x"}) == ["connect_timeout_s must be a whole number"]
+    assert app.settings.put_target("demo", {"engine": "oracle", "dsn": "x", "mask_report_literals": "yes"}) == ["mask_report_literals must be true or false"]
+
+
+def test_files_max_tokens_and_fallback_models_on_the_cards(tmp_path, monkeypatch):
+    import dbtriage.llm as llm
+    from dbtriage.web import DEFAULTS
+
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    base = {**DEFAULTS, **app.seed.web}
+    s = app.settings_page().decode()
+    assert 'name="files" value="triage.md, compare.json, summary.json, manifest.json, raw.json, tools.json, changes.json, awr.txt, addm.txt"' in s
+    assert 'name="max_tokens" type="number" min="1" step="1000" value=""' in s and 'name="fallback_models" value=""' in s and "$files" not in s
+    app.settings.put_web({"files": "triage.md, awr.txt"}, base=base); app.reload()
+    assert app.web["files"] == ["triage.md", "awr.txt"] and app.snapshot_detail(SID)["files"] == ["triage.md", "awr.txt"]
+    assert 'name="files" value="triage.md, awr.txt"' in app.settings_page().decode()
+    app.settings.put_web({"files": "*"}, base=base); app.reload()
+    files = app.snapshot_detail(SID)["files"]
+    assert app.web["files"] == ["*"] and "awr.txt" in files  # every stored report
+    assert "triage.md" in files and files.index("triage.md") < files.index("awr.txt")  # and the built-in list first, not only reports
+    app.settings.put_web({"files": ""}, base=base); app.reload()
+    assert app.web["files"] == DEFAULTS["files"]  # blank: the built-in list
+    # the Agent card: max tokens per call, and the fallback chain as a comma-separated line
+    assert app.settings.put_agent({"max_tokens": "8000", "fallback_models": "claude-opus-4-8, claude-sonnet-4-5"}) == []
+    app.reload()
+    assert app.cfg.agent["max_tokens"] == 8000 and app.cfg.agent["fallback_models"] == ["claude-opus-4-8", "claude-sonnet-4-5"]
+    s = app.settings_page().decode()
+    assert 'name="max_tokens" type="number" min="1" step="1000" value="8000"' in s and 'name="fallback_models" value="claude-opus-4-8, claude-sonnet-4-5"' in s
+    assert app.settings.put_agent({"fallback_models": "none"}) == [] and app.settings.data["agent"]["fallback_models"] == []
+    app.reload()
+    assert 'name="fallback_models" value="none"' in app.settings_page().decode()
+    assert app.settings.put_agent({"fallback_models": "", "max_tokens": ""}) == [] and not {"fallback_models", "max_tokens"} & set(app.settings.data["agent"])
+    assert app.settings.put_agent({"fallback_models": 5}) == ["fallback_models: model ids separated by commas"]
+    seen = {}
+    monkeypatch.setattr(llm, "test_model", lambda cfg: (seen.update(cfg) or (True, "ok")))
+    app.test_agent({"fallback_models": "a, b", "max_tokens": "100"})
+    assert seen["fallback_models"] == ["a", "b"] and seen["max_tokens"] == "100"  # the line is a list by the time a backend sees it

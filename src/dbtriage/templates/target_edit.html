@@ -11,10 +11,41 @@ $notice
 <label><input type="checkbox" name="diagnostics_pack" $diagnostics_pack> Oracle Diagnostics Pack licensed (AWR/ASH/ADDM)</label>
 <label>Snapshot on the database before collecting <select name="create_snapshot">$snapshot_opts</select><small class="mut">Oracle: an AWR snapshot (Diagnostics Pack); other engines with a plugin. $snapshot_note</small></label>
 <label>Baseline policy <select name="baseline_policy">$baseline_opts</select></label>
-<label>Pinned baseline snapshot id <input name="baseline" value="$baseline" placeholder="oracle/ora-lab/2026-11-05/20261105T152933Z (for policy 'pinned baseline')"></label>
-<label>Changes file <input name="changes_file" value="$changes_file" placeholder="examples/changes.json"></label>
+<label>Pinned baseline snapshot <select name="baseline">$baseline_snapshot_opts</select><small class="mut">Used by the <i>pinned</i> policy; the stored snapshots of this database, newest first.</small></label>
+<fieldset class="chan" id="feed"><legend>Change feed</legend>
+<label>Source <select name="changes.source" id="feed-source">$feed_source_opts</select><small class="mut">Deploys read when a snapshot is taken and stored with it, so a regression's evidence can name the deploy before it.</small></label>
+<label data-src="file">Path <input name="changes.path" value="$feed_path" placeholder="changes/prod-db-3.json (relative to targets.toml)"></label>
+<label data-src="github">Repository <input name="changes.repo" value="$feed_repo" placeholder="owner/name"></label>
+<label data-src="gitlab">Project <input name="changes.project" value="$feed_project" placeholder="group/name or the numeric id"></label>
+<label data-src="github gitlab">Environment <input name="changes.environment" value="$feed_environment" placeholder="production · blank: every environment"></label>
+<label data-src="github gitlab">Token env var <input name="changes.token_env" value="$feed_token_env" placeholder="GITHUB_TOKEN (the name, never the token)"></label>
+<label data-src="github gitlab">API base URL <input name="changes.base_url" value="$feed_base_url" placeholder="https://api.github.com · https://gitlab.example.com"></label>
+<label data-src="github"><input type="checkbox" name="changes.releases" $feed_releases> Read releases when the repository records no deployments</label>
+<label data-src="file github gitlab">Lookback (hours) <input name="changes.lookback_hours" type="number" min="1" max="8760" value="$feed_lookback_hours" placeholder="$lookback_default"><small class="mut">How far before the snapshot's window the feed is read.</small></label>
+<label data-src="file github gitlab">Correlate (minutes) <input name="changes.correlate_minutes" type="number" min="0" max="1440" value="$feed_correlate_minutes" placeholder="$correlate_default"><small class="mut">A change this long before the window still counts as beside a regression in it.</small></label>
+<div class="row" data-src="file github gitlab">$feed_test <span class="mut">reads the last 48 hours as set above; nothing is saved</span></div>
+$feed_result
+</fieldset>
+<fieldset class="chan"><legend>Engine limits</legend>
+<label>Query timeout (ms) <input name="call_timeout_ms" type="number" min="1000" max="3600000" step="1000" value="$call_timeout_ms" placeholder="120000"><small class="mut">Oracle and SQL Server: the longest any single query may take.</small></label>
+<label>Connect timeout (s) <input name="connect_timeout_s" type="number" min="1" max="300" value="$connect_timeout_s" placeholder="10"><small class="mut">SQL Server: the longest the login may take.</small></label>
+<label>Min AWR snapshot age (min) <input name="min_snapshot_age_min" type="number" min="0" max="1440" value="$min_snapshot_age_min" placeholder="5"><small class="mut">Oracle: no snapshot is taken on the database while the newest is younger than this.</small></label>
+<label><input type="checkbox" name="mask_report_literals" $mask_report_literals> Mask quoted values in stored AWR/ADDM text (Oracle)</label>
+</fieldset>
 <label>Links (one per line: label url) <textarea name="links" rows="3">$links</textarea></label>
 <label>Notes for the reviewer <textarea name="notes" rows="2" placeholder="e.g. batch window 02:00-04:00; owned by team X">$notes</textarea></label>
 <div class="row">$buttons</div>
 </form>
 <p class="mut">Prefer <b>DSN from env var</b> in locked-down environments: the value then never touches disk here. A DSN typed above is saved to the settings file (mode 0600) and masked afterwards.</p>
+<script>
+(function () {  // the feed shows only its source's fields; without JS every field shows, which still saves correctly
+  var src = document.getElementById('feed-source'); if (!src) return;
+  function show() {
+    document.querySelectorAll('#feed [data-src]').forEach(function (el) {
+      el.hidden = el.getAttribute('data-src').split(' ').indexOf(src.value) < 0;
+    });
+  }
+  src.addEventListener('change', show);
+  show();
+})();
+</script>

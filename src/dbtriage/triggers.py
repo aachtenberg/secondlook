@@ -4,6 +4,8 @@
   * Webhook receiver (dbtriage serve): Alertmanager, Grafana, Datadog, Dynatrace, PagerDuty
     or a plain JSON {"target": ..., "mode": "incident", "window_minutes": 60,
                                         "baseline_policy": "same-time-last-week" | "baseline": "<snapshot id>"}
+    The same receiver takes POST /changes, {"target", "time", "kind", "description", "link"} or a list, which
+    starts no run: it records a deploy in the target's change feed inbox (dbtriage.inbox).
   * AWS Lambda / EventBridge:         dbtriage.triggers.lambda_handler
   * Azure Functions / GCP Cloud Run:  call handle_payload() the same way
 
@@ -17,9 +19,11 @@ import json
 import sys
 import re
 import threading
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 MODES = ("scheduled", "adhoc", "incident")
 
@@ -109,13 +113,29 @@ def lambda_handler(event, context=None):
     return {"statusCode": 200, "body": json.dumps({"severity": result["severity"], "snapshot": result["snapshot"]})}
 
 
-def serve(host: str, port: int, token: str | None):
-    """Minimal webhook receiver: POST / with a JSON payload; runs the triage in a thread."""
-    from dbtriage.cli import run_request
+def serve(host: str, port: int, token: str | None, store=None, config_path: str | None = None):
+    """Minimal webhook receiver: POST / with a JSON payload runs the triage in a thread; POST /changes records a deploy."""
+    from dbtriage.config import load_config
 
     if not token:
         print(f"serve: WARNING no DBTRIAGE_WEBHOOK_TOKEN: anyone who can reach {host}:{port} can start runs and spend model credit",
               file=sys.stderr)
+    srv = make_server(host, port, token, cfg_loader=lambda: load_config(config_path), store=store)
+    print(f"dbtriage webhook receiver on http://{host}:{port}/ (POST JSON = run; POST /changes = record a deploy; GET = health)")
+    srv.serve_forever()
+
+
+def make_server(host: str, port: int, token: str | None, run=None, cfg_loader=None, store=None) -> HTTPServer:
+    """The receiver without serve_forever, so a test can drive it on a free port. The config is loaded again on
+    every /changes (like a run loads its own), so a database added on the Settings page can be posted to at once;
+    `store` is the process's store, else one is opened from that config."""
+    from dbtriage import inbox
+    from dbtriage.cli import run_request
+    from dbtriage.config import load_config
+    from dbtriage.storage import open_storage
+
+    run = run or run_request
+    cfg_loader = cfg_loader or load_config
 
     class H(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
@@ -123,11 +143,31 @@ def serve(host: str, port: int, token: str | None):
                 return self._reply(401, {"error": "unauthorized"})
             try:
                 payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or b"{}"))
+                if urllib.parse.urlsplit(self.path).path.rstrip("/") == "/changes":
+                    return self._changes(payload)
                 req = parse_payload(payload)
             except (ValueError, json.JSONDecodeError) as exc:
                 return self._reply(400, {"error": str(exc)})
-            threading.Thread(target=run_request, args=(req,), daemon=True).start()
+            threading.Thread(target=run, args=(req,), daemon=True).start()
             self._reply(202, {"accepted": True, "target": req.target, "mode": req.mode, "source": req.source})
+
+        def _changes(self, payload):
+            """Record what a pipeline says it changed. Nothing is written until every item and target is good, so a
+            list is taken whole or not at all and the pipeline's log shows one reason."""
+            parsed = inbox.parse(payload)  # ValueError -> 400 in do_POST
+            cfg = cfg_loader()
+            unknown = sorted({t for t, _ in parsed if t not in cfg.targets})
+            if unknown:
+                return self._reply(404, {"error": f"unknown target {unknown[0]!r}; known: {', '.join(sorted(cfg.targets)) or '(none)'}"})
+            st = store if store is not None else open_storage(cfg.storage_url, Path(cfg.base_dir) / "spool")
+            recorded = []
+            for name in dict.fromkeys(t for t, _ in parsed):  # one write per target, in the order posted
+                try:
+                    items = inbox.record(st, cfg.targets[name], [it for t, it in parsed if t == name])
+                except inbox.InboxContended as exc:  # the pipeline can post again; what landed so far is reported
+                    return self._reply(503, {"error": str(exc), "recorded": recorded})
+                recorded += [{"target": name, **it} for it in items]
+            self._reply(202, {"accepted": True, "recorded": recorded})
 
         def do_GET(self):  # noqa: N802 - health check
             self._reply(200, {"ok": True})
@@ -143,5 +183,4 @@ def serve(host: str, port: int, token: str | None):
         def log_message(self, fmt, *args):
             print(f"serve: {self.address_string()} {fmt % args}")
 
-    print(f"dbtriage webhook receiver on http://{host}:{port}/ (POST JSON; GET = health)")
-    HTTPServer((host, port), H).serve_forever()
+    return HTTPServer((host, port), H)

@@ -16,7 +16,7 @@ Each snapshot is a prefix, `<engine>/<database>/<date>/<time>/`, holding `manife
 `compare.json`, `triage.json`, `triage.md`, any engine report (`awr.txt`) and the `chat/` threads. One object sits
 beside the days rather than under one of them: `<engine>/<database>/findings.json`, the ledger of the database's
 open findings (operations.md, "A finding's life"). It is written through the same store and spooled the same way,
-and it can be rebuilt from the stored reviews with `dbtriage rebuild-ledger`.
+and it can be rebuilt from the stored reviews with `dbtriage rebuild-ledger`. Beside it, `<engine>/<database>/changes-inbox.json` holds the deploys posted to `dbtriage serve`'s `/changes` route; it is append-only, and the store merges copies of it item by item rather than choosing between them, so an outage cannot lose a posted deploy.
 
 The ledger is the one object two processes may write at once, so every store offers a conditional write: the
 object is replaced only if it is still at the version the writer read, and refused otherwise. How each one does it:
