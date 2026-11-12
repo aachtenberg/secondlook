@@ -1,7 +1,7 @@
 """Snapshots taken on the database itself: the one thing dbtriage can write, and only when you ask for it.
 
 dbtriage only reads by default. Teams that want it to take the database's own snapshot before collecting (on Oracle,
-an AWR snapshot, so the review's window ends now instead of at the last hourly snapshot) turn on two switches, and
+an AWR or Statspack snapshot, so the review's window ends now instead of at the last hourly snapshot) turn on two switches, and
 both are needed:
 
     [collect]
@@ -14,9 +14,11 @@ The first is the owner of targets.toml saying dbtriage may write at all; the sec
 either off, nothing is ever written, and a database that asks for snapshots while writes are off gets a note in
 each snapshot saying why none was taken.
 
-Built in: oracle (AWR; needs diagnostics_pack and EXECUTE on DBMS_WORKLOAD_REPOSITORY, which reading the AWR
-report already needs). Other engines, or another method such as Statspack or pg_profile's take_sample(), plug in
-as a package entry point in the "dbtriage.db_snapshot" group, named after the engine:
+Built in: oracle, two ways. AWR when the target reads AWR (needs diagnostics_pack and EXECUTE on
+DBMS_WORKLOAD_REPOSITORY, which reading the AWR report already needs); Statspack (PERFSTAT.STATSPACK.SNAP at
+statspack_level, default 7; needs EXECUTE on PERFSTAT.STATSPACK) when oracle_source is statspack, or auto without
+the pack. Other engines, or another method such as pg_profile's take_sample(), plug in as a package entry point in
+the "dbtriage.db_snapshot" group, named after the engine (one named oracle replaces both built-in ways):
 
     [project.entry-points."dbtriage.db_snapshot"]
     postgres = "my_pkg.snap:take"
@@ -55,9 +57,12 @@ def writes_allowed(collect: dict | None) -> bool:
 
 
 def _oracle(target: Target, window: Window) -> str | None:
-    from dbtriage.collectors.oracle import take_awr_snapshot
+    """AWR or Statspack, whichever this target's collection reads (oracle_source; auto is AWR with the pack)."""
+    from dbtriage.collectors import oracle
 
-    return take_awr_snapshot(target, window)
+    if oracle.takes_statspack(target):
+        return oracle.take_statspack_snapshot(target, window)
+    return oracle.take_awr_snapshot(target, window)
 
 
 BUILTIN: dict[str, Taker] = {"oracle": _oracle}

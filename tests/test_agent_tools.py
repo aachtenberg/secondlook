@@ -467,3 +467,29 @@ def test_operator_answers_tool_is_bounded_newest_first(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_mod, "OPERATOR_ANSWERS_CHARS", 20)  # two 9-character results fit, a third does not
     out = json.loads(tool.call({"snapshot_id": sid}))
     assert [a["result"] for a in out["answers"]] == ["result 19", "result 18"] and out["omitted"].startswith("18 older")
+
+
+def test_a_baseline_read_from_another_kind_of_source_is_not_compared(tmp_path):
+    """An Oracle database whose source moved between Statspack (window figures) and the V$ views (running totals)
+    must not have one subtracted from the other: the review says why and reads the snapshot on its own."""
+    import pytest
+    from dbtriage import cli
+    from dbtriage.config import Config, Target
+
+    st = _store(tmp_path)
+    ids = st.list_snapshots("postgres", "demo")
+    cur = st.get_json(f"{ids[-1]}/summary.json")
+    st.put_json(f"{ids[-1]}/summary.json", dict(cur, metrics_kind="interval", oracle_source="statspack"))
+    with pytest.raises(cli.NotComparable) as exc:
+        cli.compare_ids(st, "postgres", "demo", ids[-1], ids[-2])
+    assert f"the baseline {ids[-2]} was read from cumulative (cumulative figures) and this snapshot from statspack (interval figures)" in str(exc.value)
+    cfg = Config(storage_url="x", targets={"demo": Target("demo", "postgres", "dsn")})
+    result, comparison = cli.triage(cfg, st, ids[-1], ids[-2], "adhoc", use_llm=False)
+    assert result["baseline"] is None and result["baseline_policy"] == "none" and result["baseline_reason"].startswith("Not compared: the baseline")
+    assert comparison is not None and comparison.get("reference") is None  # an interval snapshot is still read on its own window
+    assert st.get_json(f"{ids[-1]}/manifest.json")["baseline"]["snapshot"] is None
+    # the other direction: a running-totals snapshot after a window baseline has nothing it can form, and says why
+    st.put_json(f"{ids[-1]}/summary.json", cur)
+    st.put_json(f"{ids[-2]}/summary.json", dict(st.get_json(f"{ids[-2]}/summary.json"), metrics_kind="interval", oracle_source="statspack"))
+    result, comparison = cli.triage(cfg, st, ids[-1], ids[-2], "adhoc", use_llm=False)
+    assert comparison is None and result["summary"].startswith("Not compared: the baseline") and "statspack (interval figures)" in result["summary"]

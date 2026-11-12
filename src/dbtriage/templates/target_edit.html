@@ -27,6 +27,11 @@ $notice
 <div class="row" data-src="file github gitlab">$feed_test <span class="mut">reads the last 48 hours as set above; nothing is saved</span></div>
 $feed_result
 </fieldset>
+<fieldset class="chan"><legend>Where statements come from</legend>
+<label>SQL Server: top SQL <select name="top_sql_source">$top_sql_source_opts</select><small class="mut">Query Store keeps the window's statements even after the plan cache forgets them; it needs Query Store on for the database and VIEW DATABASE STATE.</small></label>
+<label>Oracle: source <select name="oracle_source">$oracle_source_opts</select><small class="mut">AWR needs the Diagnostics Pack; Statspack must be installed by the DBA (spcreate.sql) with SELECT on its tables granted; the V$ views need neither.</small></label>
+<label>Oracle: Statspack level for snapshots dbtriage takes <select name="statspack_level">$statspack_level_opts</select><small class="mut">Only used when dbtriage takes Statspack snapshots on incident runs; SQL needs level 5, plan hashes level 6.</small></label>
+</fieldset>
 <fieldset class="chan"><legend>Engine limits</legend>
 <label>Query timeout (ms) <input name="call_timeout_ms" type="number" min="1000" max="3600000" step="1000" value="$call_timeout_ms" placeholder="120000"><small class="mut">Oracle and SQL Server: the longest any single query may take.</small></label>
 <label>Connect timeout (s) <input name="connect_timeout_s" type="number" min="1" max="300" value="$connect_timeout_s" placeholder="10"><small class="mut">SQL Server: the longest the login may take.</small></label>

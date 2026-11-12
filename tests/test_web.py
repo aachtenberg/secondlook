@@ -955,7 +955,7 @@ def test_files_max_tokens_and_fallback_models_on_the_cards(tmp_path, monkeypatch
     app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
     base = {**DEFAULTS, **app.seed.web}
     s = app.settings_page().decode()
-    assert 'name="files" value="triage.md, compare.json, summary.json, manifest.json, raw.json, tools.json, changes.json, awr.txt, addm.txt"' in s
+    assert 'name="files" value="triage.md, compare.json, summary.json, manifest.json, raw.json, tools.json, changes.json, awr.txt, addm.txt, statspack.txt"' in s
     assert 'name="max_tokens" type="number" min="1" step="1000" value=""' in s and 'name="fallback_models" value=""' in s and "$files" not in s
     app.settings.put_web({"files": "triage.md, awr.txt"}, base=base); app.reload()
     assert app.web["files"] == ["triage.md", "awr.txt"] and app.snapshot_detail(SID)["files"] == ["triage.md", "awr.txt"]
@@ -1061,3 +1061,37 @@ def test_query_store_top_sql_counts_as_the_window_on_a_first_snapshot(tmp_path):
 
     assert _window_top_sql({"metrics_kind": "interval"}) and _window_top_sql({"top_sql_kind": "interval"})
     assert not _window_top_sql({}) and not _window_top_sql({"metrics_kind": "cumulative"})
+
+
+def test_statement_sources_are_on_the_target_form(tmp_path):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    form = app.target_form("demo").decode()
+    assert "<legend>Where statements come from</legend>" in form and "$top_sql_source_opts" not in form and "$oracle_source_opts" not in form
+    assert "<option value='auto' selected>Auto: Query Store when it is on, else the plan cache</option>" in form
+    assert "<option value='7' selected>7: and segment statistics</option>" in form  # blank is level 7
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["oracle"], "dsn": ["h/x"], "top_sql_source": ["query_store"],
+                                          "oracle_source": ["statspack"], "statspack_level": ["6"]})
+    assert app.save_target("demo", fields) == []
+    t = app.cfg.targets["demo"]
+    assert t.extra["top_sql_source"] == "query_store" and t.extra["oracle_source"] == "statspack" and t.extra["statspack_level"] == 6
+    form = app.target_form("demo").decode()
+    assert "<option value='statspack' selected>Statspack only</option>" in form and "<option value='6' selected>6: and SQL plans</option>" in form
+    for bad, msg in ((("oracle_source", "awr2"), "oracle_source: one of"), (("top_sql_source", "x"), "top_sql_source: one of"),
+                     (("statspack_level", "3"), "statspack_level: one of 0, 5, 6, 7, 10")):
+        assert any(p.startswith(msg) for p in app.save_target("demo", dict(fields, **dict([bad]))))
+    # auto and blank mean the defaults, so going back to them drops the fields from the overlay
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["oracle"], "dsn": ["h/x"], "top_sql_source": ["auto"], "oracle_source": ["auto"], "statspack_level": [""]})
+    assert app.save_target("demo", fields) == []
+    t = app.cfg.targets["demo"]
+    assert not t.extra.get("top_sql_source") and not t.extra.get("oracle_source") and t.extra.get("statspack_level") in (None, 7)
+
+
+def test_the_settings_page_lists_the_collectors_own_source_values():
+    """The settings module keeps its own copy so the page loads without a database driver; they must not drift."""
+    import pytest
+    from dbtriage import settings
+    from dbtriage.collectors import oracle
+
+    assert settings.ORACLE_SOURCES == oracle.SOURCES and settings.STATSPACK_LEVELS == oracle.STATSPACK_LEVELS
+    sqlserver = pytest.importorskip("dbtriage.collectors.sqlserver")
+    assert settings.TOP_SQL_SOURCES == sqlserver.TOP_SQL_SOURCES

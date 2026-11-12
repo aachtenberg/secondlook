@@ -118,6 +118,7 @@ of an environment variable, and the value is read from the process at run time.
 | `[targets.X]` | `top_n`, `diagnostics_pack`, `create_snapshot` | edit: Top N SQL, Diagnostics Pack, Snapshot on the database before collecting |
 | `[targets.X]` | `baseline_policy`, `baseline` | edit: Baseline policy, Pinned baseline snapshot (picked from the stored snapshots) |
 | `[targets.X]` | `band_weeks` | target edit page: Usual band, weeks of history |
+| `[targets.X]` | `top_sql_source`, `oracle_source`, `statspack_level` | target edit page › Where statements come from |
 | `[targets.X]` | `changes_file`, `[targets.X.changes]` (`source`, `path`, `repo`, `project`, `environment`, `token_env`, `base_url`, `releases`, `lookback_hours`, `correlate_minutes`) | edit › Change feed, with Test feed; a file feed with default numbers is saved as `changes_file` |
 | `[targets.X]` | `links`, `notes` | edit: Links, Notes for the reviewer |
 | `[targets.X]` | `schedule`, `schedule_window`, `schedule_paused` | Settings › Schedule card |

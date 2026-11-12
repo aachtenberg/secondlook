@@ -42,6 +42,7 @@ KNOWN = {
     "tools.json": "every tool call the model made, with its arguments and the first 2000 characters of each result",
     "changes.json": "the deploys and changes read from the target's feed for the window",
     "awr.txt": "Oracle AWR report (literals masked)",
+    "statspack.txt": "Oracle Statspack summary built by Second Look from the PERFSTAT tables (literals masked)",
     "addm.txt": "Oracle ADDM report (literals masked)",
 }
 OWN = ("README.md", "checksums.txt")  # written by build(), never read from the store

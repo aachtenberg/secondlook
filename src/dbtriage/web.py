@@ -66,12 +66,13 @@ from dbtriage.ledger import describe_period
 from dbtriage.storage import StorageUnavailable
 from dbtriage.settings import AGENT_FIELDS, AGENT_PROVIDERS, CHANNEL_FIELDS, ENGINES, SCHEDULE_FIELDS, SEVERITIES, WEB_FIELDS, Settings, mask_dsn, probe
 from dbtriage.settings import CHANGES_FIELDS, CHANGES_NUMBERS, SettingsUnavailable, agent_value, changes_value
+from dbtriage.settings import ORACLE_SOURCES, STATSPACK_LEVELS, TOP_SQL_SOURCES
 from dbtriage.storage import Storage, StorageUnavailable, describe as describe_store, key_ok
 
 DEFAULTS = {
     "title": "dbtriage", "brand": "dbtriage", "logo": None, "accent": "#3dd68c", "theme": "auto",
     "refresh_seconds": 30, "page_size": 50, "footer": "", "custom_css": None, "templates_dir": None,
-    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "changes.json", "awr.txt", "addm.txt"],
+    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "changes.json", "awr.txt", "addm.txt", "statspack.txt"],
     "severity_colors": {"high": "#c42f2f", "medium": "#a8540a", "low": "#8a6a00", "info": "#17804a"},
 }
 
@@ -1639,10 +1640,23 @@ class App:
                          feed_result=feed_result, lookback_default=changes.DEFAULT_LOOKBACK_HOURS, correlate_default=changes.DEFAULT_CORRELATE_MINUTES,
                          call_timeout_ms=num("call_timeout_ms"), connect_timeout_s=num("connect_timeout_s"), min_snapshot_age_min=num("min_snapshot_age_min"),
                          band_weeks=num("band_weeks"),
+                         top_sql_source_opts=self._choice_opts(TOP_SQL_SOURCES, v.get("top_sql_source") or "auto",
+                                                               {"auto": "Auto: Query Store when it is on, else the plan cache",
+                                                                "query_store": "Query Store only", "plan_cache": "Plan cache only"}),
+                         oracle_source_opts=self._choice_opts(ORACLE_SOURCES, v.get("oracle_source") or "auto",
+                                                              {"auto": "Auto: AWR with the pack, else Statspack, else V$",
+                                                               "awr": "AWR only", "statspack": "Statspack only", "vdollar": "V$ views only"}),
+                         statspack_level_opts=self._choice_opts([str(n) for n in STATSPACK_LEVELS], str(v.get("statspack_level") or 7),
+                                                                {"0": "0: basic statistics", "5": "5: and SQL", "6": "6: and SQL plans",
+                                                                 "7": "7: and segment statistics", "10": "10: and parent and child latches"}),
                          mask_report_literals="" if v.get("mask_report_literals") is False else "checked",
                          links=html.escape(links), notes=html.escape(v.get("notes") or ""), buttons=buttons,
                          baseline_opts="".join(f"<option value='{p}'{' selected' if (v.get('baseline_policy') or 'previous') == p else ''}>{LABELS[p]}</option>" for p in POLICIES),
                          baseline_snapshot_opts=self._baseline_snapshot_opts(v.get("engine"), name, v.get("baseline") or ""))
+
+    @staticmethod
+    def _choice_opts(values, current: str, labels: dict[str, str]) -> str:
+        return "".join(f"<option value='{html.escape(c)}'{' selected' if c == current else ''}>{html.escape(labels.get(c, c))}</option>" for c in values)
 
     def _baseline_snapshot_opts(self, engine: str | None, name: str | None, current: str, limit: int = 60) -> str:
         """The stored snapshots a pinned baseline can be chosen from, newest first, the current pin kept even when
@@ -1733,7 +1747,8 @@ class App:
                            "changes_file": changes_file, "changes": feed, "links": links, "notes": g("notes"),
                            "baseline_policy": g("baseline_policy") if g("baseline_policy") != "previous" else "", "baseline": g("baseline"),
                            "call_timeout_ms": g("call_timeout_ms"), "connect_timeout_s": g("connect_timeout_s"), "min_snapshot_age_min": g("min_snapshot_age_min"),
-                           "band_weeks": g("band_weeks"), "mask_report_literals": "mask_report_literals" in form}
+                           "band_weeks": g("band_weeks"), "mask_report_literals": "mask_report_literals" in form,
+                           "top_sql_source": g("top_sql_source"), "oracle_source": g("oracle_source"), "statspack_level": g("statspack_level")}
 
     def save_target(self, name: str, fields: dict, keep_secrets: bool = True) -> list[str]:
         """Blank dsn/password on an edit means 'keep what is stored'."""

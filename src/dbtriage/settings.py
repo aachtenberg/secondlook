@@ -34,7 +34,13 @@ from dbtriage.llm import DEFAULT_TOKEN_BUDGET, scheduled_problem
 
 TARGET_FIELDS = ("engine", "dsn", "dsn_env", "top_n", "diagnostics_pack", "changes_file", "changes", "create_snapshot", "user", "password", "links", "notes",
                  "baseline_policy", "baseline", "schedule", "schedule_window", "schedule_paused",
-                 "call_timeout_ms", "connect_timeout_s", "min_snapshot_age_min", "mask_report_literals", "band_weeks")
+                 "call_timeout_ms", "connect_timeout_s", "min_snapshot_age_min", "mask_report_literals", "band_weeks",
+                 "top_sql_source", "oracle_source", "statspack_level")
+# where an engine's statements come from; these mirror the collectors' own tuples (collectors.sqlserver.TOP_SQL_SOURCES,
+# collectors.oracle.SOURCES and STATSPACK_LEVELS), kept here so the settings page needs no database driver to load
+TOP_SQL_SOURCES = ("auto", "query_store", "plan_cache")
+ORACLE_SOURCES = ("auto", "awr", "statspack", "vdollar")
+STATSPACK_LEVELS = (0, 5, 6, 7, 10)
 SCHEDULE_FIELDS = ("schedule", "schedule_window", "schedule_paused")
 # per-target numbers the edit page offers: (blank-means default, smallest, largest a save accepts, unit)
 TARGET_NUMBERS = {"top_n": (25, 0, 10_000, ""), "schedule_window": (60, 5, 1440, "minutes"), "call_timeout_ms": (None, 1000, 3_600_000, "ms"),
@@ -289,6 +295,17 @@ class Settings:
             problems.append(str(exc))
         if fields.get("baseline_policy") and fields["baseline_policy"] not in POLICIES:
             problems.append(f"baseline_policy: one of {', '.join(POLICIES)}")
+        if fields.get("top_sql_source") and fields["top_sql_source"] not in TOP_SQL_SOURCES:
+            problems.append(f"top_sql_source: one of {', '.join(TOP_SQL_SOURCES)}")
+        if fields.get("oracle_source") and fields["oracle_source"] not in ORACLE_SOURCES:
+            problems.append(f"oracle_source: one of {', '.join(ORACLE_SOURCES)}")
+        if fields.get("statspack_level") not in (None, ""):
+            try:
+                ok = int(fields["statspack_level"]) in STATSPACK_LEVELS
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                problems.append(f"statspack_level: one of {', '.join(map(str, STATSPACK_LEVELS))}")
         for l in fields.get("links") or []:
             if not re.match(r"^https?://", l.get("url", "")):
                 problems.append(f"link {l.get('label')!r}: url must start with http(s)://")
@@ -620,6 +637,13 @@ def _target_value(key: str, v):
         return int(v) if v not in (None, "") else TARGET_NUMBERS[key][0]
     if key == "mask_report_literals":  # on unless switched off: False must be stored even where the file is silent
         return True if v in (None, "") else bool(v)
+    if key in ("top_sql_source", "oracle_source"):  # auto is the default, so it is stored as nothing
+        return "" if v in (None, "", "auto") else str(v)
+    if key == "statspack_level":  # blank is the default, level 7
+        try:
+            return 7 if v in (None, "") else int(v)
+        except (TypeError, ValueError):
+            return v
     if key == "changes":
         return changes_value(v)
     if key == "schedule":

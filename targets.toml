@@ -23,7 +23,7 @@ page_size = 50
 footer = "dbtriage lab · advisory only"
 custom_css = "examples/branding/theme.css"        # optional, appended after the built-in CSS
 # templates_dir = "branding/templates"   # optional: replace page templates; copy them from src/dbtriage/templates first
-files = ["triage.md", "compare.json", "summary.json", "manifest.json", "tools.json", "awr.txt", "addm.txt"]   # exposed stored files; "*" = all
+files = ["triage.md", "compare.json", "summary.json", "manifest.json", "tools.json", "awr.txt", "addm.txt", "statspack.txt"]   # exposed stored files; "*" = all
 [web.severity_colors]
 high = "#d73a49"
 medium = "#e36209"
