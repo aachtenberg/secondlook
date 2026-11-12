@@ -7,7 +7,9 @@ evidence. It never touches a live database: there is no tool for that, and there
 be one here. A thread is context for itself only; nothing from it feeds the next review.
 
 Threads live next to the snapshot as chat/<key>.json, where key is "finding-<n>" (1-based,
-the order of the review), "sql-<sql id>" (one statement of the window's top SQL) or "review". A backend only takes one task string, so earlier
+the order of the review), "sql-<sql id>" (one statement of the window's top SQL), "review", or "target" (the database
+as a whole: the latest snapshot plus the ledger of open findings and the change feed, which the database page's Ask
+dock uses). A backend only takes one task string, so earlier
 turns are replayed as a transcript inside the task; tool calls from earlier turns are not
 replayed, only their answers.
 """

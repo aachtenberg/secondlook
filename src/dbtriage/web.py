@@ -27,7 +27,7 @@ API (same auth):
   GET  /api/schedule                        per-target schedule, next and last run
   POST /api/schedule/<name>                 {"schedule": "0 * * * *" | "every 15m", "schedule_window": 60, "schedule_paused": false}  (needs --allow-edit)
   POST /api/schedule/<name>/run             collect and review now with the scheduled window  (needs --allow-run)
-  GET  /api/snapshots/<id>/chat/<key>       discussion thread; key = review | finding-<n> | sql-<sql id>
+  GET  /api/snapshots/<id>/chat/<key>       discussion thread; key = review | target | finding-<n> | sql-<sql id>
   POST /api/snapshots/<id>/chat/<key>       {"question"} -> the model's answer, grounded in the stored snapshot  (needs --allow-chat)
   GET  /health
 
