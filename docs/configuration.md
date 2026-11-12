@@ -217,7 +217,7 @@ A specific snapshot id given with `--baseline` always wins. If a policy finds no
 pinned snapshot was deleted), dbtriage falls back to `previous` and says so: on the snapshot page, in the
 review's footer, and in the stored `manifest.json` and `compare.json`.
 
-### The usual band
+### The usual band `band_weeks` is on the database's edit page too.
 
 One baseline is one moment, and that moment can itself be odd: last Monday's batch did not run, or ran twice.
 Once a database has a few weeks of snapshots, each review also compares its interval with the spread of the same

@@ -10,6 +10,7 @@ $notice
 <label>Top N SQL <input name="top_n" type="number" min="5" max="200" value="$top_n"></label>
 <label><input type="checkbox" name="diagnostics_pack" $diagnostics_pack> Oracle Diagnostics Pack licensed (AWR/ASH/ADDM)</label>
 <label>Snapshot on the database before collecting <select name="create_snapshot">$snapshot_opts</select><small class="mut">Oracle: an AWR snapshot (Diagnostics Pack); other engines with a plugin. $snapshot_note</small></label>
+<label>Usual band, weeks of history <input name="band_weeks" type="number" min="0" max="52" value="$band_weeks" placeholder="6"><small class="mut">The review also compares each interval with the same clock hour over this many past weeks and says whether it sits inside the usual band; 0 turns it off, blank = 6.</small></label>
 <label>Baseline policy <select name="baseline_policy">$baseline_opts</select></label>
 <label>Pinned baseline snapshot <select name="baseline">$baseline_snapshot_opts</select><small class="mut">Used by the <i>pinned</i> policy; the stored snapshots of this database, newest first.</small></label>
 <fieldset class="chan" id="feed"><legend>Change feed</legend>
