@@ -18,6 +18,27 @@ beside the days rather than under one of them: `<engine>/<database>/findings.jso
 open findings (operations.md, "A finding's life"). It is written through the same store and spooled the same way,
 and it can be rebuilt from the stored reviews with `dbtriage rebuild-ledger`.
 
+The ledger is the one object two processes may write at once, so every store offers a conditional write: the
+object is replaced only if it is still at the version the writer read, and refused otherwise. How each one does it:
+
+- `file://`: an exclusive `flock` on `.findings.json.lock` beside the file around the read, compare (content
+  hash) and write; works on an NFS or SMB mount that honours locks. Windows has no `flock`: there the write is
+  read-compare-write, said once on stderr, so run one dbtriage process per store on Windows.
+- `s3://`: `PutObject` with `If-Match: <ETag>` (`If-None-Match: *` to create); a 412 is the refusal. AWS S3,
+  MinIO, Ceph RGW and versitygw honour it. An endpoint that answers `NotImplemented` gets a read-compare-write
+  for the rest of the process, noted once on stderr.
+- `az://`: `upload_blob` with the blob's ETag as the If-Match condition (If-None-Match to create); a 412 or 409
+  is the refusal.
+- `postgres://`: a `version` column on `dbtriage_objects` (added to an existing table on the first connect by a
+  role that owns it; a role with only SELECT, INSERT and UPDATE works once that has happened), and the write is
+  one `UPDATE ... WHERE key = ... AND version = ...` (or `INSERT ... ON CONFLICT DO NOTHING`); no row touched
+  is the refusal.
+
+The guarantee holds once every process writing the store runs this version: an older dbtriage writes the ledger with a plain put that does not move the Postgres `version`, so during a rolling upgrade a new process can overwrite that save. The spool replays the ledger with the same compare-and-set, under the database's lock, and drops its copy when the store's is at least as new.
+
+During an outage the write goes to the spool unconditionally; the ledger's generation decides whether the replay
+is applied or dropped ("When the store is down").
+
 Buckets, containers and tables are created on the first write. In Postgres everything sits in one table,
 `dbtriage_objects`; JSON goes into a `jsonb` column, so you can query snapshots with plain SQL. Extra connection
 settings such as `sslmode=require` can be added to the URL.

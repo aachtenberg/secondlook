@@ -192,12 +192,16 @@ One run's new findings share one Jira or Plane issue. When one of them clears wh
 still open, the comment says so instead of "cleared".
 
 Runs of one database take turns within a process (the web view and the scheduler refuse a second run; `dbtriage
-serve` queues it). The ledger file carries a generation: a save goes ahead only when nobody saved in between, and
-is redone on the new state if someone did; a copy that lost the race is never written. The outage spool replays
-the ledger under the same per-database lock and drops its copy when the store already holds a newer generation,
-so coming out of an outage cannot put an older ledger over a fresh run. Two separate processes writing one
-database's ledger at the same instant can still race (no store has a conditional put), so run one scheduler per
-store; `dbtriage rebuild-ledger` repairs the file from the stored reviews.
+serve` queues it). Across processes the save is a compare-and-set: the ledger's version is read before the run
+works on it, and the store writes the new copy only if that version is still the current one, refusing it
+otherwise, so the run is redone on the new state and a copy that lost the race is never written. The compare and
+the write are one step on every store: a file lock on disk (also on an NFS or SMB mount that supports locking), the
+object's ETag with `If-Match` on S3-compatible stores and Azure Blob, a versioned row in Postgres (storage.md). So a
+web view with `--schedule` and a `dbtriage serve` webhook receiver may share one store and one database; an
+S3-compatible endpoint that does not implement `If-Match` is the one case where the check falls back to read, compare
+and write, said once in the log. The outage spool replays the ledger under the per-database lock and drops its copy
+when the store already holds a newer generation, so coming out of an outage cannot put an older ledger over a fresh
+run; `dbtriage rebuild-ledger` repairs the file from the stored reviews.
 
 The ledger is derived data. It is written through the same store as the snapshots, so an outage spools it like
 any other file, and `dbtriage rebuild-ledger -t <db>` recomputes it from the stored `triage.json` and

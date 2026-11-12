@@ -175,8 +175,11 @@ def test_triaging_the_same_snapshot_again_does_not_count_as_another_run(tmp_path
     assert "life" not in result
 
 
-def test_a_save_that_lost_the_race_is_applied_again(tmp_path, monkeypatch):
-    """Two writers on one ledger: the second sees the generation moved and redoes its work on the new state."""
+def test_a_save_that_lost_the_race_is_applied_again(tmp_path, monkeypatch, capsys):
+    """Two writers on one ledger: the store refuses the second's save (its version moved) and it redoes its work
+    on the new state."""
+    from dbtriage.storage import Conflict
+
     st = LocalStorage(tmp_path)
     run(st, 0, [rule("plan_change")])
     real_load, raced = ledger.load, {"done": False}
@@ -190,12 +193,26 @@ def test_a_save_that_lost_the_race_is_applied_again(tmp_path, monkeypatch):
         return led
 
     monkeypatch.setattr(ledger, "load", load_then_rival_writes)
+    saves, real_put_if = [], st.put_if
+
+    def put_if_noting_the_outcome(k, d, e):
+        try:
+            real_put_if(k, d, e)
+        except Conflict:
+            saves.append((e, "refused")); raise
+        saves.append((e, "written"))
+
+    monkeypatch.setattr(st, "put_if", put_if_noting_the_outcome)
     out = run(st, 1, [rule("plan_change"), rule("deadlocks", None)])
     monkeypatch.setattr(ledger, "load", real_load)
     led = ledger.load(st, ENGINE, TARGET)
     by = {e["kind"]: e for e in led["entries"]}
     assert by["plan_change"]["tickets"]["jira"]["key"] == "DBA-3" and by["deadlocks"]["state"] == "new"  # both writers' work kept
     assert out["life"][0]["tickets"]["jira"]["key"] == "DBA-3" and led["generation"] == 3
+    assert "the store refused the save" in capsys.readouterr().err
+    # the rival wrote at the version we both read; our save at that version was refused; the retry carried the rival's
+    assert [o for _, o in saves] == ["written", "refused", "written"]
+    assert saves[0][0] == saves[1][0] != saves[2][0]
 
 
 def test_runs_of_one_target_take_turns():
@@ -204,7 +221,12 @@ def test_runs_of_one_target_take_turns():
     assert target_lock("pg") is target_lock("pg") and target_lock("pg") is not target_lock("ora")
 
 
-def test_a_copy_that_lost_every_race_is_never_written(tmp_path, monkeypatch):
+def test_a_copy_that_lost_every_race_is_never_written(tmp_path, monkeypatch, capsys):
+    """Every attempt's save is refused by the store because a rival wrote first: the loser gives up without a write."""
+    import pytest
+
+    from dbtriage.storage import Conflict
+
     st = LocalStorage(tmp_path)
     run(st, 0, [rule("plan_change")])
     real_load = ledger.load
@@ -217,12 +239,86 @@ def test_a_copy_that_lost_every_race_is_never_written(tmp_path, monkeypatch):
         return led
 
     monkeypatch.setattr(ledger, "load", load_then_rival_always_writes)
-    import pytest
+    outcomes, real_put_if = [], st.put_if
+
+    def put_if_and_note(k, d, e):
+        try:
+            real_put_if(k, d, e)
+        except Conflict:
+            outcomes.append("refused"); raise
+        outcomes.append("written")
+
+    monkeypatch.setattr(st, "put_if", put_if_and_note)
     with pytest.raises(ledger.LedgerContended):
         run(st, 1, [rule("deadlocks", None)])
     monkeypatch.setattr(ledger, "load", real_load)
     led = ledger.load(st, ENGINE, TARGET)
+    assert outcomes == ["written", "refused"] * 3 and capsys.readouterr().err.count("the store refused the save") == 3  # rival, us
     assert led["entries"][0]["title"] == "rival" and [e["kind"] for e in led["entries"]] == ["plan_change"]  # the winner's file, untouched
+
+
+def test_two_processes_updating_one_ledger_at_once_lose_nothing(tmp_path, monkeypatch):
+    """Two writers that both loaded the empty ledger: the first save creates the file, the second is refused by the
+    store (the file is there now) and applied again on top of the first. Before the conditional write the second
+    simply overwrote the first's run."""
+    import threading
+
+    st = LocalStorage(tmp_path)
+    both_loaded, first_saved, real_load = threading.Barrier(2), threading.Event(), ledger.load
+    loaded_once = set()
+
+    def load_then_wait_for_the_other(store, engine, target):
+        led = real_load(store, engine, target)
+        me = threading.current_thread().name
+        if me not in loaded_once:  # the first pass: both hold a ledger before either saves
+            loaded_once.add(me)
+            both_loaded.wait(5)
+            if me == "second":
+                first_saved.wait(5)
+        return led
+
+    monkeypatch.setattr(ledger, "load", load_then_wait_for_the_other)
+    outs = {}
+
+    def first():
+        outs["first"] = run(st, 0, [rule("plan_change")])
+        first_saved.set()
+
+    def second():
+        outs["second"] = run(st, 1, [rule("deadlocks", None)])
+
+    threads = [threading.Thread(target=first, name="first"), threading.Thread(target=second, name="second")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    monkeypatch.setattr(ledger, "load", real_load)
+    led = ledger.load(st, ENGINE, TARGET)
+    assert sorted(e["kind"] for e in led["entries"]) == ["deadlocks", "plan_change"] and led["generation"] == 2
+    assert outs["first"]["life"][0]["state"] == "new" and outs["second"]["life"][0]["state"] == "new"
+    assert [e["kind"] for e in outs["second"]["still_open"]] == ["plan_change"]  # the second run was applied on top of the first
+
+
+def test_many_threads_committing_at_once_all_land(tmp_path):
+    """Unscripted: eight threads commit to one ledger as fast as they can; every one's mark is in the final file."""
+    import threading
+
+    st = LocalStorage(tmp_path)
+    n = 8
+
+    def worker(i):
+        def mutate(led):
+            led["entries"].append({"kind": "mark", "subject": str(i)})
+            return True
+        ledger.commit(st, ENGINE, TARGET, mutate, attempts=10 * n)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    led = ledger.load(st, ENGINE, TARGET)
+    assert sorted(int(e["subject"]) for e in led["entries"]) == list(range(n)) and led["generation"] == n
 
 
 def test_declined_updates_do_not_write(tmp_path):
@@ -386,6 +482,9 @@ def test_ledger_writes_go_through_the_spool_during_an_outage(tmp_path, capsys):
     class WriteFails(Flaky):
         """The store answers reads but refuses writes (a bucket gone read-only, a replica)."""
         def put(self, key, data):
+            raise ConnectionError("store is down")
+
+        def put_if(self, key, data, expected):
             raise ConnectionError("store is down")
 
     ResilientStorage.RETRY_S = 0.0
@@ -710,3 +809,31 @@ def test_snapshot_page_shows_the_life_and_renders_legacy_reviews_without_one(tmp
     assert "<h3 id='still-h'>Still open (1 not among the findings above)</h3>" in page and "<code class='where'>sql_regressed q2</code><span>q2 slower</span>" in page
     assert "not seen in the last 1 run</span>" in page and "<p class='cleared'>Cleared: <code class='where'>deadlocks</code>" in page
     assert "style=" not in page.split("<ol class='flist'>")[1].split("</section>")[0]  # themed by class, never inline
+
+
+def test_spool_replay_of_the_ledger_is_a_compare_and_set(tmp_path):
+    """A rival's save between the replay's version read and its put is refused: the copy waits when it is the newer
+    one, and is dropped when the store's is at least as new."""
+    from dbtriage.storage import Conflict
+
+    class Contended(LocalStorage):
+        conflicts = 0
+
+        def put_if(self, key, data, expected):
+            if self.conflicts:
+                self.conflicts -= 1
+                raise Conflict(key)
+            super().put_if(key, data, expected)
+
+    primary = Contended(tmp_path / "primary")
+    st = ResilientStorage(primary, LocalStorage(tmp_path / "spool"))
+    k = ledger.key(ENGINE, TARGET)
+    primary.put_json(k, {"entries": [{"kind": "store"}], "tombstones": [], "updated": sid(0), "prior": None, "generation": 3})
+    st.spool.put_json(k, {"entries": [{"kind": "spooled"}], "tombstones": [], "updated": sid(1), "prior": None, "generation": 5})
+    primary.conflicts = 1
+    assert st.flush() == (0, 1) and st.spool.exists(k)  # refused, and the spooled copy is the newer one: it waits
+    assert st.flush() == (1, 0) and primary.get_json(k)["generation"] == 5  # next flush, no rival: pushed
+    primary.put_json(k, {"entries": [{"kind": "store"}], "tombstones": [], "updated": sid(3), "prior": None, "generation": 9})
+    st.spool.put_json(k, {"entries": [{"kind": "spooled"}], "tombstones": [], "updated": sid(2), "prior": None, "generation": 7})
+    primary.conflicts = 1
+    assert st.flush() == (1, 0) and not st.spool.exists(k) and primary.get_json(k)["generation"] == 9  # refused and overtaken: dropped

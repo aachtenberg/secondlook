@@ -5,12 +5,19 @@ A snapshot id is the directory part: "postgres/demo/2026-11-05/20261105T101500Z"
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from urllib.parse import urlparse
+
+
+class Conflict(RuntimeError):
+    """A conditional write found the object at another version than the caller read (or present when it had to be
+    absent, absent when it had to be present). Nothing was written."""
 
 
 class Storage(ABC):
@@ -26,9 +33,29 @@ class Storage(ABC):
     @abstractmethod
     def list_keys(self, prefix: str) -> list[str]: ...
 
+    # --- conditional write: the ledger's compare-and-set. Each backend overrides both with its own atomic form ---
+    def version_of(self, key: str) -> str | None:
+        """An opaque token for the object's current version, None when it does not exist. Only equality means
+        anything, and only against the same store. Default: a hash of the content."""
+        try:
+            return hashlib.sha256(self.get(key)).hexdigest()
+        except FileNotFoundError:
+            return None
+
+    def put_if(self, key: str, data: bytes, expected: str | None) -> None:
+        """Write `data` only while the object is still at version `expected` (None: it must not exist yet); raise
+        Conflict otherwise. This default is read, compare, write and is NOT atomic: it narrows the race but another
+        writer can still land between the compare and the put. Every shipped backend overrides it."""
+        if self.version_of(key) != expected:
+            raise Conflict(key)
+        self.put(key, data)
+
     # --- helpers shared by both backends ---
     def put_json(self, key: str, obj) -> None:
         self.put(key, json.dumps(obj, indent=1, sort_keys=True, default=str).encode())
+
+    def put_json_if(self, key: str, obj, expected: str | None) -> None:
+        self.put_if(key, json.dumps(obj, indent=1, sort_keys=True, default=str).encode(), expected)
 
     def get_json(self, key: str):
         return json.loads(self.get(key))
@@ -93,6 +120,9 @@ def key_ok(key: str, prefix: bool = False) -> bool:
 
 
 
+_NO_FLOCK_NOTED = False  # the fcntl-less fallback is said once per process
+
+
 class LocalStorage(Storage):
     def __init__(self, root: str | os.PathLike):
         self.root = Path(root)
@@ -112,6 +142,49 @@ class LocalStorage(Storage):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
 
+    @staticmethod
+    def _hash(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def version_of(self, key: str) -> str | None:
+        """A hash of the content rather than mtime and size: the file may live on NFS or SMB, where the clock is
+        coarse and not ours, and two saves within one tick must not look like one."""
+        try:
+            return self._hash(self._p(key).read_bytes())
+        except FileNotFoundError:
+            return None
+
+    def put_if(self, key: str, data: bytes, expected: str | None) -> None:
+        """Read, compare and write under an exclusive flock on `.<name>.lock` beside the file, so two processes on one
+        disk (or one NFS mount with locking) take turns. The lock file stays: removing it would let a third writer
+        lock a new inode while the second still holds the old one. Without fcntl (Windows) this is the base-class
+        read-compare-write."""
+        if not key_ok(key):
+            raise ValueError(f"not a valid storage key: {key!r}")
+        p = self._p(key)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+        except ImportError:
+            global _NO_FLOCK_NOTED
+            if not _NO_FLOCK_NOTED:
+                _NO_FLOCK_NOTED = True
+                print("file store: no fcntl on this platform; the ledger write is read-compare-write, not locked. "
+                      "Run one dbtriage process per store here.", file=sys.stderr)
+            return super().put_if(key, data, expected)
+        with open(p.with_name(f".{p.name}.lock"), "a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                try:
+                    current = self._hash(p.read_bytes())
+                except FileNotFoundError:
+                    current = None
+                if current != expected:
+                    raise Conflict(key)
+                p.write_bytes(data)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
     def get(self, key: str) -> bytes:
         return self._p(key).read_bytes()
 
@@ -128,7 +201,8 @@ class LocalStorage(Storage):
             return []
         if not base.exists():
             return []
-        keys = (p.relative_to(self.root).as_posix() for p in base.rglob("*") if p.is_file())  # '/' on Windows too
+        files = (p for p in base.rglob("*") if p.is_file() and not (p.name.startswith(".") and p.name.endswith(".lock")))
+        keys = (p.relative_to(self.root).as_posix() for p in files)  # '/' on Windows too; put_if's lock files are not objects
         return sorted(k for k in keys if key_ok(k))  # only what get() will read: a stray file never breaks a listing
 
 
@@ -173,12 +247,51 @@ class S3Storage(Storage):
             s3.create_bucket(Bucket=self.bucket)
             s3.put_object(Bucket=self.bucket, Key=self._k(key), Body=data)
 
+    _MISSING = ("NoSuchKey", "404", "NotFound")
+    _conditional = True  # cleared for the process when the endpoint says it does not implement If-Match
+
+    def version_of(self, key: str) -> str | None:
+        s3 = self._client()
+        try:
+            return s3.head_object(Bucket=self.bucket, Key=self._k(key))["ETag"]
+        except s3.exceptions.ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in self._MISSING + ("NoSuchBucket",):
+                return None
+            raise
+
+    def put_if(self, key: str, data: bytes, expected: str | None) -> None:
+        """`If-Match: <etag>` (`If-None-Match: *` to create) on the put; S3, MinIO, Ceph and versitygw answer 412
+        PreconditionFailed, or 409 ConditionalRequestConflict while another conditional put is in flight, when the
+        object moved. An endpoint that answers NotImplemented to the header gets the read-compare-write fallback for
+        the rest of the process, said once on stderr."""
+        if not S3Storage._conditional:
+            return super().put_if(key, data, expected)
+        s3 = self._client()
+        cond = {"IfNoneMatch": "*"} if expected is None else {"IfMatch": expected}
+        for attempt in (1, 2):
+            try:
+                s3.put_object(Bucket=self.bucket, Key=self._k(key), Body=data, **cond)
+                return
+            except s3.exceptions.ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code")
+                if code in ("PreconditionFailed", "ConditionalRequestConflict"):
+                    raise Conflict(key) from None
+                if code == "NoSuchBucket" and expected is None and attempt == 1:
+                    s3.create_bucket(Bucket=self.bucket)
+                    continue
+                if code in ("NotImplemented", "XNotImplemented"):
+                    S3Storage._conditional = False
+                    print(f"storage: s3://{self.bucket} does not implement conditional puts; ledger saves fall back to read-compare-write",
+                          file=sys.stderr)
+                    return super().put_if(key, data, expected)
+                raise
+
     def get(self, key: str) -> bytes:
         s3 = self._client()
         try:
             return s3.get_object(Bucket=self.bucket, Key=self._k(key))["Body"].read()
         except s3.exceptions.ClientError as exc:  # a missing key is FileNotFoundError, as in every other store
-            if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404", "NotFound"):
+            if exc.response.get("Error", {}).get("Code") in self._MISSING:
                 raise FileNotFoundError(key) from None
             raise
 
@@ -246,6 +359,34 @@ class AzureBlobStorage(Storage):
             self.container.create_container()
             self.container.upload_blob(self._k(key), data, overwrite=True)
 
+    def version_of(self, key: str) -> str | None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            return self.container.get_blob_client(self._k(key)).get_blob_properties().etag
+        except ResourceNotFoundError:
+            return None
+
+    def put_if(self, key: str, data: bytes, expected: str | None) -> None:
+        """The blob's ETag as the If-Match condition (IfMissing to create); the service answers 412 ResourceModifiedError
+        or 409 ResourceExistsError when it moved. A missing container is created only for a create: with an expected
+        version the blob we expect is not there, which is a Conflict."""
+        from azure.core import MatchConditions
+        from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
+
+        cond = ({"match_condition": MatchConditions.IfMissing} if expected is None
+                else {"etag": expected, "match_condition": MatchConditions.IfNotModified})
+        for attempt in (1, 2):
+            try:
+                self.container.upload_blob(self._k(key), data, overwrite=True, **cond)
+                return
+            except (ResourceModifiedError, ResourceExistsError):
+                raise Conflict(key) from None
+            except ResourceNotFoundError:
+                if expected is not None or attempt == 2:
+                    raise Conflict(key) from None
+                self.container.create_container()
+
     def get(self, key: str) -> bytes:
         from azure.core.exceptions import ResourceNotFoundError
 
@@ -297,6 +438,12 @@ class PostgresStorage(Storage):
         self.client = PgClient(url, [
             f"CREATE TABLE IF NOT EXISTS {self.TABLE} (key text COLLATE \"C\" PRIMARY KEY, doc jsonb, data bytea,"
             " updated_at timestamptz NOT NULL DEFAULT now(), CHECK ((doc IS NULL) <> (data IS NULL)))",
+            # the row's version for the conditional write; added to tables created before it existed. Checked first,
+            # because ALTER needs the table's owner even when the column is already there, and a store role with
+            # only SELECT/INSERT/UPDATE must keep working once the owner has run this once.
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()"
+            f" AND table_name = '{self.TABLE}' AND column_name = 'version') THEN"
+            f" ALTER TABLE {self.TABLE} ADD COLUMN version bigint NOT NULL DEFAULT 1; END IF; END $$",
         ])
         self.where = self.client.where
 
@@ -308,7 +455,9 @@ class PostgresStorage(Storage):
                 raise StorageUnavailable(f"postgres store {self.where}: {type(exc).__name__}") from exc
             raise
 
-    def put(self, key: str, data: bytes) -> None:
+    @staticmethod
+    def _columns(key: str, data: bytes) -> tuple[str | None, bytes | None]:
+        """(doc, data): JSON goes into jsonb when it can, everything else into bytea."""
         doc = None
         if key.endswith(".json"):
             try:
@@ -317,9 +466,31 @@ class PostgresStorage(Storage):
                     doc = None
             except (ValueError, UnicodeDecodeError):
                 doc = None
-        self._run(f"INSERT INTO {self.TABLE} (key, doc, data) VALUES (%s, %s::jsonb, %s) "
-                  "ON CONFLICT (key) DO UPDATE SET doc = EXCLUDED.doc, data = EXCLUDED.data, updated_at = now()",
-                  (key, doc, None if doc is not None else data))
+        return doc, None if doc is not None else data
+
+    def put(self, key: str, data: bytes) -> None:
+        doc, raw = self._columns(key, data)
+        self._run(f"INSERT INTO {self.TABLE} (key, doc, data) VALUES (%s, %s::jsonb, %s) ON CONFLICT (key) DO UPDATE "
+                  f"SET doc = EXCLUDED.doc, data = EXCLUDED.data, updated_at = now(), version = {self.TABLE}.version + 1",
+                  (key, doc, raw))
+
+    def version_of(self, key: str) -> str | None:
+        row = self._run(f"SELECT version FROM {self.TABLE} WHERE key = %s", (key,), "one")
+        return None if row is None else str(row[0])
+
+    def put_if(self, key: str, data: bytes, expected: str | None) -> None:
+        """One statement does the compare and the write: an UPDATE keyed on (key, version), or an INSERT that does
+        nothing on a conflict; no row back is the Conflict. Rows are never deleted, so a key never sees one version
+        twice."""
+        doc, raw = self._columns(key, data)
+        if expected is None:
+            row = self._run(f"INSERT INTO {self.TABLE} (key, doc, data) VALUES (%s, %s::jsonb, %s) ON CONFLICT (key) DO NOTHING RETURNING 1",
+                            (key, doc, raw), "one")
+        else:
+            row = self._run(f"UPDATE {self.TABLE} SET doc = %s::jsonb, data = %s, updated_at = now(), version = version + 1 "
+                            "WHERE key = %s AND version = %s RETURNING 1", (doc, raw, key, int(expected)), "one")
+        if row is None:
+            raise Conflict(key)
 
     def get(self, key: str) -> bytes:
         row = self._run(f"SELECT doc::text, data FROM {self.TABLE} WHERE key = %s", (key,), "one")
@@ -403,6 +574,26 @@ class ResilientStorage(Storage):
             self.spool.put(key, data)
             return
         if self.spool.exists(key):  # an older spooled copy must not overwrite this one later
+            self.spool._p(key).unlink(missing_ok=True)
+        self.flush()
+
+    def version_of(self, key: str) -> str | None:
+        """The store's version; None while it is unreachable, so the write that follows is spooled like a create."""
+        try:
+            return self._call(self.primary.version_of, key)
+        except StorageUnavailable:
+            return None
+
+    def put_if(self, key: str, data: bytes, expected: str | None) -> None:
+        """The store's conditional write; a Conflict comes straight through. When the store is down the object goes to
+        the spool like any put: a spooled write cannot be conditional, and its replay is governed instead by the
+        ledger's generation (`_push_ledger` drops a copy the store has since overtaken) under the database's lock."""
+        try:
+            self._call(self.primary.put_if, key, data, expected)
+        except StorageUnavailable:
+            self.spool.put(key, data)
+            return
+        if self.spool.exists(key):
             self.spool._p(key).unlink(missing_ok=True)
         self.flush()
 
@@ -496,8 +687,11 @@ class ResilientStorage(Storage):
                 return True
             if self._spool_is_stale(key):
                 return True
-            try:
-                self._call(self.primary.put, key, self.spool.get(key))
+            try:  # the replay is a compare-and-set like every other ledger write, so a rival's save in between is refused
+                version = self._call(self.primary.version_of, key)
+                self._call(self.primary.put_if, key, self.spool.get(key), version)
+            except Conflict:
+                return self._spool_is_stale(key)  # overtaken: drop the copy if the store's is at least as new, else wait
             except StorageUnavailable:
                 return False
             self.spool._p(key).unlink(missing_ok=True)
