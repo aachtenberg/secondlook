@@ -149,7 +149,7 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
             print(f"agent failed ({type(exc).__name__}: {str(exc)[:300]}); using rules-based triage", file=sys.stderr)
             agent_error = f"{type(exc).__name__}: {str(exc)[:300]}"
     if result is None:
-        result = rule_based_triage(comparison or {"findings": [], "severity": "info"})
+        result = rule_based_triage(comparison or {"findings": [], "severity": "info"}, engine)  # the engine picks the proposals' dialect
         if use_llm:
             result["agent_error"] = agent_error
         if comparison is None:

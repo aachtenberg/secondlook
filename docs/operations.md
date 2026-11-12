@@ -151,8 +151,9 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
 - **A full record.** Every run keeps what triggered it and why (`manifest.json`), what was compared (`compare.json`),
   what was said (`triage.json`, discussions), and what the model read to say it (`tools.json`: every tool call with its
   arguments and the first 2000 characters of its result, kept even when the model failed to submit a review).
-- **People decide.** dbtriage recommends fixes and never applies them. Automatic fixes, if ever added, belong
-  behind an approval step with a ready rollback.
+- **People decide.** dbtriage recommends fixes and never applies them. A change proposal on a finding is a
+  statement to copy, with its undo and the snapshots that justify it; there is no apply button ("The fix as a
+  change proposal" below). Automatic fixes, if ever added, belong behind an approval step with a ready rollback.
 
 ## The record you can hand someone
 
@@ -256,6 +257,27 @@ when the model and the rules found the same thing, or when a finding is the same
 The reviewer's tools are `get_report`, `get_raw_report` (pages through the AWR text), `compare_snapshots`,
 `get_sql_history`, `get_recent_changes` and `submit_review`. Reports are never pasted into the prompt; the model
 asks for what it needs, so the numbers stay exact.
+
+## The fix as a change proposal
+
+When a finding's fix is a concrete change, the finding also carries a `proposal`: the exact `statement` (a
+`CREATE INDEX`, a statistics gather, a parameter change, a rewrite), its `rollback`, who would run it as a role
+(`runner`: "DBA in a change window", "the application team"), when (`window`), and `justified_by`, the ids of the
+snapshots whose numbers justify it, the current snapshot and the baseline at least. `fix` stays the one-sentence
+advice. The model fills it only when it has a concrete change; `submit_review` refuses a statement without a
+rollback, and a proposal that does not cite the current snapshot, so the model fixes it and retries. The rules
+fill it for the kinds where the statement follows from the evidence alone (`stale_stats`, `bloat`, `seq_scans`,
+`setting_changed`), in the engine's own dialect, with a placeholder where the rules cannot know a detail such as
+the index columns; the other kinds say what to look at and carry no proposal.
+
+The proposal is rendered under the finding in the markdown (the statement in a code fence, then **Undo**, **Run
+by** and **Justified by**) and on the snapshot page, where the statement has a Copy button. It rides into the Jira or
+Plane issue and into the comment on an existing ticket; when a proposal appears for a finding whose ticket predates
+it, the ticket gets it as one comment, once (`proposal_sent` on the ticket record in the ledger).
+
+The difference from a tuning tool's "apply" button is the justification and the safety: the proposal cites the
+before and after Second Look measured, it always comes with its undo, and nothing is applied. There is no apply
+button anywhere; a person copies the statement and runs it under their own change process.
 
 ## Code layout
 

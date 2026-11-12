@@ -24,6 +24,8 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
 - **Snapshot.** The review with its findings, wait-time and load charts, the top SQL (click a column header to
   sort by it), links to every stored file (opened in a side panel), the discussion panel, and a **Download bundle**
   link that exports the snapshot as one zip for a postmortem or an auditor (operations.md, "The record you can hand someone").
+  A finding with a change proposal shows it under the fix: the statement with a **Copy** button, its undo, who
+  runs it and when, and links to the snapshots that justify it. Nothing on the page applies a change.
 - **Compare.** Any two snapshots of a database side by side, with the parameters that changed between them in
   their own table (each one is also a low `setting_changed` finding, and its name is written into the evidence of
   any SQL regression, plan change or wait shift in the same window).

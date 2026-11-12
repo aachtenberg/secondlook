@@ -111,7 +111,7 @@ The pasted result is operator-supplied text entering the evidence. It goes throu
 
 That is the middle the pack misses. Either the assistant has production credentials, or it only has metrics and guesses the fix. A proposed read keeps credentials on the operator’s side and still deepens the evidence.
 
-### 6. The fix as a change proposal
+### 6. The fix as a change proposal *(landed)*
 
 Findings already require a fix and, when the fix changes the database, a rollback. Take the next step as an artifact the reader can copy: the statement (create index, gather stats, a rewrite), the snapshot ids that justify it, how to undo it, and who would run it in a change window. Attach it to the Jira or Plane ticket from bet 2.
 

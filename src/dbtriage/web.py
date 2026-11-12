@@ -226,6 +226,8 @@ button.ai,.btn.ai{background:var(--ai);border-color:transparent;color:#fff;font-
 .fh{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.fh .n{font-family:var(--mono);font-size:12px;color:var(--mut)}.fh .where{font-size:12px;color:var(--fg2)}.fh .fs{font-weight:500;color:var(--fg-strong)}
 .fh .chat-link{margin-left:auto}.flist dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin:10px 0 0;font-size:13px}.flist dt{color:var(--mut);font-size:12px}.flist dd{margin:0;color:var(--fg2)}
 .flist dd ul{margin:0;padding-left:16px}
+.proposal{display:grid;gap:8px}.proposal .prow{display:flex;gap:8px;align-items:flex-start}.proposal .stmt{flex:1;min-width:0;font-family:var(--mono)}.proposal .copy{height:28px;padding:0 10px;border-radius:6px;border:1px solid var(--line2);background:var(--card2);color:var(--fg2);font-size:12px;white-space:nowrap}
+.proposal dl{margin:0}.proposal .ids{display:flex;flex-wrap:wrap;gap:4px 10px}.proposal p{margin:0;font-size:12px}
 .checked{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--mut)}.checked .lbl{font-weight:500;color:var(--fg2)}
 .mark{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap}.mark.both{border-color:var(--info);color:var(--info)}.mark.model_only{border-color:var(--ai);color:var(--ai)}.mark.rules_only{border-color:var(--medium);color:var(--medium)}
 .dropped{font-size:13px;color:var(--fg2);padding-top:10px;border-top:1px solid var(--line)}.dropped .lbl{font-weight:500;color:var(--fg2)}.dropped>.lbl{display:block;margin-bottom:6px}.dropped .agree{font-size:12px;color:var(--mut)}
@@ -468,6 +470,26 @@ def diagnosis_html(rows: list[dict], ask_button: str = "") -> str:
     gaps = f"<span class='gaps'><i class='dot'></i>{n} setup gap{'s' if n != 1 else ''}</span>" if n else ""
     return (f"<section class='card diag' aria-labelledby='diag-h'><div class='cardhead'><div class='left'><h2 id='diag-h'>Diagnosis</h2>{gaps}</div>"
             f"<div class='right'><span class='pill2'>stored data, no model</span>{ask_button}</div></div><div class='dgrid'>{''.join(cells)}</div></section>")
+
+
+def proposal_html(p: dict | None, n: int, esc: Callable[[str], str]) -> str:
+    """The change proposal under finding `n` of the review card: the statement in a <pre> with a Copy button, its
+    undo, who runs it and when, the snapshots whose numbers justify it as links, and the sentence that nothing is
+    applied here. Empty for a finding without one, so older reviews render as they did. `esc` is the card's escaper
+    (it also links SQL ids)."""
+    if not p or not p.get("statement"):
+        return ""
+    from dbtriage.report import NEVER_APPLIED
+
+    runner = " · ".join(esc(x) for x in (p.get("runner"), p.get("window")) if x)
+    ids = "".join(f"<a class='mono' href='/s/{html.escape(str(s))}' title='{html.escape(str(s))}'>{html.escape(str(s).rsplit('/', 1)[-1])}</a>"
+                  for s in p.get("justified_by") or [])
+    rows = ((f"<dt>Undo</dt><dd>{esc(p['rollback'])}</dd>" if p.get("rollback") else "")
+            + (f"<dt>Run by</dt><dd>{runner}</dd>" if runner else "")
+            + (f"<dt>Justified by</dt><dd class='ids'>{ids}</dd>" if ids else ""))
+    return (f"<dt>Change proposal</dt><dd class='proposal'><div class='prow'><pre id='proposal-{n}' class='stmt'>{html.escape(str(p['statement']))}</pre>"
+            f"<button type='button' class='copy' data-copy='proposal-{n}' aria-label='Copy the statement'>Copy</button></div>"
+            + (f"<dl>{rows}</dl>" if rows else "") + f"<p class='mut'>{html.escape(NEVER_APPLIED)}</p></dd>")
 
 
 def _fmt_ts(iso: str | None) -> str:
@@ -1037,7 +1059,8 @@ class App:
                     ev = "".join(f"<li>{link_ids(e)}</li>" for e in (f.get("evidence") or [])[:4])
                     dl = ((f"<dt>Impact</dt><dd>{link_ids(f['impact'])}</dd>" if f.get("impact") else "")
                           + (f"<dt>Evidence</dt><dd><ul>{ev}</ul></dd>" if ev else "")
-                          + (f"<dt>Fix</dt><dd>{link_ids(f['fix'])}</dd>" if f.get("fix") else ""))
+                          + (f"<dt>Fix</dt><dd>{link_ids(f['fix'])}</dd>" if f.get("fix") else "")
+                          + proposal_html(f.get("proposal"), i, link_ids))
                     items.append(f"<li><div class='fh'><span class='n'>{i}</span>{sev(f.get('severity'))}{marks.get(i - 1, '')}"
                                  f"<code class='where'>{link_ids(f.get('where', ''))}</code><span class='fs'>{link_ids(f.get('summary', ''))}</span>{badge}{disc}</div>"
                                  + (f"<dl>{dl}</dl>" if dl else "") + "</li>")

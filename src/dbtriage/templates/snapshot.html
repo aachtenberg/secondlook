@@ -13,3 +13,15 @@
   </div>
   $discuss
 </div>
+<script>
+// Copy buttons on the change proposals: the statement is for a person to copy; nothing here runs it.
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('button[data-copy]'); if (!b) return;
+  var el = document.getElementById(b.getAttribute('data-copy')); if (!el) return;
+  var done = function () { var was = b.textContent; b.textContent = 'Copied'; setTimeout(function () { b.textContent = was; }, 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(el.textContent).then(done, function () {}); return; }
+  var r = document.createRange(); r.selectNodeContents(el); var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+  try { document.execCommand('copy'); done(); } catch (err) {}
+  s.removeAllRanges();
+});
+</script>
