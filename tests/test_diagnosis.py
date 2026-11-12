@@ -52,6 +52,9 @@ def test_open_cell_count_worst_oldest_tickets_and_recurring():
     assert rows[3]["head"] == "2 opened · 1 cleared" and rows[3]["sub"] == "net +1"  # the 9-day-old finding and the 20-day-old tombstone are outside the week
     empty = diagnosis.lines(triage=None, comparison=None, manifest=None, ledger={"entries": [], "tombstones": []}, changes=None, schedule=None, now=NOW)
     assert empty[1]["head"] == "No open findings" and empty[1]["cls"] == "info"
+    rebuilt = {"entries": [{"kind": "bloat", "subject": "t", "severity": "low", "state": "still_open", "first_seen": "postgres/demo/2026-11-01/x", "first_seen_at": None, "tickets": {}}], "tombstones": []}
+    row = diagnosis.lines(triage=None, comparison=None, manifest=None, ledger=rebuilt, changes=None, schedule=None, now=NOW, target="demo", latest_sid="s")[1]
+    assert row["link"] is None and "oldest since" not in row["sub"]  # a snapshot id is not a date
     down = diagnosis.lines(triage=None, comparison=None, manifest=None, ledger=None, changes=None, schedule=None, now=NOW, ledger_error="s3 down")
     assert down[1]["head"] == "Ledger unavailable" and down[1]["sub"] == "s3 down"
     assert diagnosis.suggestions(rows)[0] == "What is the open high finding and is it still true?"
@@ -69,6 +72,8 @@ def test_changes_cell_names_the_last_deploy_and_what_opened_after_it():
     assert "Did the deploy billing@1.4.2 to production cause anything that is open now?" in diagnosis.suggestions(rows)
     none = diagnosis.lines(triage=None, comparison=None, manifest={"changes_sources": ["github"]}, ledger=None, changes=[], schedule=None, now=NOW)
     assert none[2]["head"] == "No change in the window" and not none[2]["gap"]
+    unknown = diagnosis.lines(triage=None, comparison=None, manifest={"changes_sources": ["github"]}, ledger=None, changes=feed, schedule=None, now=NOW)
+    assert unknown[2]["sub"] == "40 min ago"  # no ledger: nothing is claimed about what opened after it
 
 
 def test_week_cell_counts_what_the_model_dropped():

@@ -99,7 +99,7 @@ def lines(*, triage: dict | None, comparison: dict | None, manifest: dict | None
         else:
             worst = _worst(entries)
             oldest = min(entries, key=lambda e: e.get("first_seen_at") or "")
-            since = (oldest.get("first_seen_at") or oldest.get("first_seen") or "")[:10]
+            since = (oldest.get("first_seen_at") or "")[:10] if _when(oldest.get("first_seen_at")) else ""  # a snapshot id is not a date
             tickets = sorted({t.get("key") for e in entries for t in (e.get("tickets") or {}).values() if isinstance(t, dict) and t.get("key")})
             recurring = sum(1 for e in entries if e.get("state") == "recurring")
             head = f"{len(entries)} finding{'s' if len(entries) != 1 else ''}, worst {worst}"
@@ -127,7 +127,8 @@ def lines(*, triage: dict | None, comparison: dict | None, manifest: dict | None
         sub = ago(last.get("time"), now)
         if near:
             sub += ", inside or just before the last window"
-        sub += f" · {after} finding{'s' if after != 1 else ''} opened after it" if after else " · no finding opened after it"
+        if ledger:  # without a ledger nothing is known about what opened, so nothing is claimed
+            sub += f" · {after} finding{'s' if after != 1 else ''} opened after it" if after else " · no finding opened after it"
         out.append(_row("Changes", head, sub, cls="medium" if after else ""))
     elif (manifest or {}).get("changes_sources"):
         out.append(_row("Changes", "No change in the window", "the feed saw no deploy or setting change"))

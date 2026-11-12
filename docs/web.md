@@ -35,7 +35,7 @@ corner. Changing the look reloads the page once, at the same spot, so the new co
 ## The diagnosis card and the Ask dock
 
 A database's page opens with a **Diagnosis** card: five cells written by rules from stored data, with no model call.
-Health (the latest review's title and age, and whether the interval sat inside the usual band for that hour), Open
+Health (the latest review's title and age, and, once a usual band has been stored with the comparison, whether the interval sat inside it), Open
 (how many findings, the worst, the oldest, their tickets), Changes (the last deploy or setting change and whether a
 finding opened after it), Last 7 days (opened, cleared, net, and rules findings the model left out), Next (the next
 scheduled run, paused, or why the last one did not finish). A cell that is a *setup gap*, no change feed or no
