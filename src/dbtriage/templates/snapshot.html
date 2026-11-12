@@ -19,9 +19,13 @@ document.addEventListener('click', function (e) {
   var b = e.target.closest('button[data-copy]'); if (!b) return;
   var el = document.getElementById(b.getAttribute('data-copy')); if (!el) return;
   var done = function () { var was = b.textContent; b.textContent = 'Copied'; setTimeout(function () { b.textContent = was; }, 1500); };
-  if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(el.textContent).then(done, function () {}); return; }
-  var r = document.createRange(); r.selectNodeContents(el); var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
-  try { document.execCommand('copy'); done(); } catch (err) {}
-  s.removeAllRanges();
+  // no clipboard API (plain http), or the browser refused it: select the statement and copy, leaving it selected for Ctrl+C
+  var fallback = function () {
+    var r = document.createRange(); r.selectNodeContents(el); var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+    try { document.execCommand('copy'); } catch (err) {}
+    done();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(el.textContent).then(done, fallback); return; }
+  fallback();
 });
 </script>

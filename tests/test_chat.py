@@ -212,3 +212,17 @@ def test_proposed_reads_and_a_pasted_result(tmp_path):
     assert [x["proposal"] for x in answers] == [1, 2] and answers[0]["statement"].startswith("EXPLAIN") and answers[0]["thread"] == "finding-1"
     assert answers[0]["look_for"] == "Look for a sequential scan on orders:" and answers[0]["supplied_by"] == chat.SUPPLIED_BY and answers[1]["truncated"] is True
     assert chat.operator_answers(st, "postgres/demo/2026-11-05/nope") == []
+
+
+def test_a_thread_holds_at_most_max_answers_pasted_results(tmp_path):
+    st = store(tmp_path)
+    st.put_json(chat.thread_path(SID, "review"), {"snapshot": SID, "key": "review", "messages": [
+        {"role": "assistant", "text": "```proposed-read\nEXPLAIN SELECT 1;\n```", "at": "t", "proposals": [{"n": 1, "statement": "EXPLAIN SELECT 1;", "note": ""}]}]})
+    c = chat.Chat(st, Fake)
+    for i in range(chat.MAX_ANSWERS):
+        c.answer(SID, "review", 1, f"run {i}")
+    try:
+        c.answer(SID, "review", 1, "one too many"); assert False
+    except ValueError as exc:
+        assert f"already holds {chat.MAX_ANSWERS} pasted results" in str(exc)
+    assert sum(1 for m in chat.load_thread(st, SID, "review")["messages"] if m["role"] == "operator") == chat.MAX_ANSWERS

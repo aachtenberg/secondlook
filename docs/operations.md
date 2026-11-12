@@ -168,10 +168,12 @@ question).
 The pasted result is stored in the thread file (`<snapshot>/chat/<key>.json`) as a message with role `operator`,
 after the same masking as a report: quoted strings become `'?'`, and a line that is itself a SQL statement (the
 read echoed back with the real values it was run with) is masked as SQL text is. Numbers on other lines stay,
-because a plan's costs and row counts are the point. The text is cut at 20 KB. It is labelled **supplied by a
-person** on the page, in the thread replayed to the model, in the audit bundle, and in `get_operator_answers`, the
-reviewer's tool that returns the results stored with a snapshot and with the previous snapshot of the same target.
-The reviewer may cite such a result as evidence; it may not present it as something Second Look measured.
+because a plan's costs and row counts are the point. The text is cut at 20 KB, and a thread holds at most 10 pasted
+results. It is labelled **supplied by a person** on the page, in the thread replayed to the model, in the audit
+bundle, and in `get_operator_answers`, the reviewer's tool that returns the results stored with a snapshot and with
+the previous snapshot of the same target, newest first, at most 12 of them and 60 KB of text, saying how many older
+ones it left out. The reviewer may cite such a result as evidence; it may not present it as something Second Look
+measured.
 
 ## The record you can hand someone
 

@@ -48,6 +48,7 @@ MAX_TURNS = 20          # questions per thread; the drawer is for a discussion, 
 MAX_QUESTION = 2000     # characters
 REPLAY_TURNS = 8        # earlier question/answer pairs replayed to the model
 MAX_RESULT = 20_000     # characters of a pasted result kept; a plan or a wait slice fits, a table dump does not belong here
+MAX_ANSWERS = 10        # pasted results per thread: with MAX_RESULT this bounds the thread file and what the next review reads
 SUPPLIED_BY = "a person who ran the proposed read on their side and pasted the result; not measured by Second Look"
 PROPOSAL_RE = re.compile(r"```proposed-read[^\S\n]*\n(.*?)\n?```", re.S)  # one fenced block the model marked as a read to run
 KEY_RE = re.compile(r"^(review|target|finding-\d{1,2}|sql-[A-Za-z0-9_]{1,80})$")  # sql-<id>: one statement; target: the database as a whole
@@ -262,6 +263,8 @@ class Chat:
             thread = load_thread(self.store, snapshot_id, key)
             if n not in thread_proposals(thread):
                 raise ValueError(f"this thread has no proposed read {n}")
+            if sum(1 for x in thread["messages"] if x["role"] == "operator") >= MAX_ANSWERS:
+                raise ValueError(f"this thread already holds {MAX_ANSWERS} pasted results; discuss the next snapshot instead")
             text = mask_operator_text(result)  # masked before the cut, so a quoted value split by the cut is not left open
             msg = {"role": "operator", "text": text, "proposal": int(n), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
             if len(text) > MAX_RESULT:

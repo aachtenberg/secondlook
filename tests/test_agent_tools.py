@@ -448,3 +448,22 @@ def test_render_markdown_change_proposal():
     assert md.count("Change proposal") == 1 and "   - **Fix:** look\n\n" in md  # the finding without one renders as before
     assert proposal_lines(None) == [] and proposal_lines({"statement": ""}) == []
     assert proposal_lines({"statement": "ANALYZE t;", "rollback": "none needed"})[:4] == ["- **Change proposal:**", "  ```", "  ANALYZE t;", "  ```"]
+
+
+def test_operator_answers_tool_is_bounded_newest_first(tmp_path, monkeypatch):
+    """However busy the discussions, the tool returns at most OPERATOR_ANSWERS_MAX results and OPERATOR_ANSWERS_CHARS
+    of text, newest first, and says how many it left out."""
+    from dbtriage import agent as agent_mod, chat
+
+    st = _store(tmp_path)
+    sid = st.list_snapshots("postgres", "demo")[-1]
+    msgs = [{"role": "assistant", "text": "x", "at": "t", "proposals": [{"n": 1, "statement": "EXPLAIN SELECT 1;", "note": ""}]}]
+    msgs += [{"role": "operator", "text": f"result {i:02d}", "proposal": 1, "at": f"2026-11-12T10:{i:02d}:00+00:00"} for i in range(20)]
+    st.put_json(chat.thread_path(sid, "review"), {"snapshot": sid, "key": "review", "messages": msgs})
+    tool = {t.name: t for t in TriageAgent(st, backend=None)._tools("postgres", "demo")}["get_operator_answers"]
+    out = json.loads(tool.call({"snapshot_id": sid}))
+    assert len(out["answers"]) == agent_mod.OPERATOR_ANSWERS_MAX and out["answers"][0]["result"] == "result 19"  # newest first
+    assert out["omitted"].startswith(f"{20 - agent_mod.OPERATOR_ANSWERS_MAX} older result(s) left out")
+    monkeypatch.setattr(agent_mod, "OPERATOR_ANSWERS_CHARS", 20)  # two 9-character results fit, a third does not
+    out = json.loads(tool.call({"snapshot_id": sid}))
+    assert [a["result"] for a in out["answers"]] == ["result 19", "result 18"] and out["omitted"].startswith("18 older")

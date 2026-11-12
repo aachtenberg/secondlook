@@ -75,6 +75,8 @@ class Finding(BaseModel):
 
 
 SECTIONS = ("load_profile", "top_sql", "wait_events", "ash", "sessions", "tables", "settings", "findings", "notes", "awr", "all")
+OPERATOR_ANSWERS_MAX = 12        # pasted results get_operator_answers returns at most, newest first
+OPERATOR_ANSWERS_CHARS = 60_000  # and at most this much result text in one call (the first result always fits)
 
 
 class TriageAgent:
@@ -221,12 +223,23 @@ class TriageAgent:
             from dbtriage import chat  # chat imports this module, so the import lives here
 
             prev = agent.storage.previous(engine, target, snapshot_id)
-            rows = [r for sid in [snapshot_id] + ([prev] if prev else []) for r in chat.operator_answers(agent.storage, sid)]
+            rows = []
+            for sid in [snapshot_id] + ([prev] if prev else []):  # this snapshot first, then the previous; newest paste first within each
+                rows += sorted(chat.operator_answers(agent.storage, sid), key=lambda r: str(r.get("at") or ""), reverse=True)
             if not rows:
                 return f"no results supplied by a person for {snapshot_id}" + (f" or the previous snapshot {prev}" if prev else "")
-            return json.dumps({"note": "Every result below was pasted by a person after running the proposed read on their side. "
-                                       "Second Look did not run it and cannot verify it: cite it as supplied by a person, never as measured.",
-                               "answers": rows}, default=str)
+            kept, size = [], 0
+            for r in rows:  # bounded like any tool result, so a busy discussion cannot crowd the review's context
+                size += len(r.get("result") or "")
+                if kept and (len(kept) >= OPERATOR_ANSWERS_MAX or size > OPERATOR_ANSWERS_CHARS):
+                    break
+                kept.append(r)
+            out = {"note": "Every result below was pasted by a person after running the proposed read on their side. "
+                           "Second Look did not run it and cannot verify it: cite it as supplied by a person, never as measured.",
+                   "answers": kept}
+            if len(kept) < len(rows):
+                out["omitted"] = f"{len(rows) - len(kept)} older result(s) left out to keep this answer short"
+            return json.dumps(out, default=str)
 
         @beta_tool
         def submit_review(findings: list[Finding], summary: str, checked: str, confidence: str) -> str:
