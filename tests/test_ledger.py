@@ -809,3 +809,31 @@ def test_snapshot_page_shows_the_life_and_renders_legacy_reviews_without_one(tmp
     assert "<h3 id='still-h'>Still open (1 not among the findings above)</h3>" in page and "<code class='where'>sql_regressed q2</code><span>q2 slower</span>" in page
     assert "not seen in the last 1 run</span>" in page and "<p class='cleared'>Cleared: <code class='where'>deadlocks</code>" in page
     assert "style=" not in page.split("<ol class='flist'>")[1].split("</section>")[0]  # themed by class, never inline
+
+
+def test_spool_replay_of_the_ledger_is_a_compare_and_set(tmp_path):
+    """A rival's save between the replay's version read and its put is refused: the copy waits when it is the newer
+    one, and is dropped when the store's is at least as new."""
+    from dbtriage.storage import Conflict
+
+    class Contended(LocalStorage):
+        conflicts = 0
+
+        def put_if(self, key, data, expected):
+            if self.conflicts:
+                self.conflicts -= 1
+                raise Conflict(key)
+            super().put_if(key, data, expected)
+
+    primary = Contended(tmp_path / "primary")
+    st = ResilientStorage(primary, LocalStorage(tmp_path / "spool"))
+    k = ledger.key(ENGINE, TARGET)
+    primary.put_json(k, {"entries": [{"kind": "store"}], "tombstones": [], "updated": sid(0), "prior": None, "generation": 3})
+    st.spool.put_json(k, {"entries": [{"kind": "spooled"}], "tombstones": [], "updated": sid(1), "prior": None, "generation": 5})
+    primary.conflicts = 1
+    assert st.flush() == (0, 1) and st.spool.exists(k)  # refused, and the spooled copy is the newer one: it waits
+    assert st.flush() == (1, 0) and primary.get_json(k)["generation"] == 5  # next flush, no rival: pushed
+    primary.put_json(k, {"entries": [{"kind": "store"}], "tombstones": [], "updated": sid(3), "prior": None, "generation": 9})
+    st.spool.put_json(k, {"entries": [{"kind": "spooled"}], "tombstones": [], "updated": sid(2), "prior": None, "generation": 7})
+    primary.conflicts = 1
+    assert st.flush() == (1, 0) and not st.spool.exists(k) and primary.get_json(k)["generation"] == 9  # refused and overtaken: dropped

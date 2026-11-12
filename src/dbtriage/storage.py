@@ -120,6 +120,9 @@ def key_ok(key: str, prefix: bool = False) -> bool:
 
 
 
+_NO_FLOCK_NOTED = False  # the fcntl-less fallback is said once per process
+
+
 class LocalStorage(Storage):
     def __init__(self, root: str | os.PathLike):
         self.root = Path(root)
@@ -163,6 +166,11 @@ class LocalStorage(Storage):
         try:
             import fcntl
         except ImportError:
+            global _NO_FLOCK_NOTED
+            if not _NO_FLOCK_NOTED:
+                _NO_FLOCK_NOTED = True
+                print("file store: no fcntl on this platform; the ledger write is read-compare-write, not locked. "
+                      "Run one dbtriage process per store here.", file=sys.stderr)
             return super().put_if(key, data, expected)
         with open(p.with_name(f".{p.name}.lock"), "a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -430,8 +438,12 @@ class PostgresStorage(Storage):
         self.client = PgClient(url, [
             f"CREATE TABLE IF NOT EXISTS {self.TABLE} (key text COLLATE \"C\" PRIMARY KEY, doc jsonb, data bytea,"
             " updated_at timestamptz NOT NULL DEFAULT now(), CHECK ((doc IS NULL) <> (data IS NULL)))",
-            # the row's version for the conditional write; added to tables created before it existed
-            f"ALTER TABLE {self.TABLE} ADD COLUMN IF NOT EXISTS version bigint NOT NULL DEFAULT 1",
+            # the row's version for the conditional write; added to tables created before it existed. Checked first,
+            # because ALTER needs the table's owner even when the column is already there, and a store role with
+            # only SELECT/INSERT/UPDATE must keep working once the owner has run this once.
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()"
+            f" AND table_name = '{self.TABLE}' AND column_name = 'version') THEN"
+            f" ALTER TABLE {self.TABLE} ADD COLUMN version bigint NOT NULL DEFAULT 1; END IF; END $$",
         ])
         self.where = self.client.where
 
@@ -675,8 +687,11 @@ class ResilientStorage(Storage):
                 return True
             if self._spool_is_stale(key):
                 return True
-            try:
-                self._call(self.primary.put, key, self.spool.get(key))
+            try:  # the replay is a compare-and-set like every other ledger write, so a rival's save in between is refused
+                version = self._call(self.primary.version_of, key)
+                self._call(self.primary.put_if, key, self.spool.get(key), version)
+            except Conflict:
+                return self._spool_is_stale(key)  # overtaken: drop the copy if the store's is at least as new, else wait
             except StorageUnavailable:
                 return False
             self.spool._p(key).unlink(missing_ok=True)

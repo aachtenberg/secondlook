@@ -253,3 +253,11 @@ def test_postgres_put_if_live(pg_url):
     # a table created before the version column existed gets it on connect
     s.client.run(f"ALTER TABLE {s.TABLE} DROP COLUMN version")
     assert st.PostgresStorage(pg_url).version_of(K) == "1"
+
+
+def test_postgres_ddl_adds_the_version_column_only_when_missing():
+    """ALTER needs the owner even with IF NOT EXISTS, so the check comes first and a read-write role keeps working."""
+    from dbtriage.storage import PostgresStorage
+
+    ddl = " ".join(c for c in PostgresStorage.__init__.__code__.co_consts if isinstance(c, str))
+    assert "information_schema.columns" in ddl and "ADD COLUMN IF NOT EXISTS" not in ddl
