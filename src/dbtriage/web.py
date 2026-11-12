@@ -526,6 +526,12 @@ def proposal_html(p: dict | None, n: int, esc: Callable[[str], str]) -> str:
             + (f"<dl>{rows}</dl>" if rows else "") + f"<p class='mut'>{html.escape(NEVER_APPLIED)}</p></dd>")
 
 
+def _window_top_sql(summary: dict) -> bool:
+    """Does this snapshot's top SQL describe its own window? True for an interval engine (Oracle AWR) and for SQL
+    Server reading Query Store, whose load profile stays cumulative but whose statements are the window's figures."""
+    return summary.get("metrics_kind") == "interval" or summary.get("top_sql_kind") == "interval"
+
+
 def _fmt_ts(iso: str | None) -> str:
     return (iso or "")[:19].replace("T", " ")
 
@@ -789,13 +795,14 @@ class App:
         for sid in self.store.list_snapshots(t.engine, name)[-limit:]:
             c = self._compare(sid)
             if not c:
-                # no comparison (a target's first snapshot): an interval snapshot (Oracle AWR) still describes its own
-                # window, so its top SQL is comparable; cumulative counters (Postgres, MySQL) are not, so skip those
+                # no comparison (a target's first snapshot): an interval snapshot (Oracle AWR, SQL Server's Query Store)
+                # still describes its own window, so its top SQL is comparable; cumulative counters (Postgres, MySQL,
+                # the plan cache) are not, so skip those
                 try:
                     s = self.store.get_json(f"{sid}/summary.json")
                 except FileNotFoundError:
                     continue
-                if s.get("metrics_kind") != "interval":
+                if not _window_top_sql(s):
                     continue
                 top = s.get("top_sql") or []
                 total = sum(q.get("total_time_ms") or 0 for q in top) or 1
@@ -841,7 +848,7 @@ class App:
             top = sorted(s.get("top_sql") or [], key=lambda q: -(q.get("total_time_ms") or 0))[:10]
             total = sum(q.get("total_time_ms") or 0 for q in s.get("top_sql") or []) or 1
             detail["top_sql"] = [dict(q, share_of_time=q.get("share_of_time", (q.get("total_time_ms") or 0) / total)) for q in top]
-            detail["top_sql_basis"] = "window" if s.get("metrics_kind") == "interval" else "since statistics were last reset"
+            detail["top_sql_basis"] = "window" if _window_top_sql(s) else "since statistics were last reset"
         return detail
 
     def start_run(self, target: str, mode: str, reason: str, use_llm: bool, baseline_policy: str | None = None,

@@ -1052,3 +1052,12 @@ def test_fleet_digest_schedule_and_channels_save_from_the_delivery_card(tmp_path
     app.reload()
     assert "digest" not in app.cfg.delivery  # blank = off, and nothing is stored when the file is silent too
     assert app.scheduler is None or app.scheduler.digest is not None  # the web view's scheduler sends it when scheduling is on
+
+
+def test_query_store_top_sql_counts_as_the_window_on_a_first_snapshot(tmp_path):
+    """SQL Server with Query Store keeps a cumulative load profile but its statements are the window's own figures,
+    so a first snapshot's top SQL is labelled the window and enters the statement history."""
+    from dbtriage.web import _window_top_sql
+
+    assert _window_top_sql({"metrics_kind": "interval"}) and _window_top_sql({"top_sql_kind": "interval"})
+    assert not _window_top_sql({}) and not _window_top_sql({"metrics_kind": "cumulative"})
