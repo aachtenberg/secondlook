@@ -32,6 +32,21 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
 Saving on the Settings page happens in place: the page stays where it is and the result appears as a toast in the
 corner. Changing the look reloads the page once, at the same spot, so the new colours apply.
 
+## The diagnosis block and the Ask button
+
+A database's page opens with five sentences written by rules from stored data, with no model call: the latest
+review's severity and age (and whether the interval sat inside the usual band for that hour), the open findings
+with the worst, the oldest and their tickets, the last deploy or setting change and whether a finding opened after
+it, what opened and cleared in the last seven days and whether the model left rules findings out, and the next
+scheduled run or why the last one did not finish. It is instant, the same for everyone, and still there with the
+model off. Operators who copied `target.html` into `templates_dir` add `$diagnosis` and `$ask` to their copy to see it.
+
+The floating **Ask AI** button, bottom right, is the model's part and is optional. On a database's page it opens the
+latest snapshot's discussion with those five sentences as the first question, so the prose starts from the facts the
+page shows; on a snapshot page it opens that page's discussion. The answer is stored with the snapshot like any
+discussion, and its footer shows the tokens it cost. The button appears only where there is something to ask about,
+only when the web view runs with `--allow-chat`, and points at the settings page when no model provider is configured.
+
 ## Rules and model on the same review
 
 The rules run on every snapshot, whether or not a model reviews it, and both results are stored in `triage.json`

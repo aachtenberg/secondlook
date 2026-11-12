@@ -921,3 +921,30 @@ def test_files_max_tokens_and_fallback_models_on_the_cards(tmp_path, monkeypatch
     monkeypatch.setattr(llm, "test_model", lambda cfg: (seen.update(cfg) or (True, "ok")))
     app.test_agent({"fallback_models": "a, b", "max_tokens": "100"})
     assert seen["fallback_models"] == ["a", "b"] and seen["max_tokens"] == "100"  # the line is a list by the time a backend sees it
+
+
+def test_target_page_has_the_diagnosis_block_and_the_ask_button(tmp_path, monkeypatch):
+    app = App(config(tmp_path), store(tmp_path), False, None)
+    page = app.target("demo", 0).decode()
+    assert "<section class='card diag' aria-labelledby='diag-h'>" in page and page.index("diag-h") < page.index("<div class=\"tiles\">")
+    assert "<span class='lbl'>Health</span>" in page and "High: " in page and "No findings tracked yet" in page  # no ledger in the fixture store
+    assert "No change feed configured" in page and "No schedule" in page and "$diagnosis" not in page and "$ask" not in page
+    assert "class='ask-fab" not in page  # chat is off for this app (the stylesheet still carries the class)
+    chat = App(config(tmp_path), store(tmp_path), False, None, allow_chat=True)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False); monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    off = chat.target("demo", 0).decode()
+    assert "<a class='ask-fab off' href='/settings#agent'" in off and "Ask AI: configure a model" in off
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    on = chat.target("demo", 0).decode()
+    assert f"<a class='ask-fab' href='/s/{SID}?ask=Summarise%20the%20current%20state%20of%20demo" in on
+    snap = chat.snapshot(SID).decode()
+    assert "<a class='ask-fab' href='#chat-review' data-chat='review'>" in snap
+    # the ledger and a change feed, when present, feed the lines
+    from dbtriage import ledger as led
+    st = app.store
+    led.save(st, "postgres", "demo", {"entries": [{"kind": "sql_regressed", "subject": "q1", "title": "q1 slow", "severity": "medium", "state": "still_open",
+                                                   "first_seen": SID, "first_seen_at": "2026-11-05T09:00:00+00:00", "tickets": {"jira": {"key": "DBA-7"}}}],
+                                      "tombstones": [], "updated": SID, "prior": None, "generation": 0})
+    st.put_json(f"{SID}/changes.json", [{"time": "2026-11-05T09:55:00+00:00", "kind": "deploy", "description": "billing@2 to production", "link": None, "source": "webhook"}])
+    page = app.target("demo", 0).decode()
+    assert "1 open finding, worst medium, oldest since 2026-11-05; ticket DBA-7." in page and "Last change: deploy billing@2 to production" in page

@@ -59,7 +59,9 @@ from dbtriage import access, changes, charts, chat, dbsnap, envfile, llm, mcp_se
 from dbtriage.baseline import LABELS, POLICIES
 from dbtriage.config import Config, Target, top_n_of
 from dbtriage.findings import SEVERITY_RANK, dropped, rules_dropped
+from dbtriage import diagnosis, ledger
 from dbtriage.ledger import describe_period
+from dbtriage.storage import StorageUnavailable
 from dbtriage.settings import AGENT_FIELDS, AGENT_PROVIDERS, CHANNEL_FIELDS, ENGINES, SCHEDULE_FIELDS, SEVERITIES, WEB_FIELDS, Settings, mask_dsn, probe
 from dbtriage.settings import CHANGES_FIELDS, CHANGES_NUMBERS, SettingsUnavailable, agent_value, changes_value
 from dbtriage.storage import Storage, StorageUnavailable, describe as describe_store, key_ok
@@ -135,6 +137,15 @@ footer{color:var(--mut);font-size:12px;padding:16px 32px;border-top:1px solid va
 .tile{padding:14px 16px;border-radius:var(--r);border:1px solid var(--line);background:var(--card);display:flex;flex-direction:column;gap:6px}
 .tile .lbl{font-size:12px;color:var(--mut)}.tile .num{font-size:22px;font-weight:600;letter-spacing:-.02em;font-family:var(--mono);line-height:1.1;color:var(--fg-strong)}
 .tile .num .delta{font-size:12px;font-weight:500;margin-left:6px;color:var(--mut)}.tile .num.high{color:var(--high)}.tile .num.medium{color:var(--medium)}.tile .num.low{color:var(--low)}.tile .num.info{color:var(--info)}
+/* diagnosis: five sentences from stored data, above the tiles */
+.diag ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}.diag li{display:flex;gap:12px;align-items:baseline;font-size:14px;line-height:1.45}
+.diag .lbl{flex:0 0 72px;font-size:12px;color:var(--mut);font-weight:500;padding-top:1px}.diag li.high .lbl{color:var(--high)}.diag li.medium .lbl{color:var(--medium)}.diag li.low .lbl{color:var(--low)}.diag li.info .lbl{color:var(--info)}
+.diag .cardhead .mut{font-size:12px}
+@media(max-width:640px){.diag li{flex-direction:column;gap:2px}.diag .lbl{flex:none}}
+/* the floating Ask button, bottom right, on the pages that have something to ask about */
+.ask-fab{position:fixed;right:18px;bottom:18px;z-index:40;display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 16px;border-radius:999px;background:var(--ai);color:#fff;font-weight:600;font-size:13px;box-shadow:0 6px 18px rgba(0,0,0,.18);text-decoration:none}
+.ask-fab:hover{filter:brightness(1.1);color:#fff}.ask-fab.off{background:var(--card);color:var(--mut);border:1px solid var(--line2);font-weight:500}.ask-fab svg{width:14px;height:14px}
+@media print{.ask-fab{display:none}}
 /* cards and tables */
 .card{border-radius:12px;border:1px solid var(--line);background:var(--card);padding:16px 20px;min-width:0;overflow-wrap:anywhere}.card table{overflow-wrap:normal}.card.flush{padding:0;overflow:hidden}
 .cardhead{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.card.flush .cardhead{padding:14px 16px;border-bottom:1px solid var(--line)}
@@ -420,6 +431,13 @@ def finding_cell(title: str | None, where: str | None = None) -> str:
 
 def _show(v) -> str:
     return "unset" if v is None else str(v)
+
+
+def diagnosis_html(rows: list[dict]) -> str:
+    """The diagnosis card: a label and one sentence per line, coloured by severity through the label only."""
+    items = "".join(f"<li class='{html.escape(r.get('cls') or '')}'><span class='lbl'>{html.escape(r['label'])}</span><span>{html.escape(r['text'])}</span></li>" for r in rows)
+    return (f"<section class='card diag' aria-labelledby='diag-h'><div class='cardhead'><h2 id='diag-h'>Diagnosis</h2>"
+            f"<span class='mut'>from stored data, no model</span></div><ul>{items}</ul></section>")
 
 
 def _fmt_ts(iso: str | None) -> str:
@@ -866,9 +884,49 @@ class App:
         chips = "".join(f"<a href='/t/{html.escape(name)}?filter={k}'{' class=on' if flt == k else ''}>{l}</a>"
                         for k, l in (("all", "All"), ("incidents", "Incidents"), ("scheduled", "Scheduled")))
         actions = f"<a class='btn' href='/t/{html.escape(name)}/compare'>Compare</a>" + self.capture_button()
+        diag_rows = self.diagnosis_rows(name, t.engine, latest["id"] if latest else None, sched)
         return self.page("target.html", name, refresh=True, active=name, target=html.escape(name), engine=t.engine, links="".join(links), pager=pager,
                          rows="\n".join(trs), strip=strip, status=status_of(latest["severity"] if latest else None), tiles=tiles_html, chips=chips,
-                         actions=actions, run_dialog=self.run_dialog(name))
+                         actions=actions, run_dialog=self.run_dialog(name), diagnosis=diagnosis_html(diag_rows),
+                         ask=self.ask_fab(latest["id"] if latest else None, diagnosis.question(name, diag_rows)))
+
+    def diagnosis_rows(self, name: str, engine: str, latest_sid: str | None, sched: dict | None) -> list[dict]:
+        """The five diagnosis lines for a database from stored data only (dbtriage.diagnosis). Every read is optional:
+        a missing file gives an honest sentence, and a store outage is named on the open-findings line."""
+        tr = self.triage_of(latest_sid) if latest_sid else None
+        cmp_, m, feed = None, None, None
+        if latest_sid:
+            try:
+                m = self.manifest_of(latest_sid)
+            except (FileNotFoundError, ValueError, StorageUnavailable):
+                m = None
+            if self.store.exists(f"{latest_sid}/compare.json"):
+                cmp_ = self.store.get_json(f"{latest_sid}/compare.json")
+            if self.store.exists(f"{latest_sid}/changes.json"):
+                feed = self.store.get_json(f"{latest_sid}/changes.json")
+        led, led_err = None, None
+        try:
+            if self.store.exists(ledger.key(engine, name)):
+                led = ledger.load(self.store, engine, name)
+        except StorageUnavailable as exc:
+            led_err = str(exc)[:120]
+        return diagnosis.lines(triage=tr, comparison=cmp_, manifest=m, ledger=led, changes=feed if isinstance(feed, list) else None,
+                               schedule=sched, ledger_error=led_err)
+
+    def ask_fab(self, latest_sid: str | None, q: str, here: bool = False) -> str:
+        """The floating "Ask AI" button. On a snapshot page (`here`) it opens that page's discussion; on a database page
+        it goes to the latest snapshot's discussion with the diagnosis as the first question. Nothing when chat is off;
+        a quiet link to the settings when no model provider is configured."""
+        if not self.allows("chat") or not latest_sid:
+            return ""
+        ok, why = llm.configured(self.cfg.agent)
+        if not ok:
+            return (f"<a class='ask-fab off' href='/settings#agent' title='{html.escape(why)}'>{ICON['chat']}<span>Ask AI: configure a model</span></a>")
+        if here:
+            return f"<a class='ask-fab' href='#chat-review' data-chat='review'>{ICON['chat']}<span>Ask AI</span></a>"
+        from urllib.parse import quote
+
+        return f"<a class='ask-fab' href='/s/{html.escape(latest_sid)}?ask={quote(q)}#chat-review'>{ICON['chat']}<span>Ask AI about this database</span></a>"
 
     def snapshot(self, sid: str) -> bytes:
         d = self.snapshot_detail(sid)
@@ -1009,8 +1067,9 @@ class App:
                        f"<div class='drow'><span class='mut'>Enter to send · Shift+Enter for newline</span><button type='submit' id='chat-send' class='ai'{'' if ok else ' disabled'}>Send{ICON['arrow']}</button></div></form></aside>")
             discuss_btn = f"<button type='button' class='ai' id='discuss-open'>{ICON['chat']}Discuss with AI</button>"
         actions = f"<a class='btn' href='/t/{T}/compare?a={html.escape(sid)}'>Change reference</a>" + discuss_btn
+        fab = self.ask_fab(sid, "", here=True) if tr else ""
         return self.page("snapshot.html", sid, active=target, sid=sid, target=T, captured=captured, time=captured[11:19],
-                         mode=html.escape(m["window"]["mode"]) + vs + _db_snapshot_note(m.get("db_snapshot")), review=review, top_sql=top, charts=chart_html, actions=actions, discuss=discuss,
+                         mode=html.escape(m["window"]["mode"]) + vs + _db_snapshot_note(m.get("db_snapshot")), review=review, top_sql=top, charts=chart_html, actions=actions, discuss=discuss + fab,
                          sevpill=sev(tr.get("severity")) if tr else "", engine=html.escape(m.get("engine", "")))
 
     def error_page(self, code: int, msg: str) -> bytes:

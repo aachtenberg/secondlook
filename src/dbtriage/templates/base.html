@@ -187,7 +187,9 @@ $body
     });
     var closed = null; try { closed = localStorage.getItem(DKEY) === 'closed'; } catch (e) {}
     var deep = /^#chat-(review|finding-\d+|sql-[A-Za-z0-9_]+)$/.exec(location.hash);
-    if (deep) openKey(deep[1]); else if (closed) box.hidden = true; else openKey('review', function () {});
+    var askq = null; try { askq = new URLSearchParams(location.search).get('ask'); } catch (e) {}
+    if (askq) { openKey('review', function () { q.value = askq; q.focus(); }); }  // the database page's Ask button: the diagnosis as the first question
+    else if (deep) openKey(deep[1]); else if (closed) box.hidden = true; else openKey('review', function () {});
   }
   document.addEventListener('click', function (e) {
     var a = e.target.closest('a[data-panel]');
