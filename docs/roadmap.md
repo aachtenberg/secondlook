@@ -122,7 +122,7 @@ For each target, compare the current interval with the spread of the same clock 
 
 Two constraints from the data:
 
-- Cumulative engines (PostgreSQL, MySQL, MariaDB) need two consecutive snapshots to form an interval, so each week contributes a window only when both exist. Interval engines (Oracle AWR, SQL Server) contribute one snapshot per week.
+- Cumulative engines (PostgreSQL, MySQL, MariaDB, SQL Server) need two consecutive snapshots to form an interval, so each week contributes a window only when both exist. The one interval engine (Oracle AWR) contributes one snapshot per week.
 - A counter reset or restart inside a window (`counters_since`, AWR startup) voids that week. The band states how many weeks it is built from, and it is not written at all below three.
 
 ### 8. The record you can hand someone

@@ -24,13 +24,20 @@ def sid_at(engine: str, target: str, t: datetime) -> str:
 
 def fill(store: LocalStorage, engine: str = "postgres", target: str = "pg", kind: str = "cumulative", weeks: int = 6,
          first: datetime | None = None, last: datetime | None = None, missing: set | None = None, reset_at: set | None = None,
-         restart_note: set | None = None, startup_inside: set | None = None) -> None:
+         restart_note: set | None = None, startup_inside: set | None = None, late: set | None = None, no_lock: set | None = None,
+         db_offset: timedelta | None = None) -> None:
     """Hourly snapshots from `weeks` weeks (and two hours) before MONDAY to MONDAY, cumulative counters or AWR-style
     intervals. `missing` hours are not stored; `reset_at` hours carry a new counters_since (a reset inside that hour);
-    `restart_note` and `startup_inside` mark AWR windows that span a restart."""
+    `restart_note` and `startup_inside` mark AWR windows that span a restart; `late` hours are captured 59 minutes
+    after the hour; `no_lock` hours have no Lock waits; `db_offset` writes the AWR timestamps as naive values on a
+    database clock that far from UTC, as Oracle reports them."""
     first = first or MONDAY - timedelta(weeks=weeks, hours=2)
     last = last or MONDAY
     t, total = first, {"commits": 0, "ms": 0}
+
+    def clock(x: datetime) -> str:
+        return (x + db_offset).replace(tzinfo=None).isoformat() if db_offset is not None else x.isoformat()
+
     while t <= last:
         r = rate(t)
         hour_commits = r * 3600
@@ -39,29 +46,30 @@ def fill(store: LocalStorage, engine: str = "postgres", target: str = "pg", kind
         if t in (missing or set()):
             t += timedelta(hours=1)
             continue
+        captured = t + timedelta(minutes=59) if t in (late or set()) else t
         if kind == "cumulative":
             since = "2026-01-01T00:00:00+00:00" if t not in (reset_at or set()) else (t - timedelta(minutes=30)).isoformat()
-            summary = {"engine": engine, "metrics_kind": "cumulative", "captured_at": t.isoformat(), "counters_since": since,
+            summary = {"engine": engine, "metrics_kind": "cumulative", "captured_at": captured.isoformat(), "counters_since": since,
                        "load_profile": {"xact_commit": total["commits"], "blks_hit": total["commits"] * 100, "blks_read": total["commits"],
                                         "temp_bytes": 0, "deadlocks": 0, "sessions_active": 3},
                        "top_sql": [{"sql_id": "q1", "text": "q1", "calls": total["commits"], "total_time_ms": total["ms"], "rows": 1}],
-                       "wait_events": [{"class": "IO", "event": "read", "count": total["commits"]},
-                                       {"class": "Lock", "event": "relation", "count": total["commits"] // 10}]}
+                       "wait_events": [{"class": "IO", "event": "read", "count": total["commits"]}]
+                       + ([] if t in (no_lock or set()) else [{"class": "Lock", "event": "relation", "count": total["commits"] // 10}])}
         else:
             begin = t - timedelta(hours=1)
-            awr = {"begin": begin.isoformat(), "end": t.isoformat(), "elapsed_s": 3600, "startup": "2026-01-01T00:00:00+00:00"}
+            awr = {"begin": clock(begin), "end": clock(t), "elapsed_s": 3600, "startup": clock(datetime(2026, 1, 1, tzinfo=timezone.utc))}
             if t in (restart_note or set()):
                 awr["note"] = "the window spans an instance restart"
             if t in (startup_inside or set()):
-                awr["startup"] = (t - timedelta(minutes=20)).isoformat()
-            summary = {"engine": engine, "metrics_kind": "interval", "captured_at": t.isoformat(), "counters_since": begin.isoformat(), "awr": awr,
+                awr["startup"] = clock(t - timedelta(minutes=20))
+            summary = {"engine": engine, "metrics_kind": "interval", "captured_at": captured.isoformat(), "counters_since": clock(begin), "awr": awr,
                        "load_profile": {"elapsed_s": 3600, "xact_commit": hour_commits, "db_time_ms": hour_commits * 2, "sessions_active": 3},
                        "top_sql": [{"sql_id": "q1", "text": "q1", "calls": hour_commits, "total_time_ms": hour_commits * 2, "mean_time_ms": 2}],
                        "wait_events": [{"class": "User I/O", "event": "db file sequential read", "time_ms": hour_commits},
                                        {"class": "Concurrency", "event": "latch", "time_ms": hour_commits // 10}]}
-        sid = sid_at(engine, target, t)
+        sid = sid_at(engine, target, captured)
         store.put_json(f"{sid}/summary.json", summary)
-        store.put_json(f"{sid}/manifest.json", {"id": sid, "engine": engine, "target": target, "captured_at": t.isoformat(),
+        store.put_json(f"{sid}/manifest.json", {"id": sid, "engine": engine, "target": target, "captured_at": captured.isoformat(),
                                                  "metrics_kind": kind, "reports": []})
         t += timedelta(hours=1)
 
@@ -105,6 +113,65 @@ def test_week_with_a_counter_reset_or_no_snapshot_is_skipped_and_named(tmp_path)
     assert (m["min"], m["max"], m["median"]) == (400, 640, 490) and m["high"] == 640 and m["low"] == 400  # weeks 1, 2, 4, 6
 
 
+def test_a_window_must_cover_the_hour_and_match_its_length(tmp_path):
+    """A missing 01:00 folds two hours into last Monday's 02:00 window, and a late collector's 02:59 window touches
+    the hour by a minute: neither stands for it, the next snapshot inside the tolerance is tried, and the week
+    says why. A clean hour is kept."""
+    st = LocalStorage(tmp_path)
+    folded, late = mondays(6)[1], mondays(6)[3]
+    fill(st, missing={folded - timedelta(hours=1)}, late={late - timedelta(hours=1), late})
+    band = usual_band(st, "postgres", "pg", sid_at("postgres", "pg", MONDAY))
+    assert band["weeks_used"] == 4 and [s["week"] for s in band["skipped"]] == [2, 4]
+    assert [datetime.fromisoformat(w["end"]) for w in band["windows"]] == [mondays(6)[i] for i in (0, 2, 4, 5)]
+    two_hours = band["skipped"][0]
+    assert two_hours["snapshot"] == sid_at("postgres", "pg", folded)
+    assert two_hours["reason"] == "the window 00:00-02:00 is 2.0h long, not the current interval's 1.0h"
+    assert [t["snapshot"] for t in two_hours["also_tried"]] == [sid_at("postgres", "pg", folded + timedelta(hours=1))]  # 03:00: the hour after
+    touch = band["skipped"][1]
+    assert touch["snapshot"] == sid_at("postgres", "pg", late - timedelta(minutes=1))  # 01:59 is nearest to 02:00, but its window starts at 00:00
+    assert touch["reason"] == "the window 00:00-01:59 is 2.0h long, not the current interval's 1.0h"
+    assert touch["also_tried"] == [{"snapshot": sid_at("postgres", "pg", late + timedelta(minutes=59)),
+                                    "reason": "the window 01:59-02:59 does not cover the same hour (01:00-02:00)"},
+                                   {"snapshot": sid_at("postgres", "pg", late + timedelta(hours=1)),  # 03:00 is an hour off: still inside the tolerance
+                                    "reason": "the window 02:59-03:00 does not cover the same hour (01:00-02:00)"}]
+    # the hour is the interval the review scores: a two-hour baseline -> current has no hour-long window to match
+    assert usual_band(st, "postgres", "pg", sid_at("postgres", "pg", MONDAY), baseline=sid_at("postgres", "pg", MONDAY - timedelta(hours=2))) is None
+
+
+def test_a_week_whose_summary_cannot_be_read_is_skipped_not_fatal(tmp_path):
+    """summary.json gone from one past week, malformed in another: each voids its week with the reason, like a
+    reset; the current snapshot's own summary still has to be there."""
+    import pytest
+
+    st = LocalStorage(tmp_path)
+    fill(st)
+    gone, broken = mondays(6)[1], mondays(6)[3]
+    (tmp_path / sid_at("postgres", "pg", gone) / "summary.json").unlink()
+    st.put_json(f"{sid_at('postgres', 'pg', broken)}/summary.json", {"captured_at": broken.isoformat(), "load_profile": "nope"})
+    band = usual_band(st, "postgres", "pg", sid_at("postgres", "pg", MONDAY))
+    assert band["weeks_used"] == 4 and [s["week"] for s in band["skipped"]] == [2, 4]
+    assert band["skipped"][0]["snapshot"] == sid_at("postgres", "pg", gone) and band["skipped"][0]["reason"].startswith("its summary cannot be read (FileNotFoundError")
+    assert band["skipped"][1]["reason"].startswith("its summary cannot be read (")
+    (tmp_path / sid_at("postgres", "pg", MONDAY) / "summary.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        usual_band(st, "postgres", "pg", sid_at("postgres", "pg", MONDAY))
+
+
+def test_a_metric_seen_in_only_some_weeks_counts_its_own_weeks(tmp_path):
+    """Lock waits in three of the six Mondays: the wait class's band has n 3, its high mark is the max (not a p90
+    from the window count), and its sentence says 3 of 6 weeks while a metric in every window still says 6."""
+    st = LocalStorage(tmp_path)
+    fill(st, no_lock=set(mondays(6)[:3]))
+    band = usual_band(st, "postgres", "pg", sid_at("postgres", "pg", MONDAY))
+    lock = band["metrics"]["wait_share:Lock"]
+    assert band["weeks_used"] == 6 and band["high_is"] == "p90" and band["metrics"]["xact_commit"]["high_is"] == "p90"
+    assert lock["n"] == 3 and lock["high_is"] == "max" and lock["high"] == lock["max"] and lock["low"] == lock["min"]
+    assert sentence(band, "wait_share:Lock", 0.3, "wait class 'Lock'", percent=True) == \
+        "wait class 'Lock' 30% is above every same-hour window in 3 of 6 weeks: median 9.1%, high 9.1%"
+    assert "(3 of 6 weeks)" in sentence(band, "wait_share:Lock", 0.09, "wait class 'Lock'", percent=True)
+    assert "(6 weeks)" in sentence(band, "xact_commit", 550)
+
+
 def test_fewer_than_three_weeks_gives_no_band(tmp_path):
     st = LocalStorage(tmp_path)
     fill(st, weeks=2)
@@ -129,6 +196,24 @@ def test_interval_engine_takes_one_snapshot_per_week_and_skips_restarts(tmp_path
     assert band["metrics"]["xact_commit"]["median"] == (520 + 580) / 2 and band["metrics"]["db_time_ms"]["max"] == 1400
 
 
+def test_awr_windows_are_placed_by_elapsed_s_not_the_database_clock(tmp_path):
+    """Oracle reports begin, end, startup and counters_since as naive timestamps on the database's clock. Five hours
+    ahead of UTC that used to skip every week (the window looked like the afternoon); behind, it stretched the
+    overlap. The week's window is captured_at minus elapsed_s, and the startup is checked on the database's clock."""
+    st = LocalStorage(tmp_path)
+    startup = mondays(6)[2]
+    fill(st, engine="oracle", target="ora", kind="interval", db_offset=timedelta(hours=5), startup_inside={startup})
+    band = usual_band(st, "oracle", "ora", sid_at("oracle", "ora", MONDAY))
+    assert band["weeks_used"] == 5 and [s["week"] for s in band["skipped"]] == [3]
+    assert band["skipped"][0]["reason"].startswith("instance startup at ") and "inside the window" in band["skipped"][0]["reason"]
+    ends = [datetime.fromisoformat(w["end"]) for w in band["windows"]]
+    assert ends == [mondays(6)[i] for i in (0, 1, 3, 4, 5)]
+    assert all(datetime.fromisoformat(w["start"]) == e - timedelta(hours=1) for w, e in zip(band["windows"], ends))
+    behind = LocalStorage(tmp_path / "behind")
+    fill(behind, engine="oracle", target="ora", kind="interval", db_offset=timedelta(hours=-5))
+    assert usual_band(behind, "oracle", "ora", sid_at("oracle", "ora", MONDAY))["weeks_used"] == 6
+
+
 # --------------------------------------------------------------------------- what it says
 def test_sentences_inside_above_all_above_and_below(tmp_path):
     st = LocalStorage(tmp_path)
@@ -143,7 +228,7 @@ def test_sentences_inside_above_all_above_and_below(tmp_path):
         "wait class 'Lock' 30% is above every same-hour window in 6 weeks: median 9.1%, high 9.1%"
     assert sentence(band, "nothing_like_it", 1) is None and sentence(band, "xact_commit", None) is None
     assert [position(band, "xact_commit", v) for v in (550, 900, 690, 300)] == ["inside", "above_all", "above", "below"]
-    band["weeks_used"] = 4
+    band["metrics"]["xact_commit"]["n"] = 4  # the metric's own count of weeks is the claim, not the band's window count
     assert "(4 of 6 weeks)" in sentence(band, "xact_commit", 550) and "in 4 of 6 weeks" in sentence(band, "xact_commit", 900)
 
 
@@ -176,7 +261,6 @@ def test_compare_ids_carries_the_band_when_the_windows_match(tmp_path):
     # the finding the hour raises against the quiet hour before it says the hour is usual
     drop = {f["kind"]: f for f in out["findings"]}
     assert "throughput_drop" not in drop  # commits rose; the load findings get the sentence when they fire
-    # a week-long current interval (same-time-last-week baseline on a cumulative engine) is not compared with hour windows
-    week = compare_ids(st, "postgres", "pg", cur, sid_at("postgres", "pg", MONDAY - timedelta(weeks=1)))
-    assert week["band"]["applies"] is False and "168.0h long" in week["band"]["note"] and "sentence" not in week["band"]
+    # a week-long current interval (same-time-last-week baseline on a cumulative engine) has no hour windows to match
+    assert compare_ids(st, "postgres", "pg", cur, sid_at("postgres", "pg", MONDAY - timedelta(weeks=1)))["band"] is None
     assert compare_ids(st, "postgres", "pg", cur, prev, band_weeks=0)["band"] is None

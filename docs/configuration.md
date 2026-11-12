@@ -229,12 +229,16 @@ as "commits 12/s is inside the usual Monday 02:00 band (6 weeks)", "above every 
 stays the comparison the review is written against; the band only says whether this hour is unusual for this
 database.
 
-The band is honest about what it is built from. For PostgreSQL, MySQL and MariaDB a week counts only when both
-snapshots around that hour exist; for Oracle AWR one snapshot per week within an hour of the same time. A week with
-a counter reset or an instance restart inside its window is skipped, the sentence says how many weeks remain
-("4 of 6 weeks"), and below three usable weeks no band is written at all. A window much longer than the band's
-(a week-long interval under `same-time-last-week`) is not compared with hour-long ones either; `compare.json`
-notes why under `band`. It reads only the stored `summary.json` files: nothing new is collected or stored.
+The band is honest about what it is built from. For PostgreSQL, MySQL, MariaDB and SQL Server a week counts only
+when both snapshots around that hour exist; for Oracle AWR, the one engine whose snapshots are intervals, one
+snapshot per week within an hour of the same time. A past window stands for the hour only when it covers at least
+80 percent of it and is within that ratio of the current interval's length: a missing neighbour that folds two hours
+into one window, or a late snapshot whose window only touches the hour, is skipped and named. So is a week with a
+counter reset or an instance restart inside its window, or whose stored summary cannot be read. The sentence says
+how many weeks remain ("4 of 6 weeks"; a wait class seen in only some of them counts its own), and below three
+usable weeks no band is written at all. A week-long interval (`same-time-last-week` on a cumulative engine) has no
+hour-long windows to match, so it gets no band. It reads only the stored `summary.json` files: nothing new is
+collected or stored.
 
 ## How the comparison works
 

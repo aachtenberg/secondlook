@@ -285,8 +285,8 @@ def test_compare_tool_passes_the_usual_band(tmp_path, monkeypatch):
     fake = {"label": "Thursday 10:20 UTC", "weeks": 6, "weeks_used": 5, "high_is": "p90", "window_s": 600, "skipped": [{"week": 2, "reason": "x"}],
             "metrics": {"sql_time_ms": {"median": 20.0, "high": 30.0, "low": 15.0, "max": 40.0, "min": 10.0, "n": 5}}}
 
-    def usual_band(store, engine, target, sid, weeks=6, hours_tolerance=1):
-        asked.append((engine, target, sid, weeks))
+    def usual_band(store, engine, target, sid, weeks=6, hours_tolerance=1, baseline=None):
+        asked.append((engine, target, sid, weeks, baseline))
         return fake
 
     monkeypatch.setattr(usual, "usual_band", usual_band)
@@ -294,7 +294,7 @@ def test_compare_tool_passes_the_usual_band(tmp_path, monkeypatch):
     agent.band_weeks = 8
     tools = {t.name: t for t in agent._tools("postgres", "demo")}
     cmp = json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))
-    assert asked == [("postgres", "demo", ids[-1], 8)]
+    assert asked == [("postgres", "demo", ids[-1], 8, ids[-2])]  # the band's hour is the baseline -> current interval
     assert cmp["band"]["applies"] is True and cmp["band"]["weeks_used"] == 5 and cmp["band"]["skipped"] == [{"week": 2, "reason": "x"}]
     reg = next(f for f in cmp["findings"] if f["kind"] == "sql_regressed")
     assert reg["evidence"]["band"].startswith("total SQL time ") and "in 5 of 6 weeks" in reg["evidence"]["band"]
@@ -307,7 +307,12 @@ def test_compare_tool_passes_the_usual_band(tmp_path, monkeypatch):
     assert f"_Usual band: {cmp['band']['sentence']}_" in md
     agent.band_weeks = 0
     assert json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))["band"] is None
-    assert asked == [("postgres", "demo", ids[-1], 8)]  # not asked again
+    assert asked == [("postgres", "demo", ids[-1], 8, ids[-2])]  # not asked again
+    # a front end that builds the tools without run() passes the lookup by target name
+    by_name = TriageAgent(st, backend=None, band_weeks_for=lambda name: {"demo": 12}[name])
+    tools = {t.name: t for t in by_name._tools("postgres", "demo")}
+    tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]})
+    assert asked[-1][3] == 12
 
 
 def test_evidence_lines_keep_the_band_sentence():

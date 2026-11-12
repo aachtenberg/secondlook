@@ -8,7 +8,7 @@ submit_triage; that structured result is what gets stored and delivered.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 from anthropic import beta_tool  # used only to derive JSON schemas from the docstrings below
 from pydantic import BaseModel, Field
@@ -55,12 +55,15 @@ SECTIONS = ("load_profile", "top_sql", "wait_events", "ash", "sessions", "tables
 
 
 class TriageAgent:
-    def __init__(self, storage: Storage, backend: Backend):
+    def __init__(self, storage: Storage, backend: Backend, band_weeks_for: Callable[[str], int] | None = None):
         self.storage = storage
         self.backend = backend
         self.result: dict | None = None
         self.tool_log: list[dict] = []  # every tool call of the current run, in order; stored as tools.json
         self.band_weeks = band.DEFAULT_WEEKS  # the target's band_weeks, set by run(); 0 leaves the usual band out of compare_snapshots
+        # by target name, for the front ends that use the tools without run() (mcp_server, chat): they pass the
+        # config lookup, so a target's 0 or 12 holds there too; otherwise it is band_weeks as run() set it
+        self.band_weeks_for = band_weeks_for or (lambda target: self.band_weeks)
 
     # ----------------------------------------------------------------- data access
     def _summary(self, snapshot_id: str) -> dict:
@@ -143,7 +146,8 @@ class TriageAgent:
             before = agent.storage.previous(engine, target, baseline_id)
             margin = agent.storage.get_json(f"{snapshot_id}/manifest.json").get("correlate_minutes")
             margin = cmp.CORRELATE_MINUTES if margin in (None, "") else int(margin)  # an explicit 0 is a choice, not a blank
-            usual = band.usual_band(agent.storage, engine, target, snapshot_id, weeks=agent.band_weeks) if agent.band_weeks else None
+            weeks = agent.band_weeks_for(target)
+            usual = band.usual_band(agent.storage, engine, target, snapshot_id, weeks=weeks, baseline=baseline_id) if weeks else None
             return json.dumps(cmp.compare(cur, base, agent._summary(before) if before else None,
                                           changes=agent._stored_changes(snapshot_id), correlate_minutes=margin, band=usual), default=str)
 

@@ -104,7 +104,8 @@ def compare_ids(store: Storage, engine: str, target: str, sid: str, baseline: st
     `band_weeks` is the target's band_weeks: the usual band for this hour is passed in when the history allows (0: never)."""
     cur = summary_of(store, sid)
     feed, margin = stored_changes(store, sid)
-    usual = band.usual_band(store, engine, target, sid, weeks=band_weeks) if band_weeks else None
+    # the band's hour is the interval scored below: baseline -> current on a cumulative engine
+    usual = band.usual_band(store, engine, target, sid, weeks=band_weeks, baseline=baseline) if band_weeks else None
     if cur.get("metrics_kind") == "interval":
         out = cmp.compare(cur, summary_of(store, baseline) if baseline else None, changes=feed, correlate_minutes=margin, band=usual)
     elif not baseline:
@@ -123,7 +124,7 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
     manifest = store.get_json(f"{sid}/manifest.json")
     engine, target = manifest["engine"], manifest["target"]
     t = cfg.targets.get(target)
-    weeks = band.weeks_of((t.extra if t else {}).get("band_weeks"))
+    weeks = band.weeks_for(cfg, target)
     comparison = compare_ids(store, engine, target, sid, baseline, how, band_weeks=weeks)
     if how:
         manifest["baseline"] = {"snapshot": baseline, "policy": how[0], "reason": how[1]}

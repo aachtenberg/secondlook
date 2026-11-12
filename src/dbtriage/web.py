@@ -1266,7 +1266,10 @@ class App:
         except Exception as exc:  # noqa: BLE001 - any other store error is an answer, never a dropped request
             return 502, {"error": f"could not read the snapshot: {type(exc).__name__}: {str(exc)[:200]}"}
         try:
-            answer = chat.Chat(self.store, lambda: llm.make_backend(self.cfg.agent)).ask(sid, finding, question)
+            from dbtriage.band import weeks_for
+
+            answer = chat.Chat(self.store, lambda: llm.make_backend(self.cfg.agent),
+                               band_weeks_for=lambda name: weeks_for(self.cfg, name)).ask(sid, finding, question)
         except ValueError as exc:
             return 400, {"error": str(exc)}
         except StorageUnavailable as exc:  # the store went away during the discussion: the same 503 as before it

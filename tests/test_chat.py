@@ -34,6 +34,35 @@ class Fake:
                                model="m", usage={"input_tokens": 10, "output_tokens": 5}, tool_calls=1)
 
 
+def test_the_tools_honour_the_targets_band_weeks(tmp_path, monkeypatch):
+    """Chat builds the reviewer's tools without run(): compare_snapshots takes the band_weeks lookup the web view
+    passes, so a target's 0 or 12 holds in a discussion too; without one, the default."""
+    from dbtriage import band
+    from tests.conftest import seed_store
+
+    demo, base = "postgres/demo/2026-11-05/20261105T100000Z", "postgres/demo/2026-11-05/20261105T090000Z"
+    st = seed_store(tmp_path / "data")
+    asked = []
+
+    def usual_band(store, engine, target, sid, weeks=6, hours_tolerance=1, baseline=None):
+        asked.append((target, weeks))
+        return None
+
+    monkeypatch.setattr(band, "usual_band", usual_band)
+
+    class Compares:
+        name = "fake"
+
+        def run(self, system, task, tools, max_iterations=25, require_tool=None, stop_when=None):
+            next(t for t in tools if t.name == "compare_snapshots").fn({"snapshot_id": demo, "baseline_id": base})
+            return llm.AgentResult(text="ok", stop_reason="end_turn", model="m", usage={}, tool_calls=1)
+
+    chat.Chat(st, Compares, band_weeks_for=lambda name: {"demo": 12}[name]).ask(demo, None, "is this hour usual?")
+    chat.Chat(st, Compares, band_weeks_for=lambda name: 0).ask(demo, None, "and now?")
+    chat.Chat(st, Compares).ask(demo, None, "and by default?")
+    assert asked == [("demo", 12), ("demo", 6)]
+
+
 def test_thread_keys_and_context(tmp_path):
     st = store(tmp_path)
     c = chat.Chat(st, Fake)

@@ -6,11 +6,14 @@ metric, for total SQL time, and for each wait class's share. compare.diff turns 
 ("inside the usual Monday 02:00 band (6 weeks)"); the single comparison snapshot stays the narrative baseline.
 
 Pure arithmetic over summary.json files: no new store, no time-series database.
-  * cumulative engines (postgres, mysql): a week contributes the consecutive pair of snapshots that spans the same
-    hour; both must exist, and the interval between them is the window.
+  * cumulative engines (postgres, mysql, sql server): a week contributes the consecutive pair of snapshots that spans
+    the same hour; both must exist, and the interval between them is the window.
   * interval engines (oracle AWR): one snapshot per week, the one nearest the same time within the tolerance.
-A counter reset or an instance restart inside a week's window voids that week. The band says how many weeks it is
-built from and which were skipped and why, and it is not written at all below three.
+A past window stands for the hour only when it covers most of it and is about as long as the interval the review
+scores (COVERAGE): a missing neighbour that folds two hours into one, or a late snapshot whose window touches the
+hour by a minute, is not the same hour. A counter reset or an instance restart inside the window, or a summary that
+cannot be read, voids that week. The band says how many weeks it is built from and which were skipped and why, and
+it is not written at all below three.
 """
 from __future__ import annotations
 
@@ -22,11 +25,20 @@ from dbtriage.compare import _is_gauge, interval_between, interval_of
 DEFAULT_WEEKS = 6
 MIN_WEEKS = 3  # a "usual" needs at least this many windows; below it there is no band
 PERCENTILE_FROM = 5  # with this many weeks the high mark is the 90th percentile, else the max
+COVERAGE = 0.8  # a past window must cover this share of the hour, and be within this ratio of the current interval's length
+MARKS = ("median", "high", "low", "max", "min")  # a metric's band, in the metric's unit; n and high_is sit beside them
 
 
 def weeks_of(v) -> int:
     """A target's band_weeks: the default when blank, the number otherwise; 0 switches the band off."""
     return DEFAULT_WEEKS if v in (None, "") else int(v)
+
+
+def weeks_for(cfg, target: str) -> int:
+    """A target's band_weeks by name from the config, as every front end should read it; the default for a target
+    the config does not know."""
+    t = cfg.targets.get(target)
+    return weeks_of((t.extra if t else {}).get("band_weeks"))
 
 
 def _ts(iso: str, like: datetime | None = None) -> datetime:
@@ -46,32 +58,47 @@ def _quantile(values: list[float], q: float) -> float:
     return vs[lo] + (vs[hi] - vs[lo]) * (pos - lo)
 
 
-def _nearest(times: dict[str, datetime], at: datetime, tolerance: timedelta, exclude: str) -> str | None:
-    best = None
-    for sid, t in times.items():
-        if sid == exclude:
-            continue
-        off = abs(t - at)
-        if off <= tolerance and (best is None or off < best[0]):
-            best = (off, sid)
-    return best[1] if best else None
+def _candidates(times: dict[str, datetime], at: datetime, tolerance: timedelta, exclude: str) -> list[str]:
+    """The snapshots within the tolerance of `at`, nearest first."""
+    near = [(abs(t - at), sid) for sid, t in times.items() if sid != exclude and abs(t - at) <= tolerance]
+    return [sid for _, sid in sorted(near)]
+
+
+def _span(a: datetime, b: datetime) -> str:
+    return f"{a:%H:%M}-{b:%H:%M}" if b - a <= timedelta(days=1) else f"{a:%Y-%m-%d %H:%M} to {b:%Y-%m-%d %H:%M}"
+
+
+def _fits(start: datetime, end: datetime, at: datetime, cur_len: timedelta) -> str | None:
+    """Why a past window cannot stand for the hour [at - cur_len, at]: it covers too little of it (the neighbouring
+    hour, or a late snapshot's window that touches it by minutes), or it is much longer or shorter than the current
+    interval (a missing snapshot folds two hours into one). None when it fits."""
+    since = at - cur_len
+    if min(end, at) - max(start, since) < cur_len * COVERAGE:
+        return f"the window {_span(start, end)} does not cover the same hour ({_span(since, at)})"
+    length = end - start
+    if not cur_len * COVERAGE <= length <= cur_len / COVERAGE:
+        return (f"the window {_span(start, end)} is {length.total_seconds() / 3600:.1f}h long, "
+                f"not the current interval's {cur_len.total_seconds() / 3600:.1f}h")
+    return None
 
 
 def _restart_inside(summary: dict, start: datetime, end: datetime) -> str | None:
     """Why an interval snapshot's window cannot stand for its hour: a restart inside it. AWR clips the window to the
-    time since the restart and notes it; SQL Server's counters_since is the instance start."""
+    time since the restart and notes it; the startup time is checked as well, on the database's own clock (AWR's
+    begin, end and startup are naive timestamps from that clock), falling back to the UTC window given."""
     awr = summary.get("awr") or {}
     if awr.get("note"):
         return "the AWR window spans an instance restart"
-    for key, label in ((awr.get("startup"), "instance startup"), (summary.get("counters_since"), "counter reset")):
-        if not key:
-            continue
-        try:
-            t = _ts(key, end)
-        except (TypeError, ValueError):
-            continue
-        if start < t <= end:
-            return f"{label} at {t.isoformat()} inside the window"
+    if not awr.get("startup"):
+        return None
+    try:
+        t = _ts(awr["startup"], end)
+        if awr.get("begin") and awr.get("end"):
+            start, end = _ts(awr["begin"], end), _ts(awr["end"], end)
+    except (TypeError, ValueError):
+        return None
+    if start < t <= end:
+        return f"instance startup at {t.isoformat()} inside the window"
     return None
 
 
@@ -95,12 +122,17 @@ def measures(iv: dict) -> dict[str, float]:
 
 
 def usual_band(store, engine: str, target: str, current_sid: str, weeks: int = DEFAULT_WEEKS,
-               hours_tolerance: float = 1) -> dict | None:
+               hours_tolerance: float = 1, baseline: str | None = None) -> dict | None:
     """The same clock hour and weekday as `current_sid`, over each of the past `weeks` weeks, as a band per metric.
+
+    `baseline` is the snapshot the current one is scored against (compare's baseline -> current interval): on a
+    cumulative engine its length is the hour every past window must cover and match; the snapshot before stands in
+    when there is none. An interval engine's hour is the snapshot's own window.
 
     Returns None when fewer than MIN_WEEKS weeks are usable (or the band is switched off), else
     {label, hour, weekday, weeks, weeks_used, high_is, window_s, windows, skipped, metrics}, where each metric has
-    {median, high, low, max, min, n}. The high mark is the 90th percentile from PERCENTILE_FROM weeks on, the max below.
+    {median, high, low, max, min, n, high_is}. The high mark is the 90th percentile from PERCENTILE_FROM weeks of
+    that metric on, the max below.
     """
     if not weeks or weeks < MIN_WEEKS:
         return None
@@ -118,7 +150,7 @@ def usual_band(store, engine: str, target: str, current_sid: str, weeks: int = D
     if min(times.values()) > now - timedelta(days=7 * MIN_WEEKS) + tol:
         return None  # not enough history yet: say so without opening a single summary
 
-    current = store.get_json(f"{current_sid}/summary.json")
+    current = store.get_json(f"{current_sid}/summary.json")  # the current snapshot's own summary failing is the review's own failure
     current["id"] = current_sid
     interval_engine = current.get("metrics_kind") == "interval"
 
@@ -127,47 +159,63 @@ def usual_band(store, engine: str, target: str, current_sid: str, weeks: int = D
         s["id"] = sid
         return s
 
-    # the hour being banded: the current snapshot's own window (the AWR interval, or the gap to the snapshot before)
+    # the hour being banded: the interval the review scores (the AWR window, or baseline -> current on cumulative counters)
     if interval_engine:
         cur_len = timedelta(seconds=interval_of(current).get("elapsed_s") or 3600)
     else:
-        prev_sid = store.previous(engine, target, current_sid)
-        cur_len = now - times[prev_sid] if prev_sid in times else timedelta(hours=1)
+        ref = baseline if baseline in times and times[baseline] < now else store.previous(engine, target, current_sid)
+        cur_len = now - times[ref] if ref in times else timedelta(hours=1)
+
+    def window_of(w: int, sid: str, at: datetime) -> tuple[dict | None, dict | None, str | None]:
+        """One candidate snapshot's window for week w: (window, interval, why it cannot stand for the hour)."""
+        try:
+            if interval_engine:
+                s = summary(sid)
+                iv = interval_of(s)
+                end = times[sid]
+                if not iv.get("elapsed_s"):
+                    return None, None, "the AWR window has no elapsed_s"
+                # on the UTC timeline the band keeps: AWR's own begin is a naive timestamp on the database's clock
+                start = end - timedelta(seconds=iv["elapsed_s"])
+                window = {"week": w, "snapshot": sid, "start": start.isoformat(), "end": end.isoformat(), "elapsed_s": iv["elapsed_s"]}
+                why = _restart_inside(s, start, end)
+            else:
+                prev = store.previous(engine, target, sid)
+                if prev is None:
+                    return None, None, "no snapshot before it to form an interval"
+                a, b = summary(prev), summary(sid)
+                iv = interval_between(a, b)
+                start, end = _ts(iv["start"], now), _ts(iv["end"], now)
+                window = {"week": w, "snapshot": sid, "baseline": prev, "start": iv["start"], "end": iv["end"], "elapsed_s": iv["elapsed_s"]}
+                why = f"counter reset inside the window (counters_since {b.get('counters_since')})" if iv.get("counters_reset") else None
+        except (FileNotFoundError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            # one old snapshot with a missing or malformed summary voids its week, not the review
+            return None, None, f"its summary cannot be read ({type(exc).__name__}: {exc})"
+        return window, iv, why or _fits(start, end, at, cur_len)
 
     windows: list[dict] = []
     skipped: list[dict] = []
     rows: list[dict[str, float]] = []
     for w in range(1, weeks + 1):
         at = now - timedelta(days=7 * w)
-        sid = _nearest(times, at, tol, current_sid)
-        if sid is None:
+        near = _candidates(times, at, tol, current_sid)
+        if not near:
             skipped.append({"week": w, "reason": f"no snapshot within ±{hours_tolerance:g}h of {at.isoformat()}"})
             continue
-        if interval_engine:
-            iv = interval_of(summary(sid))
-            end = times[sid]
-            start = _ts(iv["start"], now) if iv.get("start") else end - timedelta(seconds=iv.get("elapsed_s") or 0)
-            window = {"week": w, "snapshot": sid, "start": start.isoformat(), "end": end.isoformat(), "elapsed_s": iv.get("elapsed_s") or 0}
-            why = _restart_inside(summary(sid), start, end)
+        tried: list[tuple[str, str]] = []
+        for sid in near:  # the nearest first; when its window is not the hour, a later one inside the tolerance may be
+            window, iv, why = window_of(w, sid, at)
+            if why is None:
+                windows.append(window)
+                rows.append(measures(iv))
+                break
+            tried.append((sid, why))
         else:
-            prev = store.previous(engine, target, sid)
-            if prev is None:
-                skipped.append({"week": w, "snapshot": sid, "reason": "no snapshot before it to form an interval"})
-                continue
-            a, b = summary(prev), summary(sid)
-            iv = interval_between(a, b)
-            start, end = _ts(iv["start"], now), _ts(iv["end"], now)
-            window = {"week": w, "snapshot": sid, "baseline": prev, "start": iv["start"], "end": iv["end"], "elapsed_s": iv["elapsed_s"]}
-            why = f"counter reset inside the window (counters_since {b.get('counters_since')})" if iv.get("counters_reset") else None
-        if why is None and not (start < at and end > at - cur_len):
-            # the nearest snapshot's window is the hour before or after: with hourly snapshots and an hour's tolerance
-            # a missing 02:00 would otherwise borrow 01:00's window, which is not the same hour
-            why = f"the window {start:%H:%M}-{end:%H:%M} does not cover the same hour ({(at - cur_len):%H:%M}-{at:%H:%M})"
-        if why:
-            skipped.append({"week": w, "snapshot": sid, "reason": why})
-            continue
-        windows.append(window)
-        rows.append(measures(iv))
+            sid, why = tried[0]
+            skip = {"week": w, "snapshot": sid, "reason": why}
+            if len(tried) > 1:
+                skip["also_tried"] = [{"snapshot": s, "reason": r} for s, r in tried[1:]]
+            skipped.append(skip)
 
     if len(rows) < MIN_WEEKS:
         return None
@@ -178,9 +226,10 @@ def usual_band(store, engine: str, target: str, current_sid: str, weeks: int = D
         vals = [r[name] for r in rows if name in r]
         if len(vals) < MIN_WEEKS:
             continue  # a metric only some weeks had (an engine upgrade, a wait class that came and went) has no band
-        metrics[name] = {"median": round(_quantile(vals, 0.5), 4), "n": len(vals),
-                         "high": round(_quantile(vals, 0.9) if high_is == "p90" else max(vals), 4),
-                         "low": round(_quantile(vals, 0.1) if high_is == "p90" else min(vals), 4),
+        hi = "p90" if len(vals) >= PERCENTILE_FROM else "max"  # the metric's own weeks: seen in 3 of 6, it has a max, not a p90
+        metrics[name] = {"median": round(_quantile(vals, 0.5), 4), "n": len(vals), "high_is": hi,
+                         "high": round(_quantile(vals, 0.9) if hi == "p90" else max(vals), 4),
+                         "low": round(_quantile(vals, 0.1) if hi == "p90" else min(vals), 4),
                          "max": round(max(vals), 4), "min": round(min(vals), 4)}
     label = f"{now:%A %H:%M}" + (" UTC" if now.utcoffset() == timedelta(0) else "")
     return {
@@ -191,9 +240,10 @@ def usual_band(store, engine: str, target: str, current_sid: str, weeks: int = D
 
 
 # --------------------------------------------------------------------------- sentences
-def weeks_phrase(band: dict) -> str:
-    """"6 weeks", or "4 of 6 weeks" when some were skipped: the count is part of the claim."""
-    n, of = band["weeks_used"], band["weeks"]
+def weeks_phrase(band: dict, n: int | None = None) -> str:
+    """"6 weeks", or "4 of 6 weeks" when some were skipped: the count is part of the claim. `n` is one metric's own
+    count of weeks, which is lower when it was not in every window (a wait class that came and went)."""
+    n, of = band["weeks_used"] if n is None else n, band["weeks"]
     return f"{n} weeks" if n == of else f"{n} of {of} weeks"
 
 
@@ -218,9 +268,9 @@ def sentence(band: dict, metric: str, value, what: str | None = None, unit: str 
     if pos is None:
         return None
     m = band["metrics"][metric]
-    weeks = weeks_phrase(band)
+    weeks = weeks_phrase(band, m.get("n"))  # the metric's own weeks, not the band's: "in 3 of 6 weeks" for a wait class seen in three
     if percent:
-        value, m, unit = value * 100, {k: v * 100 for k, v in m.items()}, "%"
+        value, m, unit = value * 100, {k: v * 100 if k in MARKS else v for k, v in m.items()}, "%"
     where = {
         "above_all": f"above every same-hour window in {weeks}",
         "above": f"above the usual {band['label']} band ({weeks})",
