@@ -12,6 +12,7 @@ from pathlib import Path
 from dbtriage import band, changes
 from dbtriage import compare as cmp
 from dbtriage import dbsnap
+from dbtriage import sqlnorm
 from dbtriage.collectors import get_collector
 from dbtriage.collectors.base import Window
 from dbtriage.config import Config, load_config
@@ -20,7 +21,7 @@ from dbtriage.locks import target_lock
 from dbtriage.deliver import deliver
 from dbtriage.findings import agreement
 from dbtriage.report import render_markdown
-from dbtriage.storage import Storage, open_storage
+from dbtriage.storage import Storage, StorageUnavailable, open_storage
 from dbtriage.baseline import POLICIES
 from dbtriage.triggers import MODES, TriageRequest
 
@@ -40,6 +41,7 @@ def collect(cfg: Config, store: Storage, req: TriageRequest) -> str:
         # window even if another snapshot landed in between (that one's interval would begin after the old end)
         window = Window(start=window.start, end=max(window.end, datetime.now(timezone.utc)), mode=window.mode)
     snap = get_collector(target).collect(window)
+    sqlnorm.annotate(snap.summary)  # text_hash next to sql_id: the fleet digest's join across replicas of one engine
     captured = datetime.fromisoformat(snap.summary["captured_at"])
     sid = f"{target.engine}/{target.name}/{captured:%Y-%m-%d}/{captured:%Y%m%dT%H%M%SZ}"
     n = 1
@@ -246,6 +248,10 @@ def main(argv=None):
                                "snapshots and reviews; off unless [mcp] enabled = true in targets.toml (uv sync --extra mcp)")
     sp = sub.add_parser("rebuild-ledger", help="recompute a target's ledger of open findings (<engine>/<target>/findings.json) from its stored reviews")
     sp.add_argument("--target", "-t", required=True)
+    sp = sub.add_parser("digest", help="the fleet note: findings opened on every database since --since, the causes they share, and the quiet ones")
+    sp.add_argument("--since", default="7d", help="7d, 24h, 90m, or an ISO time (default 7d)")
+    sp.add_argument("--channels", help="comma-separated delivery channels; default from [delivery] digest, else [delivery] channels")
+    sp.add_argument("--deliver", action="store_true", help="send it through the channels instead of only printing it")
     sp = sub.add_parser("flush-spool", help="push snapshots spooled during a store outage to the store now")
     sp = sub.add_parser("copy-store", help="copy every object from one store URL to another (e.g. file://./data -> postgres://...)")
     sp.add_argument("--from", dest="src", required=True)
@@ -261,6 +267,10 @@ def main(argv=None):
     sp.add_argument("snapshot")
     sp.add_argument("question", nargs="?", help="omit to print the thread so far")
     sp.add_argument("--finding", "-f", type=int, help="1-based finding number; omit to discuss the whole review")
+    sp = sub.add_parser("bundle", help="export one snapshot as a zip a postmortem or an auditor can take: a README, every stored file, checksums")
+    sp.add_argument("snapshot")
+    sp.add_argument("--out", "-o", help="file to write (default <engine>-<target>-<id>.zip in the current directory)")
+    sp.add_argument("--raw", action="store_true", help="include raw.json, the engine-native payload (can be large)")
 
     args = p.parse_args(argv)
     try:
@@ -330,6 +340,19 @@ def main(argv=None):
             print(f"\n_{chat.footer(ans)}_", file=sys.stderr)
         else:
             print(chat.thread_markdown(chat.load_thread(store, args.snapshot, key)))
+    elif args.cmd == "bundle":
+        from dbtriage import bundle
+
+        try:
+            data = bundle.build(store, args.snapshot, args.raw)
+            name = bundle.filename(store.get_json(f"{args.snapshot}/manifest.json"), args.snapshot)
+        except FileNotFoundError:
+            sys.exit(f"{args.snapshot}: no such snapshot")
+        except StorageUnavailable as exc:  # never a thinner zip: the record is exported whole or not at all
+            sys.exit(f"the store is unavailable: {exc}")
+        out = Path(args.out) if args.out else Path(name)
+        out.write_bytes(data)
+        print(f"{out}  {len(data):,} bytes")
     elif args.cmd == "web":
         from dbtriage.web import serve as web_serve
 
@@ -338,6 +361,22 @@ def main(argv=None):
         from dbtriage import mcp_server
 
         raise SystemExit(mcp_server.main(cfg, store))
+    elif args.cmd == "digest":
+        from dbtriage import fleet
+
+        now = datetime.now(timezone.utc)
+        try:
+            since = fleet.parse_since(args.since, now)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        channels = args.channels.split(",") if args.channels else fleet.schedule_of(cfg.delivery)[1]
+        if args.deliver:  # the schedule's clock (fleet/digest.json) is the scheduler's; a hand-run digest leaves it alone
+            d, md, done = fleet.send(cfg, store, since, now, channels)
+            if "stdout" not in done:
+                print(md)
+            print(f"delivered to: {', '.join(done) or 'nothing'}", file=sys.stderr)
+        else:
+            print(fleet.render(fleet.digest(cfg, store, since, now)))
     elif args.cmd == "rebuild-ledger":
         t = cfg.target(args.target)
         led = ledger.rebuild(store, t.engine, t.name, ledger.gone_after(cfg.delivery))

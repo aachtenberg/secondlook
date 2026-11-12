@@ -60,6 +60,14 @@ channels = ["stdout"]
 #                                      fires when a finding is new or worse at or above it; a still-open one does not repost
 # gone_after_runs = 3                  a finding absent this many of its own periods (or runs, before it has one) is gone (and its ticket told)
 
+# [delivery.digest]                    the fleet digest (docs/configuration.md, "The fleet digest"): one note across every
+#                                      database, sent by the scheduler (`dbtriage scheduler`): the findings opened since the
+#                                      last digest, the deploy or statement they share, and the databases with no change.
+#                                      `dbtriage digest --since 7d` prints one now
+# schedule = "weekly"                  weekly (Monday 03:00), daily (03:00), or cron in the server's local time; blank = no digest
+# channels = ["email"]                 where it goes (default: the delivery channels above). Each channel's min_severity gates it
+#                                      on the highest opened finding; ticket channels open one issue for the note
+
 # [delivery.ntfy]                      push notifications (ntfy.sh or your own server)
 # url = "https://ntfy.sh"
 # topic = "dbtriage-oncall"

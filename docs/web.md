@@ -22,7 +22,8 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
 - **Database.** A trend line for a chosen metric, headline numbers, and its snapshots filtered by All,
   Incidents or Scheduled.
 - **Snapshot.** The review with its findings, wait-time and load charts, the top SQL (click a column header to
-  sort by it), links to every stored file (opened in a side panel), and the discussion panel.
+  sort by it), links to every stored file (opened in a side panel), the discussion panel, and a **Download bundle**
+  link that exports the snapshot as one zip for a postmortem or an auditor (operations.md, "The record you can hand someone").
 - **Compare.** Any two snapshots of a database side by side, with the parameters that changed between them in
   their own table (each one is also a low `setting_changed` finding, and its name is written into the evidence of
   any SQL regression, plan change or wait shift in the same window).
@@ -74,6 +75,7 @@ of an environment variable, and the value is read from the process at run time.
 | `[delivery]` | `channels` | Settings › Delivery: Enabled channels |
 | `[delivery]` | `min_severity` | Settings › Delivery: Below this severity only stdout fires |
 | `[delivery]` | `gone_after_runs` | Settings › Delivery: A finding is gone after |
+| `[delivery.digest]` | `schedule`, `channels` | Settings › Delivery: Fleet digest schedule, Fleet digest channels |
 | `[delivery.ntfy]` | `url`, `topic`, `token_env`, `min_severity` | Settings › Delivery › ntfy |
 | `[delivery.slack]`, `[delivery.teams]` | `webhook_url`, `webhook_url_env`, `min_severity` | Settings › Delivery › slack, teams (a typed URL is masked afterwards) |
 | `[delivery.email]` | `smtp_host`, `smtp_port`, `starttls`, `from`, `to`, `user_env`, `password_env`, `min_severity` | Settings › Delivery › email |

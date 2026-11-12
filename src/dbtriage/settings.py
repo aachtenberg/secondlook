@@ -445,6 +445,24 @@ class Settings:
                     clean.pop("gone_after_runs", None)
                 else:
                     clean["gone_after_runs"] = v
+        if isinstance(data.get("digest"), dict):  # the fleet digest (dbtriage.fleet): a schedule word or cron, and its channels
+            given = data["digest"]
+            sched = str(given.get("schedule") or "").strip()
+            chans = given.get("channels")
+            chans = [c.strip() for c in chans.split(",") if c.strip()] if isinstance(chans, str) else list(chans or [])
+            if sched:
+                from dbtriage.scheduler import normalize
+                try:
+                    normalize(sched)
+                except (ValueError, TypeError, AttributeError):
+                    problems.append("digest schedule: weekly, daily, or a cron expression")
+            if bad := [c for c in chans if c not in CHANNEL_FIELDS]:
+                problems.append(f"digest channels: unknown channel(s): {', '.join(bad)}")
+            file_d = file.get("digest") if isinstance(file.get("digest"), dict) else {}
+            if sched == str(file_d.get("schedule") or "") and sorted(chans) == sorted(file_d.get("channels") or []):
+                clean.pop("digest", None)
+            else:
+                clean["digest"] = {"schedule": sched, "channels": chans}
         for ch, spec in CHANNEL_FIELDS.items():
             if ch not in data:
                 continue  # not mentioned: keep what is stored

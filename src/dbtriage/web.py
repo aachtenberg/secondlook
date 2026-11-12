@@ -14,6 +14,7 @@ API (same auth):
   GET  /api/targets/<name>/sql/<sql_id>     per-snapshot history of one statement (calls, time, CPU time, plan hash)
   GET  /api/snapshots/<id>                  manifest + triage + findings + top SQL
   GET  /api/snapshots/<id>/files/<name>     a stored file (summary.json, awr.txt ...)
+  GET  /bundle/<id>                         the snapshot as a zip (README, every stored file, checksums; ?raw=1 adds raw.json)
   POST /api/run                             {"target", "mode", "reason", "no_llm", "baseline_policy", "baseline"}  (needs --allow-run)
   GET  /api/settings                        effective settings + targets (DSNs masked) + allow_db_writes (read-only)
   PUT  /api/settings                        {"web": {...}, "agent": {...}, "delivery": {...}} (a flat body = web)  (needs --allow-edit);
@@ -305,6 +306,7 @@ ICON = {  # inline stroke icons, 14px, currentColor
     "x": "<svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' aria-hidden='true'><path d='M6 6l12 12M18 6 6 18'/></svg>",
     "arrow": "<svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M5 12h14M13 6l6 6-6 6'/></svg>",
     "clock": "<svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' aria-hidden='true'><circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/></svg>",
+    "download": "<svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M12 4v11m0 0-4-4m4 4 4-4M5 19h14'/></svg>",
 }
 STATUS = {"info": "healthy", "low": "degraded", "medium": "degraded", "high": "incident"}
 
@@ -1010,6 +1012,7 @@ class App:
             discuss_btn = f"<button type='button' class='ai' id='discuss-open'>{ICON['chat']}Discuss with AI</button>"
         actions = f"<a class='btn' href='/t/{T}/compare?a={html.escape(sid)}'>Change reference</a>" + discuss_btn
         return self.page("snapshot.html", sid, active=target, sid=sid, target=T, captured=captured, time=captured[11:19],
+                         bundle_url=f"/bundle/{html.escape(sid)}", download_icon=ICON["download"],
                          mode=html.escape(m["window"]["mode"]) + vs + _db_snapshot_note(m.get("db_snapshot")), review=review, top_sql=top, charts=chart_html, actions=actions, discuss=discuss,
                          sevpill=sev(tr.get("severity")) if tr else "", engine=html.escape(m.get("engine", "")))
 
@@ -1188,8 +1191,10 @@ class App:
             code, out = self.start_run(name, "scheduled", reason, True, window_minutes=window, source="schedule")
             return code == 202, out.get("error", "started")
 
+        from dbtriage import fleet
+
         self.scheduler = scheduler.Scheduler(lambda: {n: t.extra for n, t in self.cfg.targets.items()}, fire,
-                                             on_tick=self._housekeeping)
+                                             on_tick=self._housekeeping, digest=fleet.Digest(lambda: self.cfg, self.store))
         self.scheduler.start()
 
     def _housekeeping(self):
@@ -1369,13 +1374,16 @@ class App:
             blocks.append(f"<fieldset class=chan><legend>{ch}</legend>{''.join(inputs)}<div class=row>{test}</div></fieldset>")
         return {"min_sev_opts": "".join(f"<option{' selected' if d.get('min_severity', 'info') == o else ''}>{o}</option>" for o in SEVERITIES),
                 "gone_after_runs": html.escape(str(d.get("gone_after_runs") or "")),
+                "digest_schedule": html.escape(str((d.get("digest") or {}).get("schedule") or "")),
+                "digest_channels": html.escape(", ".join((d.get("digest") or {}).get("channels") or [])),
                 "channel_toggles": toggles, "channel_blocks": "\n".join(blocks),
                 "delivery_buttons": f"<button{ro}>Save</button> <button{ro} class=quiet name=action value='test:stdout'>Send test via stdout</button>"}
 
     @staticmethod
     def parse_delivery_form(form: dict) -> dict:
         g = lambda k: form.get(k, [""])[0].strip()  # noqa: E731
-        data: dict = {"channels": form.get("channels", []), "min_severity": g("min_severity"), "gone_after_runs": g("gone_after_runs")}  # absent = every box unchecked
+        data: dict = {"channels": form.get("channels", []), "min_severity": g("min_severity"), "gone_after_runs": g("gone_after_runs"),  # absent = every box unchecked
+                      "digest": {"schedule": g("digest_schedule"), "channels": g("digest_channels")}}
         for ch, spec in CHANNEL_FIELDS.items():
             data[ch] = {name: g(f"{ch}.{name}") for name, _kind, _d in spec}
         return data
@@ -1654,7 +1662,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store" if "html" in ctype or "json" in ctype else "max-age=3600")
+            self.send_header("Cache-Control", "no-store" if any(k in ctype for k in ("html", "json", "zip")) else "max-age=3600")
             self.send_header("X-Content-Type-Options", "nosniff")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
@@ -1772,6 +1780,8 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 if path.startswith("/f/"):
                     sid, _, name = path[3:].rpartition("/")
                     return self._file(sid, name)
+                if path.startswith("/bundle/"):
+                    return self._bundle(path[8:], q.get("raw", ["0"])[0] == "1")
                 if path == "/api/targets":
                     return self._json(app.target_rows())
                 if m := re.match(r"^/api/targets/([^/]+)/snapshots$", path):
@@ -1806,11 +1816,36 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 return self._error(500, f"internal error: {type(exc).__name__}", api)
             self._error(404, "not found", api)
 
+        @staticmethod
+        def _exposed(name: str, manifest: dict) -> bool:
+            """The file drawer's rule: a name in [web] files, or every name when it holds '*', or a manifest report."""
+            return name in app.web["files"] or "*" in app.web["files"] or name in (manifest.get("reports") or [])
+
         def _file(self, sid: str, name: str):
-            if "/" in name or name.startswith(".") or not (name in app.web["files"] or "*" in app.web["files"] or name in app.manifest_of(sid).get("reports", [])):
+            if "/" in name or name.startswith(".") or not self._exposed(name, app.manifest_of(sid)):
                 return self._error(404, "file not exposed", self.path.startswith("/api/"))
             data = app.store.get(f"{sid}/{name}")
             self._send(data, "application/json" if name.endswith(".json") else "text/plain; charset=utf-8")
+
+        def _bundle(self, sid: str, raw: bool):
+            """The snapshot as a zip (dbtriage.bundle), behind the same gates as the file drawer: a signed-in viewer,
+            and only the files the drawer exposes, plus what the API already serves whole (triage.json on the snapshot
+            route, the threads on the chat route). The manifest is read first, so an unknown snapshot is the 404 above
+            and an outage the 503."""
+            from dbtriage import bundle
+
+            manifest = app.manifest_of(sid) if key_ok(sid) else None
+            if manifest is None:
+                raise FileNotFoundError(sid)
+
+            def allowed(name: str) -> bool:
+                return name == "triage.json" or name.startswith("chat/") or self._exposed(name, manifest)
+
+            data = bundle.build(app.store, sid, raw, allowed)
+            # filename() keeps to the key alphabet already; stripping again costs nothing and keeps the header whole if that changes
+            name = re.sub(r'["\r\n]', "", bundle.filename(manifest, sid))
+            access.audit("bundle", sid)
+            self._send(data, "application/zip", extra={"Content-Disposition": f'attachment; filename="{name}"'})
 
         def do_POST(self):  # noqa: N802
             if envfile.refresh():

@@ -13,6 +13,10 @@ that can reach the databases). It re-reads the configuration every tick, so a sc
 the UI takes effect without a restart. Missed slots are not caught up after a restart. One run
 per target at a time: a slot is skipped (and recorded as such) if the previous run is still going.
 External timers (cron, EventBridge, Cloud Scheduler) keep working: they call the same pipeline.
+
+The fleet digest (dbtriage.fleet) rides the same loop: `[delivery] digest` names its schedule, and the tick fires
+it when its slot has passed. Its last send is kept in the store, so a restart does not resend it, and a slot that
+passed while the process was down is sent once it is back (the note says "since the last digest", so nothing is lost).
 """
 from __future__ import annotations
 
@@ -23,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
+
+from dbtriage.storage import StorageUnavailable
 
 PRESETS: list[tuple[str, str]] = [  # (cron, label) in the order the UI shows them
     ("", "not scheduled"),
@@ -166,9 +172,11 @@ class Scheduler(threading.Thread):
     """fire(target, window_minutes, reason) -> (ok, message). targets() -> {name: extra} read every tick."""
 
     def __init__(self, targets: Callable[[], dict[str, dict]], fire: Callable[[str, int, str], tuple[bool, str]], tick_s: float = 20,
-                 on_tick: Callable[[], None] | None = None):
+                 on_tick: Callable[[], None] | None = None, digest=None):
         super().__init__(daemon=True, name="dbtriage-scheduler")
         self.targets, self.fire, self.tick_s, self.on_tick = targets, fire, tick_s, on_tick
+        self.digest = digest  # fleet.Digest, or anything with schedule() -> cron, last_sent() -> datetime | None, fire(slot, now, reason)
+        self.digest_state = State()
         self.state: dict[str, State] = {}
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -204,6 +212,29 @@ class Scheduler(threading.Thread):
                 ok, msg = self.fire(name, window, f"schedule {describe(cron)}")
                 st.last, st.last_status = now, ("started" if ok else f"skipped: {msg}")
                 st.next = parse(cron).next_after(now)
+            if self.digest is not None:
+                self._tick_digest(now)
+
+    def _tick_digest(self, now: datetime):
+        """The fleet digest's slot. Unlike a target, its next slot is counted from the last send kept in the store
+        when the schedule is (re)read, so a restart neither resends nor skips the slot it was down for."""
+        try:
+            cron = normalize(self.digest.schedule())
+        except (ValueError, TypeError, AttributeError):
+            cron = ""
+        st = self.digest_state
+        if cron != st.expr:
+            try:
+                last = self.digest.last_sent() if cron else None
+            except StorageUnavailable as exc:  # "never sent" and "cannot tell" differ: keep asking until the store answers
+                st.last_status = f"waiting: store unavailable ({exc})"
+                return
+            st.expr, st.next = cron, (parse(cron).next_after(last.astimezone(now.tzinfo) if last else now) if cron else None)
+        if not cron or st.next is None or now < st.next:
+            return
+        ok, msg = self.digest.fire(st.next, now, f"schedule {describe(cron)}")
+        st.last, st.last_status = now, ("sent" if ok else f"skipped: {msg}")
+        st.next = parse(cron).next_after(now)
 
     def rows(self, cfg: dict[str, dict]) -> list[dict]:
         """One row per target for the settings page and /api/schedule."""
@@ -268,7 +299,14 @@ def run_standalone(config_path: str | None, use_llm: bool = True):
             if pushed:
                 print(f"scheduler: synced {pushed} spooled object(s) to the store, {left} left")
 
-    s = Scheduler(targets, fire, on_tick=housekeeping)
+    from dbtriage.fleet import Digest, schedule_of as digest_schedule
+    from dbtriage.storage import open_storage
+
+    cfg0 = load_config(config_path)
+    s = Scheduler(targets, fire, on_tick=housekeeping,
+                  digest=Digest(lambda: load_config(config_path), open_storage(cfg0.storage_url, Path(cfg0.base_dir) / "spool")))
+    if cron := digest_schedule(cfg0.delivery)[0]:
+        print(f"scheduler: fleet digest: {describe(cron)}")
     for r in rows_without_scheduler(targets()):
         if r["schedule"]:
             print(f"scheduler: {r['target']}: {r['label']}{' (paused)' if r['paused'] else ''}, next {r['next']:%Y-%m-%d %H:%M}" if r["next"] else

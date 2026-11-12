@@ -941,3 +941,20 @@ def test_band_weeks_is_on_the_target_form_and_the_compare_page_uses_it(tmp_path,
     monkeypatch.setattr(cli, "compare_ids", fake_compare_ids)  # the page imports it from cli at call time
     app.compare_page("demo", "x", "y")
     assert seen["band_weeks"] == 8  # the compare page honours the target's setting, like the CLI
+
+
+def test_fleet_digest_schedule_and_channels_save_from_the_delivery_card(tmp_path):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    base = app.seed.delivery
+    form = {"channels": ["stdout"], "min_severity": ["info"], "gone_after_runs": [""], "digest_schedule": ["weekly"], "digest_channels": ["stdout, slack"]}
+    assert app.settings.put_delivery(app.parse_delivery_form(form), base=base) == []
+    app.reload()
+    assert app.cfg.delivery["digest"] == {"schedule": "weekly", "channels": ["stdout", "slack"]}
+    page = app.settings_page().decode()
+    assert 'name="digest_schedule" value="weekly"' in page and 'value="stdout, slack"' in page and "$digest" not in page
+    assert app.settings.put_delivery({"digest": {"schedule": "fortnightly", "channels": "stdout"}}, base=base) == ["digest schedule: weekly, daily, or a cron expression"]
+    assert app.settings.put_delivery({"digest": {"schedule": "daily", "channels": "pager"}}, base=base) == ["digest channels: unknown channel(s): pager"]
+    assert app.settings.put_delivery({"digest": {"schedule": "", "channels": ""}}, base=base) == []
+    app.reload()
+    assert "digest" not in app.cfg.delivery  # blank = off, and nothing is stored when the file is silent too
+    assert app.scheduler is None or app.scheduler.digest is not None  # the web view's scheduler sends it when scheduling is on
