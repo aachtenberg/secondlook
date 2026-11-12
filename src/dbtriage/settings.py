@@ -34,11 +34,12 @@ from dbtriage.llm import DEFAULT_TOKEN_BUDGET, scheduled_problem
 
 TARGET_FIELDS = ("engine", "dsn", "dsn_env", "top_n", "diagnostics_pack", "changes_file", "changes", "create_snapshot", "user", "password", "links", "notes",
                  "baseline_policy", "baseline", "schedule", "schedule_window", "schedule_paused",
-                 "call_timeout_ms", "connect_timeout_s", "min_snapshot_age_min", "mask_report_literals")
+                 "call_timeout_ms", "connect_timeout_s", "min_snapshot_age_min", "mask_report_literals", "band_weeks")
 SCHEDULE_FIELDS = ("schedule", "schedule_window", "schedule_paused")
 # per-target numbers the edit page offers: (blank-means default, smallest, largest a save accepts, unit)
 TARGET_NUMBERS = {"top_n": (25, 0, 10_000, ""), "schedule_window": (60, 5, 1440, "minutes"), "call_timeout_ms": (None, 1000, 3_600_000, "ms"),
-                  "connect_timeout_s": (None, 1, 300, "seconds"), "min_snapshot_age_min": (None, 0, 1440, "minutes")}
+                  "connect_timeout_s": (None, 1, 300, "seconds"), "min_snapshot_age_min": (None, 0, 1440, "minutes"),
+                  "band_weeks": (6, 0, 52, "weeks")}
 # the [targets.X.changes] table: the fields each source reads (the two numbers apply to every source)
 CHANGES_FIELDS = {"file": ("path",), "github": ("repo", "environment", "token_env", "base_url", "releases"),
                   "gitlab": ("project", "environment", "token_env", "base_url")}
@@ -444,6 +445,24 @@ class Settings:
                     clean.pop("gone_after_runs", None)
                 else:
                     clean["gone_after_runs"] = v
+        if isinstance(data.get("digest"), dict):  # the fleet digest (dbtriage.fleet): a schedule word or cron, and its channels
+            given = data["digest"]
+            sched = str(given.get("schedule") or "").strip()
+            chans = given.get("channels")
+            chans = [c.strip() for c in chans.split(",") if c.strip()] if isinstance(chans, str) else list(chans or [])
+            if sched:
+                from dbtriage.scheduler import normalize
+                try:
+                    normalize(sched)
+                except (ValueError, TypeError, AttributeError):
+                    problems.append("digest schedule: weekly, daily, or a cron expression")
+            if bad := [c for c in chans if c not in CHANNEL_FIELDS]:
+                problems.append(f"digest channels: unknown channel(s): {', '.join(bad)}")
+            file_d = file.get("digest") if isinstance(file.get("digest"), dict) else {}
+            if sched == str(file_d.get("schedule") or "") and sorted(chans) == sorted(file_d.get("channels") or []):
+                clean.pop("digest", None)
+            else:
+                clean["digest"] = {"schedule": sched, "channels": chans}
         for ch, spec in CHANNEL_FIELDS.items():
             if ch not in data:
                 continue  # not mentioned: keep what is stored

@@ -80,9 +80,10 @@ def list_threads(store: Storage, snapshot_id: str) -> dict[str, int]:
 class Chat:
     """ask() appends one question and the model's answer to a thread and stores it."""
 
-    def __init__(self, store: Storage, backend_factory: Callable[[], Backend]):
+    def __init__(self, store: Storage, backend_factory: Callable[[], Backend], band_weeks_for: Callable[[str], int] | None = None):
         self.store = store
         self.backend_factory = backend_factory
+        self.band_weeks_for = band_weeks_for  # a target's band_weeks by name (dbtriage.band.weeks_for), so compare_snapshots honours it here too
 
     def context(self, snapshot_id: str, finding: int | str | None) -> str:
         """What the model is told before the first question: the review and, if asked, the one finding or statement.
@@ -174,7 +175,8 @@ class Chat:
             ctx = self.context(snapshot_id, key)
             m = self.store.get_json(f"{snapshot_id}/manifest.json")
             task = self._task(ctx, thread["messages"], question)
-            tools = [t for t in TriageAgent(self.store, None).tool_specs(m["engine"], m["target"]) if t.name != "submit_review"]
+            agent = TriageAgent(self.store, None, band_weeks_for=self.band_weeks_for)
+            tools = [t for t in agent.tool_specs(m["engine"], m["target"]) if t.name != "submit_review"]
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             thread["messages"].append({"role": "user", "text": question, "at": now})
             t0 = time.monotonic()

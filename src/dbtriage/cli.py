@@ -9,9 +9,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dbtriage import changes
+from dbtriage import band, changes
 from dbtriage import compare as cmp
 from dbtriage import dbsnap
+from dbtriage import sqlnorm
 from dbtriage.collectors import get_collector
 from dbtriage.collectors.base import Window
 from dbtriage.config import Config, load_config
@@ -20,7 +21,7 @@ from dbtriage.locks import target_lock
 from dbtriage.deliver import deliver
 from dbtriage.findings import agreement
 from dbtriage.report import render_markdown
-from dbtriage.storage import Storage, open_storage
+from dbtriage.storage import Storage, StorageUnavailable, open_storage
 from dbtriage.baseline import POLICIES
 from dbtriage.triggers import MODES, TriageRequest
 
@@ -40,6 +41,7 @@ def collect(cfg: Config, store: Storage, req: TriageRequest) -> str:
         # window even if another snapshot landed in between (that one's interval would begin after the old end)
         window = Window(start=window.start, end=max(window.end, datetime.now(timezone.utc)), mode=window.mode)
     snap = get_collector(target).collect(window)
+    sqlnorm.annotate(snap.summary)  # text_hash next to sql_id: the fleet digest's join across replicas of one engine
     captured = datetime.fromisoformat(snap.summary["captured_at"])
     sid = f"{target.engine}/{target.name}/{captured:%Y-%m-%d}/{captured:%Y%m%dT%H%M%SZ}"
     n = 1
@@ -97,18 +99,23 @@ def pick_baseline(cfg: Config, store: Storage, sid: str, policy: str | None = No
     return store.pick_baseline(engine, name, sid, policy or extra.get("baseline_policy"), extra.get("baseline"), explicit)
 
 
-def compare_ids(store: Storage, engine: str, target: str, sid: str, baseline: str | None, how: tuple[str, str] | None = None) -> dict | None:
+def compare_ids(store: Storage, engine: str, target: str, sid: str, baseline: str | None, how: tuple[str, str] | None = None,
+                band_weeks: int = band.DEFAULT_WEEKS) -> dict | None:
     """compare() for a snapshot id, resolving the baseline and the one before it. None if nothing to compare.
-    `how` = (policy, reason) is recorded under reference so the review can say why this baseline."""
+    `how` = (policy, reason) is recorded under reference so the review can say why this baseline.
+    `band_weeks` is the target's band_weeks: the usual band for this hour is passed in when the history allows (0: never)."""
     cur = summary_of(store, sid)
     feed, margin = stored_changes(store, sid)
+    # the band's hour is the interval scored below: baseline -> current on a cumulative engine
+    usual = band.usual_band(store, engine, target, sid, weeks=band_weeks, baseline=baseline) if band_weeks else None
     if cur.get("metrics_kind") == "interval":
-        out = cmp.compare(cur, summary_of(store, baseline) if baseline else None, changes=feed, correlate_minutes=margin)
+        out = cmp.compare(cur, summary_of(store, baseline) if baseline else None, changes=feed, correlate_minutes=margin, band=usual)
     elif not baseline:
         return None
     else:
         before = store.previous(engine, target, baseline)
-        out = cmp.compare(cur, summary_of(store, baseline), summary_of(store, before) if before else None, changes=feed, correlate_minutes=margin)
+        out = cmp.compare(cur, summary_of(store, baseline), summary_of(store, before) if before else None, changes=feed,
+                          correlate_minutes=margin, band=usual)
     if out.get("reference") is not None and how:
         out["reference"]["policy"], out["reference"]["reason"] = how
     return out
@@ -118,7 +125,9 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
            how: tuple[str, str] | None = None, source: str | None = None) -> tuple[dict, dict | None]:
     manifest = store.get_json(f"{sid}/manifest.json")
     engine, target = manifest["engine"], manifest["target"]
-    comparison = compare_ids(store, engine, target, sid, baseline, how)
+    t = cfg.targets.get(target)
+    weeks = band.weeks_for(cfg, target)
+    comparison = compare_ids(store, engine, target, sid, baseline, how, band_weeks=weeks)
     if how:
         manifest["baseline"] = {"snapshot": baseline, "policy": how[0], "reason": how[1]}
         store.put_json(f"{sid}/manifest.json", manifest)
@@ -129,11 +138,10 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
         try:
             from dbtriage.llm import agent_for, make_backend
 
-            t = cfg.targets.get(target)
             agent = agent_for(cfg.agent, source)  # a scheduled run may use [agent] scheduled_model
             result = TriageAgent(store, make_backend(agent)).run(
                 engine, target, sid, baseline, mode, max_iterations=int(agent.get("max_iterations") or 25),
-                notes=(t.extra.get("notes") if t else None))
+                notes=(t.extra.get("notes") if t else None), band_weeks=weeks)
         except (Exception, SystemExit) as exc:  # noqa: BLE001 - an outage or a missing key must not lose the run: use the rules
             from dbtriage.awscred import note_from_error
 
@@ -240,6 +248,10 @@ def main(argv=None):
                                "snapshots and reviews; off unless [mcp] enabled = true in targets.toml (uv sync --extra mcp)")
     sp = sub.add_parser("rebuild-ledger", help="recompute a target's ledger of open findings (<engine>/<target>/findings.json) from its stored reviews")
     sp.add_argument("--target", "-t", required=True)
+    sp = sub.add_parser("digest", help="the fleet note: findings opened on every database since --since, the causes they share, and the quiet ones")
+    sp.add_argument("--since", default="7d", help="7d, 24h, 90m, or an ISO time (default 7d)")
+    sp.add_argument("--channels", help="comma-separated delivery channels; default from [delivery] digest, else [delivery] channels")
+    sp.add_argument("--deliver", action="store_true", help="send it through the channels instead of only printing it")
     sp = sub.add_parser("flush-spool", help="push snapshots spooled during a store outage to the store now")
     sp = sub.add_parser("copy-store", help="copy every object from one store URL to another (e.g. file://./data -> postgres://...)")
     sp.add_argument("--from", dest="src", required=True)
@@ -255,6 +267,10 @@ def main(argv=None):
     sp.add_argument("snapshot")
     sp.add_argument("question", nargs="?", help="omit to print the thread so far")
     sp.add_argument("--finding", "-f", type=int, help="1-based finding number; omit to discuss the whole review")
+    sp = sub.add_parser("bundle", help="export one snapshot as a zip a postmortem or an auditor can take: a README, every stored file, checksums")
+    sp.add_argument("snapshot")
+    sp.add_argument("--out", "-o", help="file to write (default <engine>-<target>-<id>.zip in the current directory)")
+    sp.add_argument("--raw", action="store_true", help="include raw.json, the engine-native payload (can be large)")
 
     args = p.parse_args(argv)
     try:
@@ -288,7 +304,7 @@ def main(argv=None):
         t = cfg.target(args.target)
         sid = args.snapshot or store.latest(t.engine, t.name) or sys.exit("no snapshots yet")
         base, policy, reason = pick_baseline(cfg, store, sid, args.baseline_policy, args.baseline)
-        result = compare_ids(store, t.engine, t.name, sid, base, (policy, reason))
+        result = compare_ids(store, t.engine, t.name, sid, base, (policy, reason), band_weeks=band.weeks_of(t.extra.get("band_weeks")))
         print(json.dumps(result if result is not None else {"error": "no baseline: need two snapshots"}, indent=1, default=str))
     elif args.cmd == "triage":
         t = cfg.target(args.target)
@@ -317,11 +333,26 @@ def main(argv=None):
 
         key = chat.thread_key(args.finding)
         if args.question:
-            ans = chat.Chat(store, lambda: make_backend(cfg.agent)).ask(args.snapshot, args.finding, args.question)
+            # the target's band_weeks, as the web view and the MCP server pass it: a 0 or 12 holds in a CLI discussion too
+            ans = chat.Chat(store, lambda: make_backend(cfg.agent),
+                            band_weeks_for=lambda name: band.weeks_for(cfg, name)).ask(args.snapshot, args.finding, args.question)
             print(ans["text"])
             print(f"\n_{chat.footer(ans)}_", file=sys.stderr)
         else:
             print(chat.thread_markdown(chat.load_thread(store, args.snapshot, key)))
+    elif args.cmd == "bundle":
+        from dbtriage import bundle
+
+        try:
+            data = bundle.build(store, args.snapshot, args.raw)
+            name = bundle.filename(store.get_json(f"{args.snapshot}/manifest.json"), args.snapshot)
+        except FileNotFoundError:
+            sys.exit(f"{args.snapshot}: no such snapshot")
+        except StorageUnavailable as exc:  # never a thinner zip: the record is exported whole or not at all
+            sys.exit(f"the store is unavailable: {exc}")
+        out = Path(args.out) if args.out else Path(name)
+        out.write_bytes(data)
+        print(f"{out}  {len(data):,} bytes")
     elif args.cmd == "web":
         from dbtriage.web import serve as web_serve
 
@@ -330,6 +361,22 @@ def main(argv=None):
         from dbtriage import mcp_server
 
         raise SystemExit(mcp_server.main(cfg, store))
+    elif args.cmd == "digest":
+        from dbtriage import fleet
+
+        now = datetime.now(timezone.utc)
+        try:
+            since = fleet.parse_since(args.since, now)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        channels = args.channels.split(",") if args.channels else fleet.schedule_of(cfg.delivery)[1]
+        if args.deliver:  # the schedule's clock (fleet/digest.json) is the scheduler's; a hand-run digest leaves it alone
+            d, md, done = fleet.send(cfg, store, since, now, channels)
+            if "stdout" not in done:
+                print(md)
+            print(f"delivered to: {', '.join(done) or 'nothing'}", file=sys.stderr)
+        else:
+            print(fleet.render(fleet.digest(cfg, store, since, now)))
     elif args.cmd == "rebuild-ledger":
         t = cfg.target(args.target)
         led = ledger.rebuild(store, t.engine, t.name, ledger.gone_after(cfg.delivery))

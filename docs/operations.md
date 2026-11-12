@@ -11,6 +11,7 @@
 | `dbtriage deliver <snapshot> [--channel slack,teams]` | send a stored review again |
 | `dbtriage list -t <db>`, `dbtriage show <snapshot> [file]` | browse what is stored (`triage.md`, `compare.json`, `awr.txt` ...) |
 | `dbtriage ask <snapshot> "question" [--finding N]` | discuss a review from the shell; leave out the question to print the thread |
+| `dbtriage bundle <snapshot> [--out file.zip] [--raw]` | export one snapshot as a zip for a postmortem or an auditor (below, "The record you can hand someone") |
 | `dbtriage web [--allow-run] [--allow-edit] [--allow-chat] [--schedule]` | the web view (see web.md) |
 | `dbtriage scheduler` | run every database's schedule from this server, without the web view |
 | `dbtriage mcp` | the MCP server, for MCP clients such as Claude Code; off unless `[mcp] enabled = true` (see mcp.md) |
@@ -18,6 +19,7 @@
 | `dbtriage flush-spool` | push work saved during a store outage now |
 | `dbtriage deliver <snapshot> [--force]` | re-send a stored review; `--force` ignores the severity gates and finding life and posts it as it stands |
 | `dbtriage rebuild-ledger -t <db>` | recompute the database's ledger of open findings from its stored reviews (below, "A finding's life") |
+| `dbtriage digest [--since 7d\|24h\|ISO] [--deliver] [--channels ...]` | the fleet note: findings opened on every database, the deploy or statement they share, the quiet ones (configuration.md, "The fleet digest") |
 | `dbtriage copy-store --from URL --to URL`, `dbtriage copy-settings --from X --to Y` | move snapshots or settings, for example from files into Postgres |
 
 `--baseline-policy` and `--baseline` work on `run`, `compare` and `triage` (see configuration.md).
@@ -152,6 +154,31 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
 - **People decide.** dbtriage recommends fixes and never applies them. Automatic fixes, if ever added, belong
   behind an approval step with a ready rollback.
 
+## The record you can hand someone
+
+`dbtriage bundle <snapshot>` writes one zip, `<engine>-<target>-<id>.zip`, that a postmortem or an auditor can take
+away without an account on the web view or the store. The snapshot page has the same thing as a **Download bundle**
+link (`/bundle/<snapshot>`), behind the same sign-in as the file drawer.
+
+In it: `README.md`, written for the reader (what the snapshot is, what triggered it, which baseline it was compared
+with and why, each finding with its agreement mark and life state, the model and its token usage, how many tool
+calls it made, which channels the review went to and which tickets exist, the discussion threads, and one line per
+file); every file stored with the snapshot (`manifest.json`, `summary.json`, `compare.json`, `triage.json`,
+`triage.md`, `tools.json`, `changes.json`, the engine reports and `chat/*.json`), byte for byte as the store holds
+it unless a credential-shaped value was masked (below); and `checksums.txt` with the SHA-256 of each, so `sha256sum -c checksums.txt` shows nothing was altered after
+export. The zip is deterministic: exporting an unchanged snapshot twice gives the same bytes, so the bundle's own
+checksum can be written into a ticket.
+
+Not in it: `raw.json`, the engine-native payload, unless you pass `--raw` (or `?raw=1` on the link, which works
+only when the file drawer exposes it); from the web, any file the `[web] files` setting hides (the CLI exports
+everything; `triage.json` and the threads always go in, since the snapshot and chat APIs already serve them);
+and anything read from a live database or the network at export time (there is none: the bundle is the stored
+record). The stored files are already redacted (literals masked before storage). As a belt-and-braces step the
+manifest is scrubbed of secret-named keys and every text file is scanned for credential-shaped values (a
+`user:password@` in a URL, a `password=` pair, a bearer token, a cloud access key), each replaced by `***`; the
+README names what it withheld and how many values it masked in which file, and when the store could not be listed
+it says that discussion threads may be missing rather than that there were none.
+
 ## A finding's life
 
 Every run writes a fresh review, but a finding is not fresh just because the run is. Each database keeps a ledger
@@ -179,7 +206,10 @@ so three quiet hours do not clear it and its ticket is not told "cleared" every 
 no period and the run count applies, which is why the tombstone exists: when it comes back the next night it is the
 same finding, returned, with its ticket and its first-seen date. For a target with a batch cycle, also set its
 baseline policy to `same-time-yesterday` or `same-time-last-week` (configuration.md) so the batch window is compared
-with itself and the relative findings do not fire at all.
+with itself and the relative findings do not fire at all. Once the target has three or more weeks of snapshots, the
+review also says whether the hour is inside the usual band for that weekday and clock hour over the past `band_weeks`
+weeks (configuration.md), so a Monday 02:00 batch that is heavy every Monday reads as usual even when last Monday's
+run is missing or was itself odd.
 
 The review still caps at five findings, and an open finding never takes a slot from a new one: open findings that
 did not make the five are listed under **Still open** after them, with how long they have been open and how many
@@ -302,4 +332,3 @@ database inside the container, so a recreate starts it over too, AWR history inc
   statements when plans are evicted.
 - Statspack, for Oracle Standard Edition. Taking Statspack snapshots can already plug in through the
   `dbtriage.db_snapshot` entry point ([configuration](configuration.md#letting-dbtriage-take-snapshots-on-the-database)); reading them is the missing part.
-- A weekly trend digest across many snapshots.

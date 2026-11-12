@@ -52,6 +52,8 @@ class Target:
     top_n: int = 25
     diagnostics_pack: bool = False  # Oracle only: AWR/ASH licensing gate
     changes_file: str | None = None  # optional JSON list of deploys/changes for get_recent_changes
+    # every other [targets.X] key, read where it is used: notes, links, baseline_policy, baseline, schedule*,
+    # band_weeks (dbtriage.band), timeouts, the changes table ... recipes/reference.toml explains each
     extra: dict = field(default_factory=dict)
 
 

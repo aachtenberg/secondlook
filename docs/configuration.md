@@ -45,6 +45,35 @@ own periods a finding must be missing before the review says it is gone and its 
 many runs while it has no period yet. It sits under `[delivery]` because flapping is a channel problem, and on the
 Settings page's Delivery card for the same reason. Blank means 3.
 
+## The fleet digest
+
+A team with Oracle, PostgreSQL and SQL Server has three consoles; Second Look writes one note. The digest reads
+every database's ledger of open findings and the deploys and statements stored with its snapshots, and says, across
+the fleet: which findings opened since the last digest (new, or worse on the latest run), which of them share a
+cause, and which databases had no significant change. It is a note, under a page, not a dashboard. Both fields are on the Settings page's Delivery card as well, and the web view's scheduler sends the digest like the standalone one.
+
+Two links join findings across databases, and they are not equally strong. The same deploy, from the change
+feed, is the strong one and crosses engines: "After `billing@1.4.2`, findings opened on ora-prod and pg-prod" is
+true because the deploy id is the same on both. The same statement, by the normalized text hash stored next to
+`sql_id` on every snapshot (whitespace, literals and bind markers taken out), ties replicas, shards and read
+copies of one engine: "The same statement is high on pg-prod and pg-replica". It is never claimed across engines:
+Oracle and PostgreSQL rarely run the same text, and when they do the planner and the fix differ.
+
+```toml
+[delivery.digest]
+schedule = "weekly"                  # weekly (Monday 03:00), daily (03:00), or cron in the server's local time
+channels = ["email"]                 # default: the [delivery] channels
+```
+
+The scheduler (`dbtriage scheduler`) sends it when the slot comes, through the usual channels: each channel's
+`min_severity` gates on the highest opened finding, and a ticket channel opens one issue for the note. The last
+send is kept in the store at `fleet/digest.json`, so a restart does not send it twice, and a slot that passed
+while the scheduler was down is sent once it is back, covering the time since the last digest. `dbtriage digest
+--since 7d` (or `24h`, or an ISO time) prints the same note now, and `--deliver` sends it; a hand-run digest does
+not move the schedule's clock. Two schedulers on one store (`dbtriage scheduler` and `dbtriage web --schedule`)
+send one digest, not two: the slot is claimed in the store before the send. A send that no channel took, or that
+the store cut short, does not move the clock, so the next digest covers that window too.
+
 ## Connecting to a database
 
 Each database needs a **read-only monitoring user**. The lab's grants are in `compose/*/01-init.sql` and are a
@@ -216,6 +245,29 @@ ones) or per run (`--baseline-policy`, the Capture now dialog, or the API).
 A specific snapshot id given with `--baseline` always wins. If a policy finds nothing (no run last week, the
 pinned snapshot was deleted), dbtriage falls back to `previous` and says so: on the snapshot page, in the
 review's footer, and in the stored `manifest.json` and `compare.json`.
+
+### The usual band `band_weeks` is on the database's edit page too.
+
+One baseline is one moment, and that moment can itself be odd: last Monday's batch did not run, or ran twice.
+Once a database has a few weeks of snapshots, each review also compares its interval with the spread of the same
+clock hour and weekday over the past `band_weeks` weeks (default 6; `0` switches it off): the median and a high
+mark (the 90th percentile from five weeks on, the maximum below) per load-profile metric, for total SQL time and
+for each wait class's share. The result is one sentence in the evidence of the findings about those metrics, such
+as "commits 12/s is inside the usual Monday 02:00 band (6 weeks)", "above every same-hour window in 6 weeks" or
+"below the usual band", and a line under the review's summary for the interval as a whole. The baseline you chose
+stays the comparison the review is written against; the band only says whether this hour is unusual for this
+database.
+
+The band is honest about what it is built from. For PostgreSQL, MySQL, MariaDB and SQL Server a week counts only
+when both snapshots around that hour exist; for Oracle AWR, the one engine whose snapshots are intervals, one
+snapshot per week within an hour of the same time. A past window stands for the hour only when it covers at least
+80 percent of it and is within that ratio of the current interval's length: a missing neighbour that folds two hours
+into one window, or a late snapshot whose window only touches the hour, is skipped and named. So is a week with a
+counter reset or an instance restart inside its window, or whose stored summary cannot be read. The sentence says
+how many weeks remain ("4 of 6 weeks"; a wait class seen in only some of them counts its own), and below three
+usable weeks no band is written at all. A week-long interval (`same-time-last-week` on a cumulative engine) has no
+hour-long windows to match, so it gets no band. It reads only the stored `summary.json` files: nothing new is
+collected or stored.
 
 ## How the comparison works
 

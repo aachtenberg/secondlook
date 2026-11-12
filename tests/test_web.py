@@ -955,3 +955,40 @@ def test_target_page_has_the_diagnosis_card_and_the_ask_dock(tmp_path, monkeypat
     page = app.target("demo", 0).decode()
     assert "<span class='head'>1 finding, worst <span class='sv medium'>medium</span></span>" in page and "ticket DBA-7" in page and f"<a href='/s/{SID}'>oldest since 2026-11-05</a>" in page
     assert "<span class='head'>deploy billing@2 to production</span>" in page and "1 setup gap</span>" in page
+
+
+def test_band_weeks_is_on_the_target_form_and_the_compare_page_uses_it(tmp_path, monkeypatch):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["postgres"], "dsn": ["postgresql://x"], "band_weeks": ["8"]})
+    assert app.save_target("demo", fields) == []
+    assert app.cfg.targets["demo"].extra["band_weeks"] == 8
+    form = app.target_form("demo").decode()
+    assert 'name="band_weeks" type="number" min="0" max="52" value="8"' in form and "$band_weeks" not in form
+    assert app.save_target("demo", dict(fields, band_weeks="99")) != []  # out of range is refused
+    seen = {}
+    import dbtriage.cli as cli
+
+    def fake_compare_ids(store, engine, target, a, b, how=None, band_weeks=6):
+        seen["band_weeks"] = band_weeks
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(cli, "compare_ids", fake_compare_ids)  # the page imports it from cli at call time
+    app.compare_page("demo", "x", "y")
+    assert seen["band_weeks"] == 8  # the compare page honours the target's setting, like the CLI
+
+
+def test_fleet_digest_schedule_and_channels_save_from_the_delivery_card(tmp_path):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    base = app.seed.delivery
+    form = {"channels": ["stdout"], "min_severity": ["info"], "gone_after_runs": [""], "digest_schedule": ["weekly"], "digest_channels": ["stdout, slack"]}
+    assert app.settings.put_delivery(app.parse_delivery_form(form), base=base) == []
+    app.reload()
+    assert app.cfg.delivery["digest"] == {"schedule": "weekly", "channels": ["stdout", "slack"]}
+    page = app.settings_page().decode()
+    assert 'name="digest_schedule" value="weekly"' in page and 'value="stdout, slack"' in page and "$digest" not in page
+    assert app.settings.put_delivery({"digest": {"schedule": "fortnightly", "channels": "stdout"}}, base=base) == ["digest schedule: weekly, daily, or a cron expression"]
+    assert app.settings.put_delivery({"digest": {"schedule": "daily", "channels": "pager"}}, base=base) == ["digest channels: unknown channel(s): pager"]
+    assert app.settings.put_delivery({"digest": {"schedule": "", "channels": ""}}, base=base) == []
+    app.reload()
+    assert "digest" not in app.cfg.delivery  # blank = off, and nothing is stored when the file is silent too
+    assert app.scheduler is None or app.scheduler.digest is not None  # the web view's scheduler sends it when scheduling is on

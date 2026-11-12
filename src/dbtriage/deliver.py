@@ -245,9 +245,17 @@ def test_channel(delivery_cfg: dict, name: str, triage: dict, markdown: str) -> 
         return False, f"{name}: {type(exc).__name__}: {str(exc)[:300]}"
 
 
-def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str] | None = None, force: bool = False) -> list[str]:
+def channel_names(delivery_cfg: dict, channels: list[str] | None = None) -> list[str]:
+    """The channels a delivery goes to: the caller's list, else `[delivery] channels`, else stdout."""
+    return channels or delivery_cfg.get("channels", ["stdout"])
+
+
+def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str] | None = None, force: bool = False,
+            failed: list[str] | None = None) -> list[str]:
     """Send to every configured channel whose min_severity is met. Returns the channels that succeeded;
-    failures are reported on stderr and never abort the run.
+    failures are reported on stderr and never abort the run, and are appended to `failed` when the caller passes a
+    list (the fleet digest tells "every channel failed" from "the gate held it back"). A name no channel answers
+    to counts as failed too: a misspelt channel sent nothing, which is not the gate holding back.
 
     The gate is on the finding, not the run, when the review carries `life` (dbtriage.ledger): a channel fires
     when some finding is new, returned or worse at or above its min_severity, so a still-open medium does not repost.
@@ -259,7 +267,7 @@ def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str]
     `force` (the deliver subcommand's --force) skips every gate and posts the review as it stands to each channel,
     a new issue included: the gates exist to stop the scheduler repeating itself, and a person re-sending after
     an outage is the opposite of that."""
-    names = channels or delivery_cfg.get("channels", ["stdout"])
+    names = channel_names(delivery_cfg, channels)
     global_min = RANK.get(delivery_cfg.get("min_severity") or "info", 0)
     sev = RANK.get(triage.get("severity", "info"), 0)
     per_finding = isinstance(triage.get("life"), list)
@@ -268,6 +276,8 @@ def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str]
         fn = CHANNELS.get(name)
         if fn is None:
             print(f"deliver: unknown channel {name!r}", file=sys.stderr)
+            if failed is not None:
+                failed.append(name)
             continue
         cfg = delivery_cfg.get(name, {})
         # a channel's own gate: set ("" = "(global)", the global gate), else the channel's default (tickets: high)
@@ -287,4 +297,6 @@ def deliver(delivery_cfg: dict, triage: dict, markdown: str, channels: list[str]
             ok.append(name)
         except Exception as exc:  # noqa: BLE001 - one broken channel must not hide the others
             print(f"deliver: {name} failed: {exc}", file=sys.stderr)
+            if failed is not None:
+                failed.append(name)
     return ok
