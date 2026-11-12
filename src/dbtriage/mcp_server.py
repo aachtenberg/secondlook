@@ -29,7 +29,7 @@ from dbtriage.storage import Storage
 
 FIELDS = ("enabled", "allow_run", "tools")  # the [mcp] section of targets.toml
 READ_TOOLS = ("list_targets", "list_snapshots", "get_review", "get_report", "compare_snapshots", "get_sql_history",
-              "get_raw_report", "get_recent_changes")
+              "get_raw_report", "get_recent_changes", "get_operator_answers")
 RUN_TOOL = "run_review"
 # what dbtriage.cli.collect names snapshots: engine/target/YYYY-MM-DD/YYYYMMDDTHHMMSSZ, -n for a second one that second.
 # Ids come from the client's model, so nothing else is used to build a storage key.
@@ -188,6 +188,11 @@ class Tools:
     def get_recent_changes(self, snapshot_id: str, hours: int = 48) -> str:
         return self._agent_tool(snapshot_id, "get_recent_changes", {"snapshot_id": snapshot_id, "hours": int(hours)})
 
+    def get_operator_answers(self, snapshot_id: str) -> str:
+        out = self._agent_tool(snapshot_id, "get_operator_answers", {"snapshot_id": snapshot_id})
+        self._listed()  # it lists the snapshot's discussions: during an outage that is only the spool, not 'none pasted'
+        return out
+
     # ---------------------------------------------------------------- the one that acts (allow_run only)
     def run_review(self, target: str, mode: str = "adhoc", reason: str = "", use_model: bool = True) -> str:
         from dbtriage.triggers import MODES, TriageRequest
@@ -229,7 +234,7 @@ def instructions(cfg: Config) -> str:
     tools = offered(cfg)
     have = lambda *names: [n for n in names if n in tools]  # noqa: E731
     start, dig = have("list_targets", "list_snapshots", "get_review"), have("get_report", "compare_snapshots", "get_sql_history",
-                                                                         "get_raw_report", "get_recent_changes")
+                                                                         "get_raw_report", "get_recent_changes", "get_operator_answers")
     text = ("dbtriage keeps snapshots of database health (load, top SQL, waits, sessions, tables; AWR/ADDM on Oracle) and "
             "a review of each.")
     if start:

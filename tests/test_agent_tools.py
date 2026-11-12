@@ -323,3 +323,29 @@ def test_evidence_lines_keep_the_band_sentence():
     assert _evidence_lines(ev) == ["a: 1", "b: 2", line]  # the sentence as it is, never cut, in place of the third plain line
     ev["settings_changed"] = ["jit"]
     assert _evidence_lines(ev) == ["a: 1", line, 'settings_changed: ["jit"]']  # both kept, one plain line left
+
+
+def test_operator_answers_tool_reads_this_and_the_previous_snapshot(tmp_path):
+    """A result a person pasted for a proposed read yesterday is still evidence today: the tool returns the answers
+    stored with the snapshot and with the previous one of the same target, each marked as supplied by a person."""
+    from dbtriage import chat
+    from dbtriage.agent import SYSTEM
+
+    st = _store(tmp_path)
+    ids = st.list_snapshots("postgres", "demo")
+    tools = {t.name: t for t in TriageAgent(st, backend=None)._tools("postgres", "demo")}
+    assert tools["get_operator_answers"].call({"snapshot_id": ids[-1]}) == f"no results supplied by a person for {ids[-1]} or the previous snapshot {ids[-2]}"
+    assert tools["get_operator_answers"].call({"snapshot_id": ids[0]}) == f"no results supplied by a person for {ids[0]}"
+    for sid in (ids[-2], ids[-1]):
+        st.put_json(chat.thread_path(sid, "review"), {"snapshot": sid, "key": "review", "messages": [
+            {"role": "user", "text": "what to run?", "at": "t"},
+            {"role": "assistant", "text": "Look for a seq scan:\n```proposed-read\nEXPLAIN SELECT 1;\n```", "at": "t",
+             "proposals": [{"n": 1, "statement": "EXPLAIN SELECT 1;", "note": "Look for a seq scan:"}]}]})
+        chat.Chat(st, None).answer(sid, "review", 1, f"Seq Scan {sid[-3:]} Filter: (x = 'y')")
+    out = json.loads(tools["get_operator_answers"].call({"snapshot_id": ids[-1]}))
+    assert "supplied by a person" in out["note"] and [a["snapshot"] for a in out["answers"]] == [ids[-1], ids[-2]]
+    a = out["answers"][0]
+    assert a["statement"] == "EXPLAIN SELECT 1;" and a["look_for"] == "Look for a seq scan:" and a["result"] == f"Seq Scan {ids[-1][-3:]} Filter: (x = '?')"
+    assert a["supplied_by"] == chat.SUPPLIED_BY and a["thread"] == "review" and a["proposal"] == 1
+    assert [a["snapshot"] for a in json.loads(tools["get_operator_answers"].call({"snapshot_id": ids[-2]}))["answers"]] == [ids[-2]]  # ids[0] has none
+    assert "get_operator_answers" in SYSTEM and "supplied by a person, never as something Second Look measured" in SYSTEM

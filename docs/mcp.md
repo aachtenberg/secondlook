@@ -49,6 +49,7 @@ Add `--config /path/to/targets.toml` after `dbtriage` if the file is not in that
 | `get_sql_history` | one statement across a database's snapshots: calls, time, CPU time (Oracle, SQL Server), plan |
 | `get_raw_report` | a page of an engine-native report stored with a snapshot, such as Oracle's AWR text |
 | `get_recent_changes` | deploys, parameter changes, jobs and failovers in the hours before a snapshot, from the change feed stored with it (GitHub or GitLab deployments, or a changes file) |
+| `get_operator_answers` | results a person pasted into a discussion after running a read the model proposed, for a snapshot and the previous one of the same target; each marked as supplied by a person, not measured |
 | `run_review` | collect and review a database now, only with `allow_run = true` |
 
 The read tools are the reviewer's own, so they share its limits: SQL literals are masked before anything is

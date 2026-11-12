@@ -34,3 +34,16 @@ def mask_report_literals(text: str | None) -> str:
     if not text:
         return text or ""
     return _STRING_ON_LINE.sub("'?'", text)
+
+
+_SQL_LINE = re.compile(r"^\s*(?:select|with|insert|update|delete|merge|explain|analyze|call|exec(?:ute)?)\b", re.I)
+
+
+def mask_operator_text(text: str | None) -> str:
+    """Mask a result a person pasted into a discussion before it is stored. Quoted strings become '?' as in a report;
+    a line that is itself a SQL statement (the proposed read echoed back with the real values the person ran it
+    with) is masked as SQL text is, numbers included. Numbers on other lines are the statistics the person wanted
+    to show, so they stay."""
+    if not text:
+        return ""
+    return "\n".join(redact_sql(line) if _SQL_LINE.match(line) else mask_report_literals(line) for line in text.splitlines())

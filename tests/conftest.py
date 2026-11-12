@@ -119,7 +119,10 @@ class FakeLLM:
             sid = re.search(r"snapshot (\S+), captured", text)[1]
             return self._msg(calls=[("get_report", {"snapshot_id": sid, "section": "top_sql"})])
         q = re.findall(r"Answer this question now, using tools for any number you cite: (.*)", text)
-        return self._msg(f"**Fake answer** to: {q[-1] if q else '?'}")
+        ans = f"**Fake answer** to: {q[-1] if q else '?'}"
+        if q and "explain" in q[-1].lower():  # a proposed read, as the real model writes one
+            ans += "\n\nLook for a sequential scan on orders:\n\n```proposed-read\nEXPLAIN SELECT count(*) FROM orders WHERE status = 'open';\n```"
+        return self._msg(ans)
 
 
 @pytest.fixture(scope="session")

@@ -37,7 +37,13 @@ tool schema (other when none fits) and a subject: the one thing it names, exactl
 SQL finding the sql_id verbatim, otherwise the table name, wait class, parameter name or session id, and empty when
 there is none. These two fields are how a finding is matched to the rules and to earlier reviews; where is the
 display text. If nothing is wrong, say so and list what you checked.
-Finish by calling submit_review exactly once."""
+Finish by calling submit_review exactly once.
+
+Call get_operator_answers once before you submit. A person may have run a read the model proposed in an earlier
+discussion of this database (an EXPLAIN, a wait or lock slice, a stats query) and pasted the result back; it is
+stored with this snapshot or the previous one. Use such a result as evidence when it bears on a finding, and cite it
+as supplied by a person, never as something Second Look measured: nothing ran it here, it cannot be verified, and
+it may come from a different moment than the snapshot."""
 
 class Finding(BaseModel):
     severity: str = Field(description="high, medium or low")
@@ -184,6 +190,27 @@ class TriageAgent:
             return json.dumps(agent._changes(snapshot_id, hours), default=str)
 
         @beta_tool
+        def get_operator_answers(snapshot_id: str) -> str:
+            """Results a person pasted into a discussion after running a read the model proposed
+            (an EXPLAIN, a wait slice, a stats query), for this snapshot and the previous one of
+            the same target. Second Look did not run these and cannot verify them: cite each as
+            supplied by a person, never as something measured. Each entry carries the statement
+            proposed, what to look for, and the pasted result with literals masked.
+
+            Args:
+                snapshot_id: Snapshot id; the previous snapshot of the same target is read as well.
+            """
+            from dbtriage import chat  # chat imports this module, so the import lives here
+
+            prev = agent.storage.previous(engine, target, snapshot_id)
+            rows = [r for sid in [snapshot_id] + ([prev] if prev else []) for r in chat.operator_answers(agent.storage, sid)]
+            if not rows:
+                return f"no results supplied by a person for {snapshot_id}" + (f" or the previous snapshot {prev}" if prev else "")
+            return json.dumps({"note": "Every result below was pasted by a person after running the proposed read on their side. "
+                                       "Second Look did not run it and cannot verify it: cite it as supplied by a person, never as measured.",
+                               "answers": rows}, default=str)
+
+        @beta_tool
         def submit_review(findings: list[Finding], summary: str, checked: str, confidence: str) -> str:
             """Record the final review. Call exactly once, at the end.
 
@@ -209,7 +236,7 @@ class TriageAgent:
             }
             return "recorded"
 
-        return [get_report, get_raw_report, compare_snapshots, get_sql_history, get_recent_changes, submit_review]
+        return [get_report, get_raw_report, compare_snapshots, get_sql_history, get_recent_changes, get_operator_answers, submit_review]
 
     def tool_specs(self, engine: str, target: str) -> list[ToolSpec]:
         """Provider-neutral tool descriptions for any backend ($ref-free: not every provider resolves $defs).

@@ -103,7 +103,7 @@ Two links join findings across targets, and they are not equally strong:
 
 OEM, pganalyze, and Query Store cannot write either sentence.
 
-### 5. A proposed read, answered by a person
+### 5. A proposed read, answered by a person *(landed)*
 
 Chat already refuses to touch the live database and tells the reader what to run. Make that a first-class step on a finding: the model proposes one read-only statement (an `EXPLAIN`, a wait slice, a stats query), the person runs it, and they paste the result back into the thread.
 

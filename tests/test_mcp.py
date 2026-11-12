@@ -393,6 +393,14 @@ def test_off_is_reported_without_the_sdk(tmp_path, monkeypatch):
         mcp_server.build(cfg, LocalStorage(tmp_path / "data"))
 
 
+def test_operator_answers_tool(cfg_store):
+    """The reviewer's get_operator_answers is offered read-only like its other tools, and the instructions name it."""
+    cfg, st = cfg_store("[mcp]\nenabled = true\n")
+    out = call(mcp_server.build(cfg, st), "get_operator_answers", {"snapshot_id": DEMO})
+    assert out == f"no results supplied by a person for {DEMO} or the previous snapshot {DEMO_BASE}"
+    assert "get_operator_answers" in mcp_server.instructions(cfg) and "get_operator_answers" in mcp_server.READ_TOOLS
+
+
 def test_instructions_name_only_the_offered_tools(cfg_store):
     """With tools = ["list_targets", "get_review"] the model was told to use list_snapshots, get_report ... which the
     server does not offer (agent review on #9, 6bb5926)."""

@@ -154,6 +154,24 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
 - **People decide.** dbtriage recommends fixes and never applies them. Automatic fixes, if ever added, belong
   behind an approval step with a ready rollback.
 
+## A proposed read, answered by a person
+
+A discussion answer can carry a *proposed read*: one read-only statement the model wants run (an `EXPLAIN`, a wait
+slice, a stats query), marked in its text as a fenced `proposed-read` block with a line above saying what to look
+for. Nothing runs it. The web view has no connection to any database, and `dbtriage ask` has none either; the
+statement is text for a person to copy. The person runs it on their side, with their own credentials, and pastes
+the result into the thread (web: **Paste the result** under the block; API: `POST
+/api/snapshots/<id>/chat/<key>/answer` with `{proposal, result}`, behind the same `--allow-chat` gate as a
+question).
+
+The pasted result is stored in the thread file (`<snapshot>/chat/<key>.json`) as a message with role `operator`,
+after the same masking as a report: quoted strings become `'?'`, and a line that is itself a SQL statement (the
+read echoed back with the real values it was run with) is masked as SQL text is. Numbers on other lines stay,
+because a plan's costs and row counts are the point. The text is cut at 20 KB. It is labelled **supplied by a
+person** on the page, in the thread replayed to the model, in the audit bundle, and in `get_operator_answers`, the
+reviewer's tool that returns the results stored with a snapshot and with the previous snapshot of the same target.
+The reviewer may cite such a result as evidence; it may not present it as something Second Look measured.
+
 ## The record you can hand someone
 
 `dbtriage bundle <snapshot>` writes one zip, `<engine>-<target>-<id>.zip`, that a postmortem or an auditor can take
@@ -254,8 +272,9 @@ and a `subject`, the exact sql_id, table, wait class or parameter it names; `fin
 when the model and the rules found the same thing, or when a finding is the same one as in the previous snapshot.
 
 The reviewer's tools are `get_report`, `get_raw_report` (pages through the AWR text), `compare_snapshots`,
-`get_sql_history`, `get_recent_changes` and `submit_review`. Reports are never pasted into the prompt; the model
-asks for what it needs, so the numbers stay exact.
+`get_sql_history`, `get_recent_changes`, `get_operator_answers` (results a person pasted for a proposed read) and
+`submit_review`. Reports are never pasted into the prompt; the model asks for what it needs, so the numbers stay
+exact.
 
 ## Code layout
 

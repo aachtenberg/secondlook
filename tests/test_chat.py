@@ -167,3 +167,48 @@ def test_target_thread_tells_the_model_about_the_whole_database(tmp_path):
     assert "about the database as a whole" in ctx and "- Health:" in ctx and "- Open: 1 finding, worst high" in ctx
     assert "- blocking : high, worse, since 2026-11-05T09:00, tickets DBA-1 · 3 blocked" in ctx and "Cleared lately: bloat t (2026-11-04)" in ctx
     assert chat.KEY_RE.match("target") and chat.thread_path(SID, "target").endswith("/chat/target.json")
+
+
+def test_proposed_reads_and_a_pasted_result(tmp_path):
+    """An answer's proposed-read blocks are parsed and numbered through the thread; a result a person pastes back is
+    stored masked and cut, labelled as supplied by a person, and replayed to the model as such."""
+
+    class Proposes(Fake):
+        def run(self, system, task, tools, max_iterations=25, require_tool=None, stop_when=None):
+            self.systems.append(system); self.tasks.append(task)
+            return llm.AgentResult(text="Look for a sequential scan on orders:\n\n```proposed-read\nEXPLAIN SELECT count(*) FROM orders WHERE status = 'open';\n```\n\n"
+                                        "Then the waits:\n```proposed-read\nSELECT wait_event, count(*) FROM pg_stat_activity GROUP BY 1;\n```",
+                                   stop_reason="end_turn", model="m", usage={}, tool_calls=0)
+
+    st = store(tmp_path)
+    fake = Proposes()
+    c = chat.Chat(st, lambda: fake)
+    a = c.ask(SID, 1, "what should I run?")
+    assert a["proposals"] == [{"n": 1, "statement": "EXPLAIN SELECT count(*) FROM orders WHERE status = 'open';", "note": "Look for a sequential scan on orders:"},
+                              {"n": 2, "statement": "SELECT wait_event, count(*) FROM pg_stat_activity GROUP BY 1;", "note": "Then the waits:"}]
+    assert "```proposed-read" in fake.systems[0] and "never a statement that changes the database" in fake.systems[0]
+    b = c.ask(SID, 1, "and more?")
+    assert [p["n"] for p in b["proposals"]] == [3, 4]  # numbered through the thread, so a pasted result names one read
+    r = c.answer(SID, "finding-1", 1, "Seq Scan on orders  (cost=0.00..1.00 rows=5)\n  Filter: (status = 'open')\nSELECT 1 FROM t WHERE id = 42\n")
+    assert r == {"role": "operator", "text": "Seq Scan on orders  (cost=0.00..1.00 rows=5)\n  Filter: (status = '?')\nSELECT ? FROM t WHERE id = ?",
+                 "proposal": 1, "at": r["at"]}  # quoted values masked, the echoed statement masked as SQL, the plan's numbers kept
+    t = chat.load_thread(st, SID, "finding-1")
+    assert [m["role"] for m in t["messages"]] == ["user", "assistant", "user", "assistant", "operator"]
+    c.ask(SID, 1, "so?")
+    assert "Result supplied by a person for proposed read 1 (not measured by Second Look):\nSeq Scan on orders" in fake.tasks[2]
+    big = c.answer(SID, "finding-1", 2, "x" * (chat.MAX_RESULT + 5))
+    assert big["truncated"] is True and big["text"] == "x" * chat.MAX_RESULT + "\n... (truncated)"
+    for key, n, text in (("finding-1", 9, "r"), ("finding-1", 1, "  "), ("finding-2", 1, "r"), ("../x", 1, "r")):
+        try:
+            c.answer(SID, key, n, text); assert False
+        except ValueError:
+            pass
+    try:
+        c.answer("postgres/demo/2026-11-05/nope", "review", 1, "r"); assert False
+    except FileNotFoundError:
+        pass
+    assert "**Person** (result for proposed read 1, supplied by a person)" in chat.thread_markdown(chat.load_thread(st, SID, "finding-1"))
+    answers = chat.operator_answers(st, SID)
+    assert [x["proposal"] for x in answers] == [1, 2] and answers[0]["statement"].startswith("EXPLAIN") and answers[0]["thread"] == "finding-1"
+    assert answers[0]["look_for"] == "Look for a sequential scan on orders:" and answers[0]["supplied_by"] == chat.SUPPLIED_BY and answers[1]["truncated"] is True
+    assert chat.operator_answers(st, "postgres/demo/2026-11-05/nope") == []
