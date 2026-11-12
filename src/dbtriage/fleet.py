@@ -23,11 +23,12 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from dbtriage import ledger, sqlnorm
-from dbtriage.storage import Storage, StorageUnavailable
+from dbtriage.storage import Conflict, Storage, StorageUnavailable
 
 RANK = {"info": 0, "low": 1, "medium": 2, "high": 3}
 STATEMENT_KINDS = ("sql_regressed", "sql_new", "sql_volume", "sql_top", "plan_change")  # findings whose subject is a sql_id
 DIGEST_KEY = "fleet/digest.json"
+CLAIM_TTL = timedelta(minutes=30)  # a claimed slot whose sender never recorded or released it is free again after this
 SUMMARIES_PER_TARGET = 10  # how many of a target's latest summaries the hash lookup reads before giving up
 _SID_TIME = re.compile(r"/(\d{8}T\d{6})Z(?:-\d+)?$")
 
@@ -96,15 +97,25 @@ def _hash_of(store: Storage, sids: list[str], sql_id: str, cache: dict) -> str:
                 s = store.get_json(f"{sid}/summary.json")
             except (FileNotFoundError, ValueError):
                 s = {}
-            rows = cache[sid] = {str(r.get("sql_id")): r for r in (s.get("top_sql") or []) if isinstance(r, dict) and r.get("sql_id") is not None}
-        if (r := rows.get(sql_id)) is not None:
+            # keyed lowercased: the ledger stores subjects through findings.identity, which lowercases, and SQL Server's
+            # ids are uppercase hex (0xB858F14FAB5DAA6A), so the summary's spelling must not have to match
+            rows = cache[sid] = {str(r.get("sql_id")).lower(): r for r in (s.get("top_sql") or []) if isinstance(r, dict) and r.get("sql_id") is not None}
+        if (r := rows.get(str(sql_id).lower())) is not None:
             return r.get("text_hash") or sqlnorm.text_hash(r.get("text"))
     return ""
 
 
+def _after(f: dict, at: datetime) -> bool:
+    """Whether an opened finding is news from the deploy on: first seen at or after it, or worse on a run at or after
+    it (a worsening is dated by the run that saw it, not by when the finding first opened)."""
+    first = _when(f.get("first_seen_at"))
+    seen = _when(f.get("last_seen_at")) if f.get("state") == "worse" else None
+    return (first is not None and first >= at) or (seen is not None and seen >= at)
+
+
 def _entry(t: str, e: dict) -> dict:
     return {"target": t, "kind": e.get("kind"), "subject": e.get("subject"), "title": e.get("title") or "", "severity": e.get("severity") or "low",
-            "state": e.get("state"), "first_seen_at": e.get("first_seen_at"), "tickets": {k: v.get("key") for k, v in (e.get("tickets") or {}).items() if isinstance(v, dict)}}
+            "state": e.get("state"), "first_seen_at": e.get("first_seen_at"), "last_seen_at": e.get("last_seen_at"), "tickets": {k: v.get("key") for k, v in (e.get("tickets") or {}).items() if isinstance(v, dict)}}
 
 
 def digest(cfg, store: Storage, since: datetime, until: datetime) -> dict:
@@ -114,7 +125,9 @@ def digest(cfg, store: Storage, since: datetime, until: datetime) -> dict:
     run inside it; the ledger keeps the state of the last run only, so an earlier worsening is not seen), how many
     snapshots the window holds and the deploys in it. Then `deploys`: the cross-target deploy links, `statements`:
     the same-statement links within one engine, `quiet`: targets reviewed in the window with nothing new or worse,
-    and `unreviewed`: targets with no snapshot in the window, which is not the same as quiet."""
+    and `unreviewed`: targets with no snapshot in the window, which is not the same as quiet. A target the store
+    could not answer for is kept with `error` (and nothing else), so the note says it was not read instead of
+    counting a smaller fleet."""
     targets: dict[str, dict] = {}
     deploy_targets: dict[str, dict[str, datetime]] = {}  # description -> {target: time}
     statements: dict[tuple[str, str], list[dict]] = {}   # (engine, hash) -> open sql findings carrying it
@@ -122,24 +135,28 @@ def digest(cfg, store: Storage, since: datetime, until: datetime) -> dict:
         try:
             led = ledger.load(store, t.engine, name)
             sids = _snapshots_in(store, t.engine, name, since, until)
-        except StorageUnavailable as exc:
-            print(f"digest: {name}: store unavailable ({exc}); left out", file=sys.stderr)
+            opened = []
+            for e in led["entries"]:
+                new = _in(_when(e.get("first_seen_at")), since, until)
+                worse = e.get("state") == "worse" and _in(_when(e.get("last_seen_at")), since, until)
+                if new or worse:
+                    opened.append(_entry(name, e))
+            deploys = _deploys(store, sids, since, until)
+            cache: dict = {}
+            all_sids = store.list_snapshots(t.engine, name) if led["entries"] else []
+            hashed = []
+            for e in led["entries"]:
+                if e.get("kind") in STATEMENT_KINDS and e.get("subject"):
+                    if h := _hash_of(store, all_sids, str(e["subject"]), cache):
+                        hashed.append((h, _entry(name, e)))
+        except StorageUnavailable as exc:  # a blip halfway through must neither drop the target nor call it quiet
+            print(f"digest: {name}: store unavailable ({exc}); not read", file=sys.stderr)
+            targets[name] = {"engine": t.engine, "opened": [], "snapshots": 0, "deploys": [], "error": str(exc)}
             continue
-        opened = []
-        for e in led["entries"]:
-            new = _in(_when(e.get("first_seen_at")), since, until)
-            worse = e.get("state") == "worse" and _in(_when(e.get("last_seen_at")), since, until)
-            if new or worse:
-                opened.append(_entry(name, e))
-        deploys = _deploys(store, sids, since, until)
         for text, at in deploys.items():
             deploy_targets.setdefault(text, {})[name] = at
-        cache: dict = {}
-        all_sids = store.list_snapshots(t.engine, name) if led["entries"] else []
-        for e in led["entries"]:
-            if e.get("kind") in STATEMENT_KINDS and e.get("subject"):
-                if h := _hash_of(store, all_sids, str(e["subject"]), cache):
-                    statements.setdefault((t.engine, h), []).append(_entry(name, e))
+        for h, f in hashed:
+            statements.setdefault((t.engine, h), []).append(f)
         opened.sort(key=lambda f: (-RANK.get(f["severity"], 0), f["first_seen_at"] or ""))
         targets[name] = {"engine": t.engine, "opened": opened, "snapshots": len(sids),
                          "deploys": sorted(deploys, key=deploys.get)}
@@ -148,10 +165,12 @@ def digest(cfg, store: Storage, since: datetime, until: datetime) -> dict:
     for text, seen in sorted(deploy_targets.items(), key=lambda kv: min(kv[1].values())):
         if len(seen) < 2:
             continue
-        after = sorted(n for n, at in seen.items() if any(_when(f["first_seen_at"]) and _when(f["first_seen_at"]) >= at for f in targets[n]["opened"]))
+        after = sorted(n for n, at in seen.items() if any(_after(f, at) for f in targets[n]["opened"]))
         if len(after) >= 2:
+            # "where nothing opened" is said only of a target with nothing opened; one whose news predates the deploy
+            # is in neither list
             links.append({"deploy": text, "at": min(seen.values()).isoformat(), "targets": after,
-                          "quiet": sorted(n for n in seen if n not in after)})
+                          "quiet": sorted(n for n in seen if n not in after and not targets[n]["opened"])})
     same = []
     for (engine, h), rows in sorted(statements.items()):
         by_target = {}
@@ -161,8 +180,8 @@ def digest(cfg, store: Storage, since: datetime, until: datetime) -> dict:
         if len(by_target) >= 2:
             same.append({"engine": engine, "text_hash": h, "findings": [by_target[n] for n in sorted(by_target)]})
 
-    quiet = sorted(n for n, t in targets.items() if not t["opened"] and t["snapshots"])
-    unreviewed = sorted(n for n, t in targets.items() if not t["opened"] and not t["snapshots"])
+    quiet = sorted(n for n, t in targets.items() if not t["opened"] and t["snapshots"] and "error" not in t)
+    unreviewed = sorted(n for n, t in targets.items() if not t["opened"] and not t["snapshots"] and "error" not in t)
     top = max((f["severity"] for t in targets.values() for f in t["opened"]), key=lambda s: RANK.get(s, 0), default="info")
     return {"since": since.isoformat(), "until": until.isoformat(), "severity": top, "targets": targets,
             "deploys": links, "statements": same, "quiet": quiet, "unreviewed": unreviewed}
@@ -221,6 +240,10 @@ def render(d: dict) -> str:
         out.append(f"No significant change: {_names(d['quiet'])}.")
     if d["unreviewed"]:
         out.append(f"No snapshot in the window: {_names(d['unreviewed'])}.")
+    if unread := [(n, t["error"]) for n, t in d["targets"].items() if t.get("error")]:
+        out.append("")
+        out.append("Could not be read:")
+        out.extend(f"- {n}: {why}" for n, why in unread)
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -250,26 +273,34 @@ def schedule_of(delivery_cfg: dict | None) -> tuple[str, list[str] | None]:
     return cron, (list(ch) if isinstance(ch, list) and ch else None)
 
 
-def last_sent(store: Storage) -> datetime | None:
-    """When the scheduled digest last went out, from fleet/digest.json; None before the first."""
+def _record(store: Storage) -> tuple[str | None, dict]:
+    """fleet/digest.json as (version, contents): the last send and, while one is under way, its claim. The version is
+    read before the contents (as ledger.commit does) so a write landing between the two fails the claim instead of
+    letting it succeed on stale data. (None, {}) before the first digest; a store outage propagates."""
+    version = store.version_of(DIGEST_KEY)
     try:
-        return _when(store.get_json(DIGEST_KEY).get("sent_at"))
-    except (FileNotFoundError, ValueError, AttributeError, StorageUnavailable):
-        return None
+        kept = store.get_json(DIGEST_KEY)
+    except (FileNotFoundError, ValueError):
+        kept = {}
+    return version, kept if isinstance(kept, dict) else {}
 
 
-def record_sent(store: Storage, d: dict, delivered: list[str], at: datetime) -> None:
-    store.put_json(DIGEST_KEY, {"sent_at": at.isoformat(), "since": d["since"], "until": d["until"], "severity": d["severity"],
-                                "delivered": delivered})
+def last_sent(store: Storage) -> datetime | None:
+    """When the scheduled digest last went out, from fleet/digest.json; None before the first. A store outage
+    propagates (StorageUnavailable): "never sent" and "cannot tell" must not look alike, or the scheduler would send
+    the first digest again every time the store blinks."""
+    return _when(_record(store)[1].get("sent_at"))
 
 
-def send(cfg, store: Storage, since: datetime, until: datetime, channels: list[str] | None = None) -> tuple[dict, str, list[str]]:
-    """Build, render and deliver the digest; returns (digest, markdown, channels that took it)."""
+def send(cfg, store: Storage, since: datetime, until: datetime, channels: list[str] | None = None,
+         failed: list[str] | None = None) -> tuple[dict, str, list[str]]:
+    """Build, render and deliver the digest; returns (digest, markdown, channels that took it). `failed` collects the
+    channels that raised, when the caller passes a list."""
     from dbtriage.deliver import deliver
 
     d = digest(cfg, store, since, until)
     md = render(d)
-    return d, md, deliver(cfg.delivery, as_triage(d), md, channels)
+    return d, md, deliver(cfg.delivery, as_triage(d), md, channels, failed=failed)
 
 
 class Digest:
@@ -287,19 +318,59 @@ class Digest:
 
     def fire(self, slot: datetime, now: datetime, reason: str) -> tuple[bool, str]:
         """The digest for one schedule slot: since the last send (or one period before the slot, for the first), until
-        now. The store is checked once more so two scheduler processes on one store send one digest, not two."""
+        now. The slot is claimed first, by a conditional write on fleet/digest.json, so two scheduler processes on one
+        store (`dbtriage scheduler` and `web --schedule`) send one digest, not two: the one whose claim the store
+        refused stands down. The clock (sent_at) moves when a channel took the note or the severity gate held it
+        back; when the store or every channel failed the claim is given back and the next digest covers this window
+        too, and when the store cannot be read at all nothing is sent, since "no record" may mean "sent last week"."""
         from dbtriage.scheduler import parse
 
         cfg = self.config()
         cron, channels = schedule_of(cfg.delivery)
-        last = self.last_sent()
+        try:
+            version, kept = _record(self.store)
+        except StorageUnavailable as exc:
+            return False, f"store unavailable ({exc}); not sent"
+        last = _when(kept.get("sent_at"))
         if last is not None and last >= slot:
             return False, f"already sent at {last:%Y-%m-%d %H:%M}"
+        claimed = _when(kept.get("claimed_at"))
+        if claimed is not None and _when(kept.get("claimed_slot")) == slot and now - claimed < CLAIM_TTL:
+            return False, f"another process is sending it (claimed at {claimed:%Y-%m-%d %H:%M})"
+        try:
+            self.store.put_json_if(DIGEST_KEY, {**kept, "claimed_at": now.isoformat(), "claimed_slot": slot.isoformat()}, version)
+            held = self.store.version_of(DIGEST_KEY)
+        except Conflict:
+            return False, "another process sent it"
+        except StorageUnavailable as exc:
+            return False, f"store unavailable ({exc}); not sent"
         if last is not None:
             since = last
         else:  # the first digest covers one period before its slot (a week for "weekly")
             since = slot - ((parse(cron).next_after(slot) - slot) if cron else timedelta(days=7))
-        d, md, done = send(cfg, self.store, since, now, channels)
-        record_sent(self.store, d, done, now)
+        failed: list[str] = []
+        try:
+            d, md, done = send(cfg, self.store, since, now, channels, failed)
+        except StorageUnavailable as exc:
+            self._release(kept, held)
+            return False, f"store unavailable ({exc}); not sent"
+        if not done and failed:  # the gate let it through and no channel took it: the window stays open
+            self._release(kept, held)
+            return False, f"no channel took it ({', '.join(failed)} failed); not sent"
+        record = {"sent_at": now.isoformat(), "since": d["since"], "until": d["until"], "severity": d["severity"], "delivered": done}
+        try:
+            self.store.put_json_if(DIGEST_KEY, record, held)
+        except Conflict:  # the claim outlived its ttl and another process took the slot; the note went out twice
+            print(f"scheduler: fleet/digest.json moved while the digest was being sent; another process may have sent it too", file=sys.stderr)
+        except StorageUnavailable as exc:  # the clock stays; the claim expires and the next digest covers this window again
+            print(f"scheduler: store unavailable ({exc}); the digest went out but its send is not recorded", file=sys.stderr)
         print(f"scheduler: {reason}: {title(d)}: {d['severity']}, delivered to {', '.join(done) or 'nothing'}")
         return True, "sent"
+
+    def _release(self, kept: dict, held: str | None) -> None:
+        """Put back what fleet/digest.json held before the claim. When that fails too the claim stays and expires
+        after CLAIM_TTL, which is the same outcome a little later."""
+        try:
+            self.store.put_json_if(DIGEST_KEY, kept, held)
+        except (Conflict, StorageUnavailable) as exc:
+            print(f"scheduler: could not give the digest slot back ({exc}); the claim expires in {CLAIM_TTL}", file=sys.stderr)

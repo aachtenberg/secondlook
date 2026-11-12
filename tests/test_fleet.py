@@ -9,7 +9,7 @@ from dbtriage import fleet, ledger
 from dbtriage import scheduler as sch
 from dbtriage.config import Config, Target
 from dbtriage.sqlnorm import text_hash
-from dbtriage.storage import LocalStorage
+from dbtriage.storage import LocalStorage, StorageUnavailable
 
 UNTIL = datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc)
 SINCE = UNTIL - timedelta(days=7)
@@ -147,6 +147,67 @@ def test_the_same_severity_reads_as_one_word(tmp_path):
     assert "- The same statement is high on pg-prod and pg-replica (postgres" in fleet.render(fleet.digest(cfg, st, SINCE, UNTIL))
 
 
+def test_a_sql_server_id_links_through_the_ledger(tmp_path):
+    """The ledger stores subjects lowercased (findings.identity); SQL Server's ids are uppercase hex. The two
+    replicas must still meet on the statement."""
+    st, cfg = fleet_store(tmp_path)
+    cfg.targets = {n: Target(n, "sqlserver", "d") for n in ("mssql-a", "mssql-b")}
+    text = "SELECT * FROM dbo.orders WHERE customer_id = @p1"
+    for n, sql_id in (("mssql-a", "0xB858F14FAB5DAA6A"), ("mssql-b", "0x1F2E3D4C5B6A7988")):
+        when = UNTIL - timedelta(days=1)
+        s = snapshot(st, "sqlserver", n, when, [{"sql_id": sql_id, "text": text, "text_hash": text_hash(text)}])
+        led = ledger.load(st, "sqlserver", n)
+        ledger.apply(led, s, when.isoformat(), [{"kind": "sql_regressed", "severity": "high", "title": "slower", "evidence": {"sql_id": sql_id}}])
+        ledger.save(st, "sqlserver", n, led)
+        assert ledger.load(st, "sqlserver", n)["entries"][0]["subject"] == sql_id.lower()
+    dg = fleet.digest(cfg, st, SINCE, UNTIL)
+    assert len(dg["statements"]) == 1 and [f["target"] for f in dg["statements"][0]["findings"]] == ["mssql-a", "mssql-b"]
+
+
+def test_a_target_that_got_worse_after_the_deploy_is_not_where_nothing_opened(tmp_path):
+    st, cfg = fleet_store(tmp_path)
+    deploy_at = UNTIL - timedelta(days=2, hours=3)
+    snapshot(st, "postgres", "pg-replica", UNTIL - timedelta(days=1, hours=1), [], [(BILLING, deploy_at)])
+    old = entry("sql_top", "999", "high", UNTIL - timedelta(days=20), state="worse")
+    old["last_seen_at"] = (deploy_at + timedelta(hours=4)).isoformat()  # worse on a run after the deploy
+    write_ledger(st, "postgres", "pg-replica", [old])
+    dg = fleet.digest(cfg, st, SINCE, UNTIL)
+    link = dg["deploys"][0]
+    assert link["targets"] == ["ora-prod", "pg-prod", "pg-replica"] and link["quiet"] == []
+    md = fleet.render(dg)
+    assert f"- After `{BILLING}`, findings opened on ora-prod, pg-prod and pg-replica." in md and "where nothing opened" not in md
+    # worse on a run before the deploy: not after it, and still not "nothing opened"
+    old["last_seen_at"] = (deploy_at - timedelta(hours=4)).isoformat()
+    write_ledger(st, "postgres", "pg-replica", [old])
+    link = fleet.digest(cfg, st, SINCE, UNTIL)["deploys"][0]
+    assert link["targets"] == ["ora-prod", "pg-prod"] and link["quiet"] == []
+
+
+class _Blinking(LocalStorage):
+    """A store that cannot answer for one key."""
+
+    def __init__(self, root, down_key: str):
+        super().__init__(root)
+        self.down_key = down_key
+
+    def get(self, key):
+        if key == self.down_key:
+            raise StorageUnavailable("connection reset")
+        return super().get(key)
+
+
+def test_a_store_blip_lists_the_target_as_not_read_and_still_counts_it(tmp_path):
+    st, cfg = fleet_store(tmp_path)
+    # the blip hits pg-replica's summary read: after its ledger loaded, inside the hash lookup
+    st = _Blinking(tmp_path / "data", f"{sid('postgres', 'pg-replica', UNTIL - timedelta(days=1))}/summary.json")
+    dg = fleet.digest(cfg, st, SINCE, UNTIL)
+    assert dg["targets"]["pg-replica"]["error"] == "connection reset" and dg["targets"]["pg-replica"]["opened"] == []
+    assert "pg-replica" not in dg["quiet"] and "pg-replica" not in dg["unreviewed"] and dg["statements"] == []
+    md = fleet.render(dg)
+    assert "2 findings opened on 2 of 5 databases; 1 had no significant change." in md  # the fleet is still five
+    assert md.rstrip().endswith("Could not be read:\n- pg-replica: connection reset")
+
+
 def test_parse_since():
     assert fleet.parse_since("7d", UNTIL) == SINCE and fleet.parse_since("24h", UNTIL) == UNTIL - timedelta(hours=24)
     assert fleet.parse_since("90m", UNTIL) == UNTIL - timedelta(minutes=90)
@@ -263,6 +324,110 @@ def test_scheduler_fires_the_digest_once_per_slot_and_remembers_across_restarts(
     assert len(sent) == 2 and s.digest_state.next is None
     s5 = sch.Scheduler(lambda: {}, lambda *a: (True, "started"))
     s5.tick(datetime(2026, 11, 16, 3, 0, tzinfo=timezone.utc))  # no digest at all: the old call shape still works
+
+
+SLOT = datetime(2026, 11, 9, 3, 0, tzinfo=timezone.utc)
+NOW = SLOT + timedelta(seconds=30)
+
+
+def _digest_cfg(cfg, channels):
+    cfg.delivery = {"channels": ["stdout"], "digest": {"schedule": "weekly", "channels": channels}}
+    return cfg
+
+
+class _Racing(LocalStorage):
+    """A store whose first conditional write lets another process go first."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.before_first_put_if = None
+
+    def put_if(self, key, data, expected):
+        if self.before_first_put_if is not None:
+            other, self.before_first_put_if = self.before_first_put_if, None
+            other()
+        super().put_if(key, data, expected)
+
+
+def test_two_processes_on_one_store_send_one_digest(tmp_path, monkeypatch):
+    """Both see no send for the slot; the claim is a conditional write, so the one the store refuses stands down."""
+    st, cfg = fleet_store(tmp_path)
+    sent = []
+    monkeypatch.setitem(d.CHANNELS, "fake", lambda c, t, md: sent.append(t["title"]))
+    _digest_cfg(cfg, ["fake"])
+    racing = _Racing(tmp_path / "data")
+    a, b = fleet.Digest(lambda: cfg, racing), fleet.Digest(lambda: cfg, LocalStorage(tmp_path / "data"))
+    results = {}
+    racing.before_first_put_if = lambda: results.__setitem__("b", b.fire(SLOT, NOW, "schedule"))  # b lands between a's read and a's claim
+    results["a"] = a.fire(SLOT, NOW, "schedule")
+    assert results["b"] == (True, "sent") and results["a"] == (False, "another process sent it")
+    assert len(sent) == 1
+    kept = json.loads(st.get(fleet.DIGEST_KEY))
+    assert kept["sent_at"] == NOW.isoformat() and "claimed_at" not in kept  # the claim is gone with the send recorded
+    # a claim under way (a process still sending) holds the slot; an abandoned one expires
+    st.put_json(fleet.DIGEST_KEY, {**kept, "sent_at": (SLOT - timedelta(days=7)).isoformat(), "claimed_at": NOW.isoformat(), "claimed_slot": SLOT.isoformat()})
+    assert b.fire(SLOT, NOW + timedelta(minutes=1), "schedule") == (False, "another process is sending it (claimed at 2026-11-09 03:00)")
+    assert len(sent) == 1
+    assert b.fire(SLOT, NOW + fleet.CLAIM_TTL, "schedule") == (True, "sent") and len(sent) == 2
+
+
+def test_a_failed_send_leaves_the_clock_alone(tmp_path, monkeypatch):
+    st, cfg = fleet_store(tmp_path)
+
+    def broken(c, t, md):
+        raise ConnectionError("smtp down")
+
+    monkeypatch.setitem(d.CHANNELS, "fake", broken)
+    _digest_cfg(cfg, ["fake"])
+    dig = fleet.Digest(lambda: cfg, st)
+    assert dig.fire(SLOT, NOW, "schedule") == (False, "no channel took it (fake failed); not sent")
+    assert fleet.last_sent(st) is None and "claimed_at" not in json.loads(st.get(fleet.DIGEST_KEY))  # the claim was given back
+    # once a channel is back the same slot goes out, covering the whole period
+    sent = []
+    monkeypatch.setitem(d.CHANNELS, "fake", lambda c, t, md: sent.append(t["since"]))
+    assert dig.fire(SLOT, NOW, "schedule") == (True, "sent") and sent == [(SLOT - timedelta(days=7)).isoformat()]
+    assert fleet.last_sent(st) == NOW
+    # a week the severity gate held back still advances the clock: nothing failed, there was nothing to say
+    for n in cfg.targets:
+        write_ledger(st, cfg.targets[n].engine, n, [])
+    cfg.delivery["fake"] = {"min_severity": "medium"}
+    later = NOW + timedelta(days=7)
+    assert dig.fire(SLOT + timedelta(days=7), later, "schedule") == (True, "sent") and len(sent) == 1
+    assert fleet.last_sent(st) == later
+
+
+class _Down(LocalStorage):
+    def get(self, key):
+        raise StorageUnavailable("store down")
+
+    def version_of(self, key):
+        raise StorageUnavailable("store down")
+
+
+def test_a_store_outage_sends_nothing(tmp_path, monkeypatch):
+    """No record is not "never sent": it may be "sent last week, and the store is down"."""
+    st, cfg = fleet_store(tmp_path)
+    sent = []
+    monkeypatch.setitem(d.CHANNELS, "fake", lambda c, t, md: sent.append(t["title"]))
+    _digest_cfg(cfg, ["fake"])
+    down = _Down(tmp_path / "data")
+    dig = fleet.Digest(lambda: cfg, down)
+    try:
+        dig.last_sent()
+    except StorageUnavailable:
+        pass
+    else:
+        raise AssertionError("an outage read as 'never sent'")
+    assert dig.fire(SLOT, NOW, "schedule") == (False, "store unavailable (store down); not sent") and sent == []
+    assert not st.exists(fleet.DIGEST_KEY)
+    # the scheduler waits for the store before it counts the next slot, then catches up from the stored send
+    s = sch.Scheduler(lambda: {}, lambda *a: (True, "started"), digest=dig)
+    s.tick(NOW)
+    assert sent == [] and s.digest_state.next is None and s.digest_state.last_status.startswith("waiting: store unavailable")
+    st.put_json(fleet.DIGEST_KEY, {"sent_at": (SLOT - timedelta(days=7)).isoformat()})
+    s.digest = fleet.Digest(lambda: cfg, st)
+    s.tick(NOW + timedelta(minutes=1))
+    assert sent == ["Fleet digest 2026-11-02 to 2026-11-09"] and s.digest_state.last_status == "sent"
 
 
 # ---------------------------------------------------------------- the hash is stored with every capture

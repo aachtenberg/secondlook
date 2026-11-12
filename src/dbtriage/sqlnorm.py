@@ -18,29 +18,29 @@ import hashlib
 import re
 
 PLACEHOLDER = "?"
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
-_LINE_COMMENT = re.compile(r"--[^\n]*")
 _STRING = re.compile(r"'(?:[^']|'')*'")
+# a string or a comment, whichever starts first: '-- fee' inside a literal is text, and a quote inside a comment
+# opens nothing, because the leftmost match swallows the other
+_STRING_OR_COMMENT = re.compile(rf"({_STRING.pattern})|/\*.*?\*/|--[^\n]*", re.S)
 # $1 (postgres), :1 and :name (oracle; not the :: cast or :=), @p1 and @name (sql server, mysql; not @@version)
 _BIND = re.compile(r"\$\d+|(?<![:\w]):(?!:)[A-Za-z_]\w*|(?<![:\w]):\d+|(?<![@\w])@[A-Za-z_]\w*")
 _NUMBER = re.compile(r"(?<![\w$?])[-+]?\d+(?:\.\d+)?(?![\w$])")
 _WS = re.compile(r"\s+")
 _AROUND_PUNCT = re.compile(r"\s*([(),;=<>])\s*")  # "count ( * )" and "count(*)" are one statement
-_LIST = re.compile(r"\(\s*\?(?:\s*,\s*\?)+\s*\)")  # in (?, ?, ?) -> (?): the list's length is a literal too
+_IN_LIST = re.compile(r"\bin\(\?(?:,\?)+\)")  # in (?, ?, ?) -> in (?): the list's length is a literal too; an argument list is not
 
 
 def normalize(text: str | None) -> str:
     """The statement with its literals, binds, comments, case and spacing taken out; "" for no text."""
     if not text:
         return ""
-    out = _BLOCK_COMMENT.sub(" ", text)
-    out = _LINE_COMMENT.sub(" ", out)
+    out = _STRING_OR_COMMENT.sub(lambda m: m[1] or " ", text)
     out = _STRING.sub(PLACEHOLDER, out)
     out = _BIND.sub(PLACEHOLDER, out)
     out = _NUMBER.sub(PLACEHOLDER, out)
     out = _WS.sub(" ", out).strip().lower()
     out = _AROUND_PUNCT.sub(r"\1", out)
-    out = _LIST.sub("(?)", out)
+    out = _IN_LIST.sub("in(?)", out)
     return out.strip(" ;")
 
 

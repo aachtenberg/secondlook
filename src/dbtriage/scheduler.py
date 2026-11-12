@@ -28,6 +28,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+from dbtriage.storage import StorageUnavailable
+
 PRESETS: list[tuple[str, str]] = [  # (cron, label) in the order the UI shows them
     ("", "not scheduled"),
     ("*/15 * * * *", "every 15 minutes"),
@@ -222,10 +224,12 @@ class Scheduler(threading.Thread):
             cron = ""
         st = self.digest_state
         if cron != st.expr:
-            st.expr, st.next = cron, None
-            if cron:
-                last = self.digest.last_sent()
-                st.next = parse(cron).next_after(last.astimezone(now.tzinfo) if last else now)
+            try:
+                last = self.digest.last_sent() if cron else None
+            except StorageUnavailable as exc:  # "never sent" and "cannot tell" differ: keep asking until the store answers
+                st.last_status = f"waiting: store unavailable ({exc})"
+                return
+            st.expr, st.next = cron, (parse(cron).next_after(last.astimezone(now.tzinfo) if last else now) if cron else None)
         if not cron or st.next is None or now < st.next:
             return
         ok, msg = self.digest.fire(st.next, now, f"schedule {describe(cron)}")

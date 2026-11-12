@@ -37,6 +37,7 @@ def test_redaction_then_hash_equals_hash_of_the_original():
 
 def test_in_lists_collapse_and_casts_survive():
     assert normalize("select 1 from t where a in (1, 2, 3)") == normalize("select 7 from t where a in (4)")
+    assert normalize("select 1 from t where a not in ($1, $2)") == "select ? from t where a not in(?)"
     assert normalize("select $1::int from t") == "select ?::int from t"  # the :: cast is not a :bind
     assert normalize("begin x := 5; end") == "begin x :=?;end"  # := is not a :bind either
     assert normalize("select @@version") == "select @@version"  # a server variable, not a bind
@@ -54,3 +55,20 @@ def test_annotate_marks_rows_with_text_only():
     assert s["top_sql"][0]["text_hash"] == text_hash("select 1") and "text_hash" not in s["top_sql"][1] and "text_hash" not in s["top_sql"][2]
     assert s["sessions"][0]["text_hash"] == text_hash("select 2") and "text_hash" not in s["sessions"][1]
     assert annotate({}) == {}
+
+
+def test_only_an_in_list_collapses():
+    """An argument list's length is part of the statement: coalesce of three is not coalesce of one, and a two-row
+    insert is not a one-row insert."""
+    assert text_hash("select coalesce($1, $2, $3)") != text_hash("select coalesce($1)")
+    assert text_hash("insert into t values (?, ?)") != text_hash("insert into t values (?)")
+    assert text_hash("insert into t (a, b) values (1, 2)") == text_hash("insert into t (a, b) values (3, 4)")
+
+
+def test_comments_inside_strings_are_text():
+    """A '--' or '/*' inside a literal is part of the literal, so the raw text hashes like its redacted form."""
+    for raw in ("update t set note = 'late -- fee' where id = 1", "select '/* not a comment */' from t -- a real one",
+                "select 'it''s -- fine' from t /* really */"):
+        assert text_hash(raw) == text_hash(redact_sql(raw)), raw
+    assert normalize("select 'a -- b' from t") == "select ? from t"
+    assert normalize("select 1 /* don't */ from t -- it's") == "select ? from t"  # a quote in a comment opens no string

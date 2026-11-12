@@ -70,7 +70,9 @@ The scheduler (`dbtriage scheduler`) sends it when the slot comes, through the u
 send is kept in the store at `fleet/digest.json`, so a restart does not send it twice, and a slot that passed
 while the scheduler was down is sent once it is back, covering the time since the last digest. `dbtriage digest
 --since 7d` (or `24h`, or an ISO time) prints the same note now, and `--deliver` sends it; a hand-run digest does
-not move the schedule's clock. This table can only be set in `targets.toml`.
+not move the schedule's clock. Two schedulers on one store (`dbtriage scheduler` and `dbtriage web --schedule`)
+send one digest, not two: the slot is claimed in the store before the send. A send that no channel took, or that
+the store cut short, does not move the clock, so the next digest covers that window too.
 
 ## Connecting to a database
 
