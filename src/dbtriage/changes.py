@@ -93,9 +93,16 @@ def inbox_key(engine: str, target: str) -> str:
 def inbox(store, engine: str, target: str) -> list[dict]:
     """The webhook inbox's items, unfiltered; none when no deploy was ever posted for the target."""
     k = inbox_key(engine, target)
-    if not store.exists(k):
-        return []
-    data = store.get_json(k)
+    data = None
+    for attempt in range(3):
+        try:
+            data = store.get_json(k) if store.exists(k) else {}
+            break
+        except ValueError:  # a writer holding the lock rewrites the file; a reader can see it half-written. Read again.
+            if attempt == 2:
+                raise
+            import time
+            time.sleep(0.05)
     items = data.get("items") if isinstance(data, dict) else None
     return [{**it, "source": "webhook"} for it in items or [] if isinstance(it, dict)]
 

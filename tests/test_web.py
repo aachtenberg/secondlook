@@ -901,7 +901,9 @@ def test_files_max_tokens_and_fallback_models_on_the_cards(tmp_path, monkeypatch
     assert app.web["files"] == ["triage.md", "awr.txt"] and app.snapshot_detail(SID)["files"] == ["triage.md", "awr.txt"]
     assert 'name="files" value="triage.md, awr.txt"' in app.settings_page().decode()
     app.settings.put_web({"files": "*"}, base=base); app.reload()
-    assert app.web["files"] == ["*"] and "awr.txt" in app.snapshot_detail(SID)["files"]  # every stored report
+    files = app.snapshot_detail(SID)["files"]
+    assert app.web["files"] == ["*"] and "awr.txt" in files  # every stored report
+    assert "triage.md" in files and files.index("triage.md") < files.index("awr.txt")  # and the built-in list first, not only reports
     app.settings.put_web({"files": ""}, base=base); app.reload()
     assert app.web["files"] == DEFAULTS["files"]  # blank: the built-in list
     # the Agent card: max tokens per call, and the fallback chain as a comma-separated line

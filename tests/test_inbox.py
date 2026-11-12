@@ -281,3 +281,23 @@ def test_an_inbox_is_merged_not_replaced_across_an_outage(tmp_path):
     assert [i["description"] for i in primary.get_json(k)["items"]] == ["d1", "d2", "d3"]  # replay merged, nothing lost
     st.put_json_if(k, {"items": [item(4)], "generation": 2}, st.version_of(k))  # a write from a stale copy after recovery
     assert [i["description"] for i in primary.get_json(k)["items"]] == ["d1", "d2", "d3", "d4"]
+
+
+def test_reading_a_half_written_inbox_is_retried(tmp_path, monkeypatch):
+    from dbtriage import changes
+    from dbtriage.storage import LocalStorage
+
+    st = LocalStorage(tmp_path)
+    k = changes.inbox_key("postgres", "demo")
+    st.put_json(k, {"items": [{"time": "2026-11-11T09:00:00+00:00", "kind": "deploy", "description": "d1", "link": None}], "generation": 1})
+    real, calls = st.get_json, {"n": 0}
+
+    def half_written_once(key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return real(key)
+
+    monkeypatch.setattr(st, "get_json", half_written_once)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    assert [i["description"] for i in changes.inbox(st, "postgres", "demo")] == ["d1"] and calls["n"] == 2

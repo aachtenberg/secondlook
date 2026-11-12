@@ -708,10 +708,25 @@ class App:
             prev = r.get("plan_hash") or prev
         return rows
 
+    def snapshot_files(self, sid: str, manifest: dict) -> list[str]:
+        """The files the drawer links: the configured names that exist, and with "*" every stored file (the built-in
+        list first, then the engine reports and anything else under the snapshot), so "*" means more, not only reports."""
+        names = list(self.web["files"])
+        if "*" in names:
+            names = [n for n in names if n != "*"] + [n for n in DEFAULTS["files"] if n not in names]
+            try:
+                stored = sorted(k.rsplit("/", 1)[-1] for k in self.store.list_keys(f"{sid}/"))
+            except Exception:  # noqa: BLE001 - a store that cannot list still shows the known names
+                stored = []
+            for n in [*manifest.get("reports", []), *stored]:
+                if n not in names and "/" not in n and not n.startswith("."):
+                    names.append(n)
+        return [f for f in names if self.store.exists(f"{sid}/{f}")]
+
     def snapshot_detail(self, sid: str) -> dict:
         m = self.manifest_of(sid)
         detail = {"manifest": m, "triage": self.triage_of(sid), "findings": [], "top_sql": [],
-                  "files": [f for f in self.web["files"] if self.store.exists(f"{sid}/{f}")] + [r for r in m.get("reports", []) if r not in self.web["files"] and "*" in self.web["files"]]}
+                  "files": self.snapshot_files(sid, m)}
         if self.store.exists(f"{sid}/compare.json"):
             c = self.store.get_json(f"{sid}/compare.json")
             detail["findings"], detail["top_sql"] = c.get("findings", []), ((c.get("sql") or {}).get("top") or [])[:10]
