@@ -11,6 +11,7 @@
 | `dbtriage deliver <snapshot> [--channel slack,teams]` | send a stored review again |
 | `dbtriage list -t <db>`, `dbtriage show <snapshot> [file]` | browse what is stored (`triage.md`, `compare.json`, `awr.txt` ...) |
 | `dbtriage ask <snapshot> "question" [--finding N]` | discuss a review from the shell; leave out the question to print the thread |
+| `dbtriage bundle <snapshot> [--out file.zip] [--raw]` | export one snapshot as a zip for a postmortem or an auditor (below, "The record you can hand someone") |
 | `dbtriage web [--allow-run] [--allow-edit] [--allow-chat] [--schedule]` | the web view (see web.md) |
 | `dbtriage scheduler` | run every database's schedule from this server, without the web view |
 | `dbtriage mcp` | the MCP server, for MCP clients such as Claude Code; off unless `[mcp] enabled = true` (see mcp.md) |
@@ -152,6 +153,31 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
   arguments and the first 2000 characters of its result, kept even when the model failed to submit a review).
 - **People decide.** dbtriage recommends fixes and never applies them. Automatic fixes, if ever added, belong
   behind an approval step with a ready rollback.
+
+## The record you can hand someone
+
+`dbtriage bundle <snapshot>` writes one zip, `<engine>-<target>-<id>.zip`, that a postmortem or an auditor can take
+away without an account on the web view or the store. The snapshot page has the same thing as a **Download bundle**
+link (`/bundle/<snapshot>`), behind the same sign-in as the file drawer.
+
+In it: `README.md`, written for the reader (what the snapshot is, what triggered it, which baseline it was compared
+with and why, each finding with its agreement mark and life state, the model and its token usage, how many tool
+calls it made, which channels the review went to and which tickets exist, the discussion threads, and one line per
+file); every file stored with the snapshot (`manifest.json`, `summary.json`, `compare.json`, `triage.json`,
+`triage.md`, `tools.json`, `changes.json`, the engine reports and `chat/*.json`), byte for byte as the store holds
+it unless a credential-shaped value was masked (below); and `checksums.txt` with the SHA-256 of each, so `sha256sum -c checksums.txt` shows nothing was altered after
+export. The zip is deterministic: exporting an unchanged snapshot twice gives the same bytes, so the bundle's own
+checksum can be written into a ticket.
+
+Not in it: `raw.json`, the engine-native payload, unless you pass `--raw` (or `?raw=1` on the link, which works
+only when the file drawer exposes it); from the web, any file the `[web] files` setting hides (the CLI exports
+everything; `triage.json` and the threads always go in, since the snapshot and chat APIs already serve them);
+and anything read from a live database or the network at export time (there is none: the bundle is the stored
+record). The stored files are already redacted (literals masked before storage). As a belt-and-braces step the
+manifest is scrubbed of secret-named keys and every text file is scanned for credential-shaped values (a
+`user:password@` in a URL, a `password=` pair, a bearer token, a cloud access key), each replaced by `***`; the
+README names what it withheld and how many values it masked in which file, and when the store could not be listed
+it says that discussion threads may be missing rather than that there were none.
 
 ## A finding's life
 

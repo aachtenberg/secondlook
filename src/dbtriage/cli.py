@@ -21,7 +21,7 @@ from dbtriage.locks import target_lock
 from dbtriage.deliver import deliver
 from dbtriage.findings import agreement
 from dbtriage.report import render_markdown
-from dbtriage.storage import Storage, open_storage
+from dbtriage.storage import Storage, StorageUnavailable, open_storage
 from dbtriage.baseline import POLICIES
 from dbtriage.triggers import MODES, TriageRequest
 
@@ -261,6 +261,10 @@ def main(argv=None):
     sp.add_argument("snapshot")
     sp.add_argument("question", nargs="?", help="omit to print the thread so far")
     sp.add_argument("--finding", "-f", type=int, help="1-based finding number; omit to discuss the whole review")
+    sp = sub.add_parser("bundle", help="export one snapshot as a zip a postmortem or an auditor can take: a README, every stored file, checksums")
+    sp.add_argument("snapshot")
+    sp.add_argument("--out", "-o", help="file to write (default <engine>-<target>-<id>.zip in the current directory)")
+    sp.add_argument("--raw", action="store_true", help="include raw.json, the engine-native payload (can be large)")
 
     args = p.parse_args(argv)
     try:
@@ -328,6 +332,19 @@ def main(argv=None):
             print(f"\n_{chat.footer(ans)}_", file=sys.stderr)
         else:
             print(chat.thread_markdown(chat.load_thread(store, args.snapshot, key)))
+    elif args.cmd == "bundle":
+        from dbtriage import bundle
+
+        try:
+            data = bundle.build(store, args.snapshot, args.raw)
+            name = bundle.filename(store.get_json(f"{args.snapshot}/manifest.json"), args.snapshot)
+        except FileNotFoundError:
+            sys.exit(f"{args.snapshot}: no such snapshot")
+        except StorageUnavailable as exc:  # never a thinner zip: the record is exported whole or not at all
+            sys.exit(f"the store is unavailable: {exc}")
+        out = Path(args.out) if args.out else Path(name)
+        out.write_bytes(data)
+        print(f"{out}  {len(data):,} bytes")
     elif args.cmd == "web":
         from dbtriage.web import serve as web_serve
 
