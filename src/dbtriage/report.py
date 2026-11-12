@@ -81,6 +81,7 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
             lines.append(f"   - **Evidence:** {e}")
         if f.get("fix"):
             lines.append(f"   - **Fix:** {f['fix']}")
+        lines += proposal_lines(f.get("proposal"), indent="   ")
         lines.append("")
     lines += still_open_lines(triage)
     if triage.get("checked"):
@@ -88,6 +89,31 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
     lines += agreement_lines(triage)
     lines.append(footer(triage, comparison))
     return "\n".join(lines)
+
+
+def snapshot_ref(sid: str) -> str:
+    """A snapshot id as the markdown writes one, in the footer and under a proposal."""
+    return f"`{sid}`"
+
+
+NEVER_APPLIED = "Second Look never applies changes; this is a suggestion with its undo, for a person to run."
+
+
+def proposal_lines(p: dict | None, indent: str = "") -> list[str]:
+    """The change proposal under a finding: the statement in a code fence, its undo, who runs it and when, and the
+    snapshots whose numbers justify it. Empty for a finding without one, so older reviews render as they did."""
+    if not p or not p.get("statement"):
+        return []
+    runner = " · ".join(x for x in (p.get("runner"), p.get("window")) if x)
+    lines = [f"{indent}- **Change proposal:**", f"{indent}  ```", *(f"{indent}  {ln}" for ln in str(p["statement"]).splitlines()), f"{indent}  ```"]
+    if p.get("rollback"):
+        lines.append(f"{indent}  - **Undo:** {p['rollback']}")
+    if runner:
+        lines.append(f"{indent}  - **Run by:** {runner}")
+    if ids := p.get("justified_by"):
+        lines.append(f"{indent}  - **Justified by:** " + ", ".join(snapshot_ref(str(s)) for s in ids))
+    lines.append(f"{indent}  - _{NEVER_APPLIED}_")
+    return lines
 
 
 def band_line(comparison: dict | None) -> str:
@@ -138,7 +164,7 @@ def footer(triage: dict, comparison: dict | None) -> str:
     n = len((comparison or {}).get("findings", []))
     if n and triage.get("source") == "agent":
         bits.append(f"{n} heuristic finding{'s' if n != 1 else ''}")
-    ref = f"snapshot `{triage['snapshot']}`" + (f" vs `{triage['baseline']}`" if triage.get("baseline") else "")
+    ref = f"snapshot {snapshot_ref(triage['snapshot'])}" + (f" vs {snapshot_ref(triage['baseline'])}" if triage.get("baseline") else "")
     if triage.get("baseline_reason"):
         ref += f" ({triage['baseline_reason']})"
     return "_" + " · ".join(bits) + " · " + ref + "_"

@@ -192,11 +192,27 @@ def _comment_text(f: dict, l: dict, triage: dict, markdown: str) -> str:
     return f"{head}\nopen since {since} · snapshot {triage.get('snapshot', '')}\n\n{markdown}"
 
 
+def _proposal_text(f: dict, triage: dict) -> str:
+    """A comment carrying only the change proposal, for a ticket that was opened before the finding had one."""
+    from dbtriage.report import proposal_lines
+
+    return (f"change proposal: {f.get('where', '')}: {f.get('summary', '')}\nsnapshot {triage.get('snapshot', '')}\n\n"
+            + "\n".join(proposal_lines(f.get("proposal"))))
+
+
+def _told(l: dict, name: str, f: dict) -> None:
+    """Mark the finding's ticket on this channel as having seen its proposal (the issue body or the comment carried it),
+    so the proposal is posted once and not on every later run. Copied, not mutated: the dict came from the ledger."""
+    if f.get("proposal") and (l.get("tickets") or {}).get(name):
+        l["tickets"][name] = dict(l["tickets"][name], proposal_sent=True)
+
+
 def _ticket_run(name: str, cfg: dict, triage: dict, markdown: str, min_sev: int) -> bool:
     """One run against a ticket channel for a review with finding life. New findings share one issue for the run
     (the review is one text); a finding that already has a ticket gets a comment on it; a gone finding's ticket
-    gets a "cleared" comment. Tickets made here are put on triage["life"] so the caller can record them in the
-    ledger. Returns whether anything was sent."""
+    gets a "cleared" comment. A change proposal rides in the issue or the comment, and a finding whose ticket has
+    not seen its proposal (the ticket is older than the proposal) gets it as a comment of its own, once. Tickets made
+    here are put on triage["life"] so the caller can record them in the ledger. Returns whether anything was sent."""
     findings, life = triage.get("findings") or [], triage.get("life") or []
     fires = _fires(triage, min_sev)
     # the review's findings and the open ones outside the five, as (finding, life) pairs sharing one ticket dict
@@ -208,11 +224,19 @@ def _ticket_run(name: str, cfg: dict, triage: dict, markdown: str, min_sev: int)
         ticket = CHANNELS[name](cfg, triage, markdown)
         sent = True
         if ticket:
-            for _, l in create:
+            for f, l in create:
                 l.setdefault("tickets", {})[name] = ticket
+                _told(l, name, f)
     for f, l in comment:
         COMMENTS[name](cfg, l["tickets"][name], _comment_text(f, l, triage, markdown))
+        _told(l, name, f)
         sent = True
+    for f, l in zip(findings, life):  # a proposal that appeared after the ticket: told once, whatever the finding's state
+        t = (l.get("tickets") or {}).get(name)
+        if t and f.get("proposal") and not t.get("proposal_sent"):
+            COMMENTS[name](cfg, t, _proposal_text(f, triage))
+            _told(l, name, f)
+            sent = True
     # one run's new findings share one issue, so a gone finding's issue may still track an open sibling
     open_on = {}
     for l in list(life) + list(triage.get("still_open") or []):

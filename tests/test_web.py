@@ -769,6 +769,26 @@ def test_agreement_marks_and_dropped_rules_findings(tmp_path):
     assert "q1 slowed down" in page and "class='mark" not in page and "class='dropped'" not in page and "Agreement:" not in page
 
 
+def test_finding_card_with_and_without_a_change_proposal(tmp_path):
+    st = store(tmp_path)
+    older = "postgres/demo/2026-11-05/20261105T090000Z"
+    p = {"statement": "CREATE INDEX CONCURRENTLY t_a_idx ON public.t (a) <b>;", "rollback": "DROP INDEX CONCURRENTLY t_a_idx;",
+         "runner": "DBA in a change window", "window": "tonight", "justified_by": [SID, older]}
+    findings = [{"severity": "high", "kind": "seq_scans", "subject": "public.t", "where": "table public.t", "summary": "Full scans", "impact": "i", "evidence": ["e"], "fix": "add an index", "proposal": p},
+                {"severity": "low", "kind": "sql_regressed", "subject": "q1", "where": "sql_id q1", "summary": "Slower", "impact": "i", "evidence": [], "fix": "look at q1"}]
+    st.put_json(f"{SID}/triage.json", {"severity": "high", "title": "Full scans", "source": "rules", "confidence": "low", "findings": findings})
+    page = App(config(tmp_path), st, False, None).snapshot(SID).decode()
+    card = page.split("<ol class='flist'>")[1].split("</ol>")[0]
+    first, second = card.split("<li><div class='fh'>")[1:]
+    assert "<dt>Fix</dt><dd>add an index</dd><dt>Change proposal</dt><dd class='proposal'>" in first and "Change proposal" not in second
+    assert "<pre id='proposal-1' class='stmt'>CREATE INDEX CONCURRENTLY t_a_idx ON public.t (a) &lt;b&gt;;</pre>" in first  # escaped, never trusted
+    assert "<button type='button' class='copy' data-copy='proposal-1' aria-label='Copy the statement'>Copy</button>" in first
+    assert "<dt>Undo</dt><dd>DROP INDEX CONCURRENTLY t_a_idx;</dd>" in first and "<dt>Run by</dt><dd>DBA in a change window · tonight</dd>" in first
+    assert f"<a class='mono' href='/s/{SID}' title='{SID}'>20261105T100000Z</a>" in first and f"href='/s/{older}'" in first
+    assert "Second Look never applies changes" in first and "style=" not in card and "Apply" not in card  # no apply button, ever
+    assert "button[data-copy]" in page and second.endswith("<dt>Fix</dt><dd>look at q1</dd></dl></li>")  # the copy script; the plain card as it was
+
+
 # --------------------------------------------------------------------------- every knob on the Settings pages
 def test_delivery_card_has_gone_after_runs_and_a_gate_per_channel(tmp_path):
     from dbtriage.settings import CHANNEL_FIELDS

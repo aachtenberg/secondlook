@@ -37,6 +37,12 @@ tool schema (other when none fits) and a subject: the one thing it names, exactl
 SQL finding the sql_id verbatim, otherwise the table name, wait class, parameter name or session id, and empty when
 there is none. These two fields are how a finding is matched to the rules and to earlier reviews; where is the
 display text. If nothing is wrong, say so and list what you checked.
+When the fix is a concrete change, a statement someone would run (CREATE INDEX, a statistics gather, a parameter
+change, a rewrite), put it in the finding's proposal: the exact statement, how to undo it (a change without a
+rollback is refused), who would run it as a role (DBA in a change window, the application team), when, and in
+justified_by the snapshot ids whose numbers justify it, the current snapshot and the baseline at least; the before
+and after Second Look measured belong in the evidence. Keep fix as the one-sentence advice. Leave proposal out when
+the fix is to look at something or to confirm it with the owner. Nothing is ever applied by Second Look.
 Finish by calling submit_review exactly once.
 
 Call get_operator_answers once before you submit. A person may have run a read the model proposed in an earlier
@@ -44,6 +50,16 @@ discussion of this database (an EXPLAIN, a wait or lock slice, a stats query) an
 stored with this snapshot or the previous one. Use such a result as evidence when it bears on a finding, and cite it
 as supplied by a person, never as something Second Look measured: nothing ran it here, it cannot be verified, and
 it may come from a different moment than the snapshot."""
+
+
+class Proposal(BaseModel):
+    """The fix as a change proposal: the statement a person could copy, with its undo and its justification."""
+    statement: str = Field(description="The exact change to run: CREATE INDEX ..., a statistics gather, a parameter change or a rewritten statement")
+    rollback: str = Field(description="How to undo it. Required: a statement that changes the database is refused without one")
+    runner: str = Field(description="Who would run it, as a role: 'DBA in a change window', 'the application team'")
+    window: str = Field(description="When: a change window, off-peak, after the owner confirms the change")
+    justified_by: list[str] = Field(description="The snapshot ids whose numbers justify the change: the current snapshot and the baseline at least")
+
 
 class Finding(BaseModel):
     severity: str = Field(description="high, medium or low")
@@ -55,6 +71,7 @@ class Finding(BaseModel):
     impact: str = Field(description="What fails or degrades, and when, in one sentence")
     evidence: list[str] = Field(description="Specific supporting facts with numbers, each one sentence")
     fix: str = Field(description="What to do, one or two sentences; include rollback if it changes the database")
+    proposal: Proposal | None = Field(default=None, description="The fix as a concrete change when there is one; leave out when the fix is to investigate")
 
 
 SECTIONS = ("load_profile", "top_sql", "wait_events", "ash", "sessions", "tables", "settings", "findings", "notes", "awr", "all")
@@ -66,6 +83,7 @@ class TriageAgent:
         self.backend = backend
         self.result: dict | None = None
         self.tool_log: list[dict] = []  # every tool call of the current run, in order; stored as tools.json
+        self.snapshot_id: str | None = None  # the run's current snapshot, set by run(): a proposal must cite it
         self.band_weeks = band.DEFAULT_WEEKS  # the target's band_weeks, set by run(); 0 leaves the usual band out of compare_snapshots
         # by target name, for the front ends that use the tools without run() (mcp_server, chat): they pass the
         # config lookup, so a target's 0 or 12 holds there too; otherwise it is band_weeks as run() set it
@@ -226,13 +244,15 @@ class TriageAgent:
             bad = [f.kind for f in findings if not known_kind(f.kind)]
             if bad:
                 return f"kind must be one of {', '.join(KINDS)} (got {bad})"
+            if bad := proposal_problem(findings, agent.snapshot_id):
+                return bad
             rank = {"high": 0, "medium": 1, "low": 2}
             fs = sorted(findings[:5], key=lambda f: rank[f.severity])
             agent.result = {
                 "severity": fs[0].severity if fs else "info",
                 "title": fs[0].summary if fs else "no significant change",
                 "summary": summary, "checked": checked, "confidence": confidence,
-                "findings": [f.model_dump() for f in fs],
+                "findings": [f.model_dump(exclude_none=True) for f in fs],  # a finding without a proposal keeps its old shape
             }
             return "recorded"
 
@@ -277,6 +297,7 @@ class TriageAgent:
             max_iterations: int = 25, notes: str | None = None, band_weeks: int = band.DEFAULT_WEEKS) -> dict:
         self.result = None
         self.band_weeks = band_weeks
+        self.snapshot_id = snapshot_id
         manifest = self.storage.get_json(f"{snapshot_id}/manifest.json")
         task = (
             f"Review database target {target!r} (engine {engine}), run mode {mode!r}.\n"
@@ -317,6 +338,24 @@ class TriageAgent:
                     tool_calls=out.tool_calls, tools_file="tools.json", stop_reason=out.stop_reason, duration_s=round(time.monotonic() - t0, 1))
 
 
+def proposal_problem(findings: list[Finding], snapshot_id: str | None) -> str | None:
+    """Why a review's proposals cannot be recorded, as a sentence the model can act on; None when they can. A change
+    without an undo is refused rather than stored, and a proposal must cite the snapshot it was made from, since the
+    before and after it rests on are that snapshot's numbers (not checked when the agent has no run, as in chat)."""
+    for i, f in enumerate(findings, 1):
+        p = f.proposal
+        if p is None:
+            continue
+        if not p.statement.strip():
+            return f"finding {i}: the proposal has no statement; give the exact change, or leave proposal out when the fix is to investigate"
+        if not p.rollback.strip():
+            return (f"finding {i}: the proposal changes the database but has no rollback; say how to undo {p.statement.strip()[:60]!r}, "
+                    "or leave proposal out")
+        if snapshot_id and snapshot_id not in p.justified_by:
+            return f"finding {i}: justified_by must include the current snapshot {snapshot_id} (and the baseline when there is one)"
+    return None
+
+
 def _inline_refs(schema: dict) -> dict:
     """Replace {"$ref": "#/$defs/X"} with the definition itself, recursively, and drop $defs."""
     defs = schema.get("$defs", {})
@@ -333,22 +372,30 @@ def _inline_refs(schema: dict) -> dict:
     return walk(schema)
 
 
-def rule_based_triage(comparison: dict) -> dict:
+def rule_based_triage(comparison: dict, engine: str | None = None) -> dict:
     """No-LLM fallback (and the thing to diff the agent against): the ranked heuristic findings
-    in the same review shape the agent produces."""
+    in the same review shape the agent produces. `engine` picks the dialect of the change proposals; it is read off
+    the current snapshot id (engine/target/day/time) when the caller does not pass it."""
     found = comparison.get("findings", [])
     if not found:
         return {"severity": "info", "title": "no significant change", "summary": "No heuristic findings in this window.",
                 "checked": "load profile, top SQL, wait classes, sessions, tables against the previous snapshot",
                 "confidence": "medium", "findings": [], "source": "rules"}
     window_start = (comparison.get("current") or {}).get("start")
-    findings = [{
-        "severity": f["severity"] if f["severity"] in ("high", "medium", "low") else "low",
-        "kind": f["kind"], "subject": subject_of(f), "where": _where(f), "summary": f["title"][:120],
-        "impact": _impact(f["kind"]),
-        "evidence": ([f["detail"]] if f.get("detail") else []) + _evidence_lines(f.get("evidence") or {}, window_start=window_start),
-        "fix": _advice(f),
-    } for f in found[:5]]
+    cur_id, ref_id = (comparison.get("current") or {}).get("snapshot"), (comparison.get("reference") or {}).get("snapshot")
+    engine = engine or (cur_id.split("/")[0] if cur_id else "")
+    findings = []
+    for f in found[:5]:
+        d = {
+            "severity": f["severity"] if f["severity"] in ("high", "medium", "low") else "low",
+            "kind": f["kind"], "subject": subject_of(f), "where": _where(f), "summary": f["title"][:120],
+            "impact": _impact(f["kind"]),
+            "evidence": ([f["detail"]] if f.get("detail") else []) + _evidence_lines(f.get("evidence") or {}, window_start=window_start),
+            "fix": _advice(f),
+        }
+        if p := _proposal(f, engine, [s for s in (cur_id, ref_id) if s]):
+            d["proposal"] = p
+        findings.append(d)
     summary = f"{len(found)} heuristic finding(s); the top one is {findings[0]['summary'][0].lower() + findings[0]['summary'][1:]}."
     usual = comparison.get("band") or {}
     if usual.get("above") and usual.get("sentence"):  # the whole hour is heavier than usual: that belongs in the first line
@@ -439,3 +486,93 @@ def _advice(f: dict) -> str:
         "throughput_drop": "Confirm with application metrics whether load dropped or requests are queueing.",
         "setting_changed": "Verify the change was intended and recorded; if a regression in this window followed it, the rollback is to set the parameter back to its previous value.",
     }.get(k, f"Investigate: {f['title']}")
+
+
+# The rules' change proposals: one form per engine, named the way the collectors name the engine. Only the kinds whose
+# statement follows from the evidence alone get one; a regression says what to look at, not what to run.
+GATHER_STATS = {
+    "oracle": ("EXEC DBMS_STATS.GATHER_TABLE_STATS(ownname => '{owner}', tabname => '{name}', cascade => TRUE);",
+               "EXEC DBMS_STATS.RESTORE_TABLE_STATS(ownname => '{owner}', tabname => '{name}', as_of_timestamp => <a timestamp before the gather>); "
+               "Oracle keeps the previous statistics for the DBMS_STATS history retention (31 days by default)."),
+    "postgres": ("ANALYZE {table};",
+                 "PostgreSQL keeps no statistics history, so there is no restore; ANALYZE only refreshes estimates. If a plan regresses on the new "
+                 "ones, hold the previous plan (pg_hint_plan) or raise the column's statistics target and ANALYZE again."),
+    "mysql": ("ANALYZE TABLE {table};",
+              "MySQL keeps no statistics history; ANALYZE TABLE only refreshes InnoDB's estimates, and running it again after the data settles "
+              "is the undo. A plan that regresses can be held with an optimizer hint or FORCE INDEX."),
+    "sqlserver": ("UPDATE STATISTICS {table} WITH FULLSCAN;",
+                  "SQL Server keeps no statistics history; a plan that regresses after the update is forced back with Query Store "
+                  "(sp_query_store_force_plan on the previous plan id)."),
+}
+RECLAIM = {
+    "oracle": ("ALTER TABLE {table} SHRINK SPACE CASCADE;",
+               "Nothing to undo: the shrink only releases space, the rows are unchanged. It needs ENABLE ROW MOVEMENT on the table first, "
+               "and cancelling it leaves the segment as it was."),
+    "postgres": ("VACUUM (ANALYZE, VERBOSE) {table};",
+                 "Nothing to undo: VACUUM removes only rows that are already dead and refreshes estimates. If it costs too much I/O, cancel it "
+                 "(SELECT pg_cancel_backend(pid)) and it stops where it is; then raise the table's autovacuum settings instead."),
+    "mysql": ("OPTIMIZE TABLE {table};",
+              "Nothing to undo: OPTIMIZE TABLE rebuilds the table with the same rows. It needs time and space for the copy; cancelling it "
+              "keeps the original."),
+    "sqlserver": ("ALTER INDEX ALL ON {table} REORGANIZE;",
+                  "Nothing to undo: a reorganize compacts pages in place and can be stopped at any point without losing work."),
+}
+CREATE_INDEX = {
+    "oracle": ("CREATE INDEX {idx} ON {table} ({columns}) ONLINE;", "DROP INDEX {idx};"),
+    "postgres": ("CREATE INDEX CONCURRENTLY {idx} ON {table} ({columns});", "DROP INDEX CONCURRENTLY {idx};"),
+    "mysql": ("ALTER TABLE {table} ADD INDEX {idx} ({columns}), ALGORITHM=INPLACE, LOCK=NONE;", "ALTER TABLE {table} DROP INDEX {idx};"),
+    "sqlserver": ("CREATE INDEX {idx} ON {table} ({columns}) WITH (ONLINE = ON);", "DROP INDEX {idx} ON {table};"),
+}
+SET_PARAMETER = {  # one form: filled with the previous value it is the change, with the current value it is the undo
+    "oracle": "ALTER SYSTEM SET {parameter} = {value} SCOPE=BOTH;",
+    "postgres": "ALTER SYSTEM SET {parameter} = {value}; SELECT pg_reload_conf();",
+    "mysql": "SET PERSIST {parameter} = {value};",
+    "sqlserver": "EXEC sp_configure '{parameter}', {value}; RECONFIGURE;",
+}
+COLUMNS_PLACEHOLDER = "<columns from the scanning statement's predicate>"
+
+
+def _dialect(forms: dict, engine: str):
+    return forms.get(engine) or forms["postgres"]  # the lab's engines; anything else reads the most widely known form
+
+
+def _literal(v) -> str:
+    """A parameter value as SQL writes it: numbers bare, everything else quoted."""
+    s = str(v)
+    try:
+        float(s)
+        return s
+    except ValueError:
+        return "'" + s.replace("'", "''") + "'"
+
+
+def _proposal(f: dict, engine: str, justified_by: list[str]) -> dict | None:
+    """The rules' change proposal for a finding, or None when the rules do not know the statement."""
+    e, k = f.get("evidence") or {}, f["kind"]
+    table = e.get("table")
+    if k == "stale_stats" and table:
+        owner, _, name = table.rpartition(".")  # Oracle names tables OWNER.TABLE; DBMS_STATS wants them apart
+        stmt, undo = _dialect(GATHER_STATS, engine)
+        fill = {"table": table, "owner": owner or "<owner>", "name": name}
+        return {"statement": stmt.format(**fill), "rollback": undo.format(**fill), "runner": "DBA",
+                "window": "the next quiet period: the gather runs online, but the new estimates can change plans at once",
+                "justified_by": justified_by}
+    if k == "bloat" and table:
+        stmt, undo = _dialect(RECLAIM, engine)
+        return {"statement": stmt.format(table=table), "rollback": undo, "runner": "DBA",
+                "window": "off-peak: it runs online, but it adds I/O while it works", "justified_by": justified_by}
+    if k == "seq_scans" and table:
+        cols = e.get("columns")
+        cols = [cols] if isinstance(cols, str) else list(cols or [])  # the rules see scan counts, not predicates: a placeholder then
+        idx = f"{table.rpartition('.')[2]}_{'_'.join(cols) if cols else '<columns>'}_idx"
+        stmt, undo = _dialect(CREATE_INDEX, engine)
+        fill = {"table": table, "idx": idx, "columns": ", ".join(cols) if cols else COLUMNS_PLACEHOLDER}
+        return {"statement": stmt.format(**fill), "rollback": undo.format(**fill), "runner": "DBA in a change window",
+                "window": "a change window: the build reads the whole table once, online", "justified_by": justified_by}
+    if k == "setting_changed" and e.get("parameter") and "before" in e and "after" in e:
+        form = _dialect(SET_PARAMETER, engine)
+        return {"statement": form.format(parameter=e["parameter"], value=_literal(e["before"])),
+                "rollback": form.format(parameter=e["parameter"], value=_literal(e["after"])), "runner": "DBA",
+                "window": "as soon as the change's owner confirms it was not intended; a parameter that needs a restart waits for one",
+                "justified_by": justified_by}
+    return None

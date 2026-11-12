@@ -349,3 +349,102 @@ def test_operator_answers_tool_reads_this_and_the_previous_snapshot(tmp_path):
     assert a["supplied_by"] == chat.SUPPLIED_BY and a["thread"] == "review" and a["proposal"] == 1
     assert [a["snapshot"] for a in json.loads(tools["get_operator_answers"].call({"snapshot_id": ids[-2]}))["answers"]] == [ids[-2]]  # ids[0] has none
     assert "get_operator_answers" in SYSTEM and "supplied by a person, never as something Second Look measured" in SYSTEM
+
+
+# ---------------------------------------------------------------- the fix as a change proposal
+def test_a_proposal_needs_a_rollback_and_must_cite_the_current_snapshot(tmp_path):
+    st = _store(tmp_path)
+    agent = TriageAgent(st, backend=None)
+    ids = st.list_snapshots("postgres", "demo")
+    agent.snapshot_id = ids[-1]  # what run() sets
+    tools = {t.name: t for t in agent._tools("postgres", "demo")}
+    base = {"severity": "high", "kind": "seq_scans", "subject": "public.t", "where": "table public.t", "summary": "s", "impact": "i", "evidence": ["e"], "fix": "f"}
+    prop = {"statement": "CREATE INDEX CONCURRENTLY t_a_idx ON public.t (a);", "rollback": "", "runner": "DBA in a change window",
+            "window": "tonight", "justified_by": [ids[-1], ids[-2]]}
+
+    def submit(f):
+        return tools["submit_review"].call({"findings": [f], "summary": "s", "checked": "c", "confidence": "high"})
+
+    out = submit(dict(base, proposal=prop))
+    assert out.startswith("finding 1: the proposal changes the database but has no rollback") and "CREATE INDEX" in out and agent.result is None
+    out = submit(dict(base, proposal=dict(prop, rollback="DROP INDEX CONCURRENTLY t_a_idx;", justified_by=[ids[-2]])))
+    assert f"justified_by must include the current snapshot {ids[-1]}" in out and agent.result is None
+    assert "has no statement" in submit(dict(base, proposal=dict(prop, statement="  ", rollback="x")))
+    ok = dict(prop, rollback="DROP INDEX CONCURRENTLY t_a_idx;")
+    assert submit(dict(base, proposal=ok)) == "recorded" and agent.result["findings"][0]["proposal"] == ok
+    assert submit(base) == "recorded" and "proposal" not in agent.result["findings"][0]  # no proposal: the shape as it was
+    agent.snapshot_id = None  # no run (chat, MCP): the current id is unknown, so only the rollback is required
+    assert submit(dict(base, proposal=dict(ok, justified_by=["other"]))) == "recorded"
+    spec = next(s for s in agent.tool_specs("postgres", "demo") if s.name == "submit_review")
+    schema = json.dumps(spec.input_schema)
+    assert "$ref" not in schema and '"proposal"' in schema and '"justified_by"' in schema  # inlined for every backend
+
+
+def test_rules_proposals_per_kind_and_engine():
+    from dbtriage.agent import COLUMNS_PLACEHOLDER
+
+    def comp(engine, *findings, reference=True):
+        cur, ref = f"{engine}/t/2026-11-05/20261105T100000Z", f"{engine}/t/2026-11-05/20261105T090000Z"
+        return {"severity": "low", "current": {"snapshot": cur}, "reference": {"snapshot": ref} if reference else None,
+                "findings": [dict(f, severity="low", detail="") for f in findings]}
+
+    def rule(kind, **ev):
+        return {"kind": kind, "title": f"{kind} x", "evidence": ev}
+
+    stale, bloat = rule("stale_stats", table="APP.ORDERS"), rule("bloat", table="public.t", dead_rows=5, live_rows=10)
+    scans, setting = rule("seq_scans", table="public.t", seq_scan=5), rule("setting_changed", parameter="work_mem", before="4MB", after="64MB")
+    pg = rule_based_triage(comp("postgres", stale, bloat, scans, setting, rule("sql_regressed", sql_id="q1")))["findings"]
+    ps = [f.get("proposal") for f in pg]
+    assert ps[0]["statement"] == "ANALYZE APP.ORDERS;" and "no statistics history" in ps[0]["rollback"]
+    assert ps[1]["statement"] == "VACUUM (ANALYZE, VERBOSE) public.t;" and ps[1]["rollback"].startswith("Nothing to undo")
+    assert ps[2]["statement"] == f"CREATE INDEX CONCURRENTLY t_<columns>_idx ON public.t ({COLUMNS_PLACEHOLDER});"
+    assert ps[2]["rollback"] == "DROP INDEX CONCURRENTLY t_<columns>_idx;" and ps[2]["runner"] == "DBA in a change window"
+    assert ps[3]["statement"] == "ALTER SYSTEM SET work_mem = '4MB'; SELECT pg_reload_conf();"
+    assert ps[3]["rollback"] == "ALTER SYSTEM SET work_mem = '64MB'; SELECT pg_reload_conf();"
+    assert ps[4] is None and "proposal" not in pg[4]  # a regression says what to look at, not what to run
+    assert all(p["justified_by"] == ["postgres/t/2026-11-05/20261105T100000Z", "postgres/t/2026-11-05/20261105T090000Z"] for p in ps[:4])
+    assert all(p["runner"] and p["window"] for p in ps[:4])
+    named = rule_based_triage(comp("postgres", rule("seq_scans", table="public.t", columns=["a", "b"])))["findings"][0]["proposal"]
+    assert named["statement"] == "CREATE INDEX CONCURRENTLY t_a_b_idx ON public.t (a, b);"  # columns in the evidence name the index
+    # a first snapshot cites one id; the "N more settings changed" finding has no before and after: no proposal
+    only = rule_based_triage(comp("postgres", setting, rule("setting_changed", parameters=["a", "b"]), reference=False))["findings"]
+    assert only[0]["proposal"]["justified_by"] == ["postgres/t/2026-11-05/20261105T100000Z"] and "proposal" not in only[1]
+    ora = rule_based_triage(comp("oracle", stale, bloat, scans, setting))["findings"]
+    assert [f["proposal"]["statement"] for f in ora] == [
+        "EXEC DBMS_STATS.GATHER_TABLE_STATS(ownname => 'APP', tabname => 'ORDERS', cascade => TRUE);",
+        "ALTER TABLE public.t SHRINK SPACE CASCADE;",
+        f"CREATE INDEX t_<columns>_idx ON public.t ({COLUMNS_PLACEHOLDER}) ONLINE;",
+        "ALTER SYSTEM SET work_mem = '4MB' SCOPE=BOTH;"]
+    assert "RESTORE_TABLE_STATS(ownname => 'APP', tabname => 'ORDERS'" in ora[0]["proposal"]["rollback"] and ora[2]["proposal"]["rollback"] == "DROP INDEX t_<columns>_idx;"
+    my = rule_based_triage(comp("mysql", stale, bloat, scans, setting))["findings"]
+    assert [f["proposal"]["statement"] for f in my] == [
+        "ANALYZE TABLE APP.ORDERS;", "OPTIMIZE TABLE public.t;",
+        f"ALTER TABLE public.t ADD INDEX t_<columns>_idx ({COLUMNS_PLACEHOLDER}), ALGORITHM=INPLACE, LOCK=NONE;", "SET PERSIST work_mem = '4MB';"]
+    assert my[2]["proposal"]["rollback"] == "ALTER TABLE public.t DROP INDEX t_<columns>_idx;"
+    ms = rule_based_triage(comp("sqlserver", stale, bloat, scans, rule("setting_changed", parameter="max degree of parallelism", before=0, after=4)))["findings"]
+    assert [f["proposal"]["statement"] for f in ms] == [
+        "UPDATE STATISTICS APP.ORDERS WITH FULLSCAN;", "ALTER INDEX ALL ON public.t REORGANIZE;",
+        f"CREATE INDEX t_<columns>_idx ON public.t ({COLUMNS_PLACEHOLDER}) WITH (ONLINE = ON);",
+        "EXEC sp_configure 'max degree of parallelism', 0; RECONFIGURE;"]
+    assert ms[2]["proposal"]["rollback"] == "DROP INDEX t_<columns>_idx ON public.t;" and ms[3]["proposal"]["rollback"].endswith("', 4; RECONFIGURE;")
+    # the engine argument wins over the id's first segment; an engine without its own form reads the PostgreSQL one
+    assert rule_based_triage(comp("postgres", stale), engine="oracle")["findings"][0]["proposal"]["statement"].startswith("EXEC DBMS_STATS")
+    assert rule_based_triage(comp("mariadb", stale))["findings"][0]["proposal"]["statement"] == "ANALYZE APP.ORDERS;"
+
+
+def test_render_markdown_change_proposal():
+    from dbtriage.report import proposal_lines, render_markdown
+
+    p = {"statement": "CREATE INDEX CONCURRENTLY t_a_idx ON public.t (a);\n-- then ANALYZE", "rollback": "DROP INDEX CONCURRENTLY t_a_idx;",
+         "runner": "DBA in a change window", "window": "tonight 02:00", "justified_by": ["s2", "s1"]}
+    t = {"target": "demo", "engine": "postgres", "severity": "high", "source": "rules", "confidence": "low", "snapshot": "s2", "baseline": "s1",
+         "findings": [{"severity": "high", "where": "table public.t", "summary": "Full scans", "impact": "slow", "evidence": ["seq_scan 500 vs 20"], "fix": "add an index", "proposal": p},
+                      {"severity": "low", "where": "sql_id q1", "summary": "Slower", "impact": "", "evidence": [], "fix": "look"}]}
+    md = render_markdown(t, None)
+    block = md.split("   - **Fix:** add an index\n")[1].split("\n\n")[0]
+    assert block.splitlines()[:5] == ["   - **Change proposal:**", "     ```", "     CREATE INDEX CONCURRENTLY t_a_idx ON public.t (a);", "     -- then ANALYZE", "     ```"]
+    assert "     - **Undo:** DROP INDEX CONCURRENTLY t_a_idx;" in block and "     - **Run by:** DBA in a change window · tonight 02:00" in block
+    assert "     - **Justified by:** `s2`, `s1`" in block and "_Second Look never applies changes" in block
+    assert md.count("Change proposal") == 1 and "   - **Fix:** look\n\n" in md  # the finding without one renders as before
+    assert proposal_lines(None) == [] and proposal_lines({"statement": ""}) == []
+    assert proposal_lines({"statement": "ANALYZE t;", "rollback": "none needed"})[:4] == ["- **Change proposal:**", "  ```", "  ANALYZE t;", "  ```"]
