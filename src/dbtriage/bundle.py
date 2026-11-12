@@ -51,17 +51,22 @@ LIFE_LABEL = {"new": "new", "still_open": "still open", "worse": "worse", "quiet
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)  # the zip epoch: the bundle's date is in its README, not in its members
 ZIP_SYSTEM = 3  # "Unix" in every member header whatever the exporting host, so Windows and Linux exports match
 
-# A key is secret-named when its last segment is one of these words: `password`, `db_password` and `feed.api_token`
-# are dropped, while `token_env`, `secret_name` or `password_file` name where a secret lives and are kept.
-_SECRET_KEY = re.compile(r"(?:.*[._-])?(?:dsn|passw(?:or)?d|pwd|secret|token|api_?key|access_key|secret_key|credentials?|"
-                         r"authorization|private_key)", re.I)
+# A key is secret-named when its last segment is one of these words: `password`, `db_password`, `feed.api_token` and
+# `x-api-key` are dropped, while `token_env`, `secret_name` or `password_file` name where a secret lives and are kept.
+_SECRET_KEY = re.compile(r"(?:.*[._-])?(?:dsn|passw(?:or)?d|pwd|secret|token|api[_-]?key|access[_-]?key(?:[_-]id)?|secret[_-]?key|"
+                         r"credentials?|authorization|private_key)", re.I)
 # credential-shaped values, each replaced by *** wherever it appears in a text member
 _USERINFO = re.compile(r"(?P<scheme>[a-z][a-z0-9+.-]*://)[^/\s@\"'<>]+@", re.I)  # scheme://user:pass@host
-_KEYWORD = re.compile(r"(?P<key>\b(?:passw(?:or)?d|pwd|secret|token|api_?key|access_key|secret_key)\b\"?\s*[=:]\s*)"
-                      r"(?P<q>\"?)(?P<value>[^\s;&,\"'<>}\]]+)(?P=q)", re.I)  # password=x, "token": "x"
+# password=x, "token": "x", 'x-api-key': 'x'. The key may carry `_`- or `-`-joined segments before the secret word
+# (db_password, x-api-key) but nothing after it, so token_env and input_tokens are not keys. A quoted value runs to
+# the closing quote of its own kind, escapes included, so "two words" is masked whole; a bare value is a run that
+# stops at whitespace and at the delimiters a DSN, URL query or JSON string puts after it, so the member stays valid.
+_KEYWORD = re.compile(r"(?P<key>\b(?:[a-z0-9]+[_-])*(?:passw(?:or)?d|pwd|secret|token|api[_-]?key|access[_-]?key(?:[_-]id)?|secret[_-]?key)"
+                      r"\b[\"']?\s*[=:]\s*)(?:\"(?P<dq>(?:[^\"\\]|\\.)+)\"|'(?P<sq>(?:[^'\\]|\\.)+)'|(?P<bare>[^\s;&,\"'<>}\]]+))", re.I)
 _BEARER = re.compile(r"(?P<key>\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}")
 _AWS_KEY = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _SK_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")
+_GH_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")  # GitHub personal, app and fine-grained tokens
 
 
 @dataclass
@@ -69,6 +74,8 @@ class Record:
     """What members() read and build() changed, so the README states exactly what the bundle holds."""
     files: dict[str, bytes]
     listing_failed: bool = False  # the store refused to list: files only the listing names may be missing
+    degraded: str | None = None  # the store was partly reachable (a spool stood in for it): the listing may be partial
+    unchecked: list[str] = field(default_factory=list)  # known names nothing evidenced, unreadable while the store was degraded
     hidden: list[str] = field(default_factory=list)  # stored, but the caller's allowed() said no
     dropped: list[str] = field(default_factory=list)  # secret-named manifest keys, by path
     masked: dict[str, int] = field(default_factory=dict)  # credential-shaped values replaced, per member
@@ -97,17 +104,22 @@ def mask(text: str) -> tuple[str, int]:
     """The text with every credential-shaped value replaced by ***, and how many were replaced."""
     n = 0
 
-    def sub(pattern: re.Pattern, repl: str, s: str) -> str:
+    def sub(pattern: re.Pattern, repl, s: str) -> str:
         nonlocal n
         s, k = pattern.subn(repl, s)
         n += k
         return s
 
+    def keyword(m: re.Match) -> str:  # keep the quotes the value had, so a JSON member stays JSON
+        q = '"' if m.group("dq") is not None else "'" if m.group("sq") is not None else ""
+        return f"{m.group('key')}{q}***{q}"
+
     text = sub(_USERINFO, r"\g<scheme>***@", text)
-    text = sub(_KEYWORD, r"\g<key>\g<q>***\g<q>", text)
+    text = sub(_KEYWORD, keyword, text)
     text = sub(_BEARER, r"\g<key>***", text)
     text = sub(_AWS_KEY, "***", text)
     text = sub(_SK_TOKEN, "***", text)
+    text = sub(_GH_TOKEN, "***", text)
     return text, n
 
 
@@ -128,7 +140,9 @@ def members(store: Storage, sid: str, include_raw: bool = False, allowed: Callab
     The listing is the source of truth; the known names and the manifest's files and reports are tried as well,
     so an engine report never goes missing from a store that cannot list. Each member is read with get(), never
     gated on exists(): a store whose exists() answers False during trouble must not quietly thin the record.
-    Raises FileNotFoundError for an unknown snapshot and lets StorageUnavailable through."""
+    Raises FileNotFoundError for an unknown snapshot. StorageUnavailable passes through for a file the listing or
+    the manifest names, since a record without it would be wrong; for a known name nothing names (a Postgres
+    snapshot has no awr.txt) it only means the name could not be checked, which the record says instead."""
     if not key_ok(sid):
         raise FileNotFoundError(sid)
     manifest = store.get_json(f"{sid}/manifest.json")  # FileNotFoundError when the snapshot is not there
@@ -140,6 +154,8 @@ def members(store: Storage, sid: str, include_raw: bool = False, allowed: Callab
         raise
     except Exception:  # noqa: BLE001 - a store that refuses to list (ListBucket denied, say) still yields the named files
         rec.listing_failed = True
+    # a resilient store lists its spool alone while the remote is down, and says so in `degraded` rather than raising
+    rec.degraded = getattr(store, "degraded", None) or None
     for name in sorted(evidenced | set(KNOWN)):
         if not name or name.startswith(".") or name in OWN or not key_ok(f"{sid}/{name}"):
             continue
@@ -153,6 +169,11 @@ def members(store: Storage, sid: str, include_raw: bool = False, allowed: Callab
             rec.files[name] = store.get(f"{sid}/{name}")
         except FileNotFoundError:
             continue
+        except StorageUnavailable as exc:
+            if name in evidenced:  # the record names it: exporting without it would be a wrong record, not a thinner one
+                raise
+            rec.unchecked.append(name)  # a probe only: the store is down and this name could not be checked
+            rec.degraded = rec.degraded or str(exc)
     return rec
 
 
@@ -322,6 +343,9 @@ def readme(sid: str, rec: Record, include_raw: bool) -> str:
     if rec.listing_failed:  # threads are found only by listing, so without one their absence means nothing
         L.append("The store could not be listed at export time, so discussion threads" + (" beyond those above" if threads else "")
                  + " and any other file not named in the manifest may be missing from this bundle.")
+    elif rec.degraded:
+        L.append(f"The store was degraded at export time ({rec.degraded}), so the listing may be partial: discussion threads"
+                 + (" beyond those above" if threads else "") + " and any other file not named in the manifest may be missing from this bundle.")
     elif not threads:
         L.append("No discussion threads were stored with this snapshot.")
     L.append("")
@@ -348,6 +372,11 @@ def readme(sid: str, rec: Record, include_raw: bool) -> str:
         L.append(f"- Hidden by the server's `[web] files` setting, so not exported from the web: {', '.join(f'`{n}`' for n in rec.hidden)}")
     if rec.listing_failed:
         L.append("- Whatever only a listing of the store would have named: the store could not be listed at export time")
+    elif rec.degraded:
+        L.append(f"- Whatever only a full listing of the store would have named: the store was degraded at export time ({rec.degraded})")
+    if rec.unchecked:
+        L.append(f"- Not checked: {', '.join(f'`{n}`' for n in sorted(rec.unchecked))}: neither the listing nor the manifest names them, "
+                 "and the store was degraded at export time, so whether they exist could not be read")
     if rec.dropped:
         L.append(f"- Secret-named keys withheld from manifest.json: {', '.join(sorted(rec.dropped))}")
     if rec.masked:

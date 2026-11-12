@@ -13,7 +13,7 @@ import pytest
 
 from dbtriage import bundle, cli
 from dbtriage.config import Config, Target
-from dbtriage.storage import LocalStorage, StorageUnavailable
+from dbtriage.storage import LocalStorage, ResilientStorage, StorageUnavailable
 
 SID = "postgres/demo/2026-11-05/20261105T100000Z"
 BASE = "postgres/demo/2026-11-05/20261105T090000Z"
@@ -151,9 +151,27 @@ def test_mask_shapes():
     out, n = bundle.mask(text)
     assert n == 5 and out == ('Bearer *** *** *** pwd=*** "token": "***" "token_env": "GITHUB_TOKEN" "token_budget": 200000 '
                               '"input_tokens": 12345 12,345 tokens')
+    # a quoted value runs to its closing quote, whatever it holds; a bare one ends at whitespace, as in a keyword DSN
+    assert bundle.mask('"password": "two words"') == ('"password": "***"', 1)
+    assert bundle.mask("'password': 'two words'") == ("'password': '***'", 1)
+    assert bundle.mask('"pwd": "a\\"b"') == ('"pwd": "***"', 1)  # an escaped quote does not end the value
+    assert bundle.mask("password=two words") == ("password=*** words", 1)
+    assert bundle.mask('{"text": "password=hunter2"}') == ('{"text": "password=***"}', 1)  # the member stays JSON
+    # hyphenated and prefixed keys are keys; a suffix after the secret word is not
+    for text in ("x-api-key: abc", '"api-token": "t"', "access-key-id=AKX", "db_password=h", '"aws_secret_access_key": "s"'):
+        out, n = bundle.mask(text)
+        assert n == 1 and out.endswith(("***", '***"')) and "abc" not in out and "AKX" not in out, text
+    assert bundle.mask('"token_env": "GITHUB_TOKEN", "input_tokens": 1')[1] == 0
+    # GitHub tokens on their own, as a chat message or a tool result would carry them
+    for tok in ("ghp_" + "a" * 36, "ghs_" + "b" * 36, "gho_" + "c" * 20, "github_pat_" + "d" * 22 + "_" + "e" * 59):
+        assert bundle.mask(f"use {tok} here") == ("use *** here", 1)
+    assert bundle.mask('"token": "ghp_' + "a" * 36 + '"') == ('"token": "***"', 1)  # one value, counted once
+    assert bundle.mask("ghs_l1nkt0ken")[1] == 0  # too short to be a token
     dropped: list[str] = []
-    kept = bundle.scrub({"token_env": "A", "secret_name": "B", "password_file": "C", "db_password": "D", "tools_file": "E", "x": {"Authorization": "F"}}, dropped)
-    assert kept == {"token_env": "A", "secret_name": "B", "password_file": "C", "tools_file": "E", "x": {}} and dropped == ["db_password", "x.Authorization"]
+    kept = bundle.scrub({"token_env": "A", "secret_name": "B", "password_file": "C", "db_password": "D", "tools_file": "E", "x": {"Authorization": "F"},
+                         "x-api-key": "G", "api-token": "H"}, dropped)
+    assert kept == {"token_env": "A", "secret_name": "B", "password_file": "C", "tools_file": "E", "x": {}}
+    assert dropped == ["db_password", "x.Authorization", "x-api-key", "api-token"]
 
 
 def test_raw_flag_and_determinism(tmp_path):
@@ -212,6 +230,54 @@ class Down(LocalStorage):
 
     def list_keys(self, prefix):
         return []  # ResilientStorage.list_keys during an outage
+
+
+class Offline(LocalStorage):
+    """A remote store that cannot be reached: every call is a connectivity failure (what ResilientStorage wraps)."""
+
+    def _refuse(self, *a):
+        raise StorageUnavailable("connection refused")
+
+    get = exists = list_keys = version_of = _refuse
+
+
+def spooled(tmp_path, *names: str, **manifest) -> ResilientStorage:
+    """A resilient store whose remote is down, with the fixture's honest manifest (its `files` and `reports` as given)
+    and the named fixture files in its spool only."""
+    st = store(tmp_path)
+    honest(st)
+    spool = LocalStorage(tmp_path / "spool")
+    spool.put_json(f"{SID}/manifest.json", dict(st.get_json(f"{SID}/manifest.json"), **manifest))
+    for name in names:
+        spool.put(f"{SID}/{name}", st.get(f"{SID}/{name}"))
+    return ResilientStorage(Offline(tmp_path / "primary"), spool)
+
+
+def test_degraded_store_exports_what_the_spool_holds(tmp_path):
+    st = spooled(tmp_path, "triage.json", "compare.json", files=[], reports=[])
+    files = unzip(bundle.build(st, SID))
+    assert sorted(files) == ["README.md", "checksums.txt", "compare.json", "manifest.json", "triage.json"]
+    md = files["README.md"].decode()
+    assert "q1 regressed after the 1.4.2 deploy" in md and "Rules findings in compare.json: 2" in md
+    assert ("The store was degraded at export time (connection refused), so the listing may be partial: discussion threads "
+            "and any other file not named in the manifest may be missing from this bundle.") in md
+    assert "- Whatever only a full listing of the store would have named: the store was degraded at export time (connection refused)" in md
+    assert ("- Not checked: `addm.txt`, `awr.txt`, `changes.json`, `summary.json`, `tools.json`, `triage.md`: neither the listing "
+            "nor the manifest names them, and the store was degraded at export time, so whether they exist could not be read") in md
+    assert "No discussion threads were stored" not in md and "could not be listed" not in md
+
+
+def test_degraded_store_still_raises_for_an_evidenced_file(tmp_path):
+    st = spooled(tmp_path, "triage.json", files=["summary.json"], reports=[])
+    LocalStorage(tmp_path / "primary").put_json(f"{SID}/summary.json", {"captured_at": "x"})  # stored, but unreachable
+    with pytest.raises(StorageUnavailable):
+        bundle.build(st, SID)
+
+
+def test_missing_optional_file_on_a_healthy_store_is_simply_absent(tmp_path):
+    st = store(tmp_path)
+    md = unzip(bundle.build(st, BASE))["README.md"].decode()  # a Postgres snapshot never stores awr.txt or addm.txt
+    assert "awr.txt" not in md and "addm.txt" not in md and "Not checked" not in md and "degraded" not in md
 
 
 def test_listing_failure_is_said_not_hidden(tmp_path):
