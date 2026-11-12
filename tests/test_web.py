@@ -1095,3 +1095,12 @@ def test_the_settings_page_lists_the_collectors_own_source_values():
     assert settings.ORACLE_SOURCES == oracle.SOURCES and settings.STATSPACK_LEVELS == oracle.STATSPACK_LEVELS
     sqlserver = pytest.importorskip("dbtriage.collectors.sqlserver")
     assert settings.TOP_SQL_SOURCES == sqlserver.TOP_SQL_SOURCES
+
+
+def test_a_statspack_level_of_zero_is_shown_and_kept(tmp_path):
+    """0 is a valid level (basic statistics only); the form must not read it as unset and rewrite it to 7."""
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["oracle"], "dsn": ["h/x"], "statspack_level": ["0"]})
+    assert app.save_target("demo", fields) == [] and app.cfg.targets["demo"].extra["statspack_level"] == 0
+    form = app.target_form("demo").decode()
+    assert "<option value='0' selected>0: basic statistics</option>" in form and "<option value='7' selected>" not in form

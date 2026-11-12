@@ -1646,7 +1646,8 @@ class App:
                          oracle_source_opts=self._choice_opts(ORACLE_SOURCES, v.get("oracle_source") or "auto",
                                                               {"auto": "Auto: AWR with the pack, else Statspack, else V$",
                                                                "awr": "AWR only", "statspack": "Statspack only", "vdollar": "V$ views only"}),
-                         statspack_level_opts=self._choice_opts([str(n) for n in STATSPACK_LEVELS], str(v.get("statspack_level") or 7),
+                         statspack_level_opts=self._choice_opts([str(n) for n in STATSPACK_LEVELS],  # 0 is a level, not a blank
+                                                                "7" if v.get("statspack_level") in (None, "") else str(v.get("statspack_level")),
                                                                 {"0": "0: basic statistics", "5": "5: and SQL", "6": "6: and SQL plans",
                                                                  "7": "7: and segment statistics", "10": "10: and parent and child latches"}),
                          mask_report_literals="" if v.get("mask_report_literals") is False else "checked",
@@ -1710,8 +1711,8 @@ class App:
                     "<b>Database writes are on</b> in targets.toml ([collect] allow_db_writes = true): databases set to take "
                     "snapshots on the database take one before collecting. The rest only read.")
         return ("No effect while targets.toml has dbtriage only read: set allow_db_writes = true under [collect] there." if short else
-                "dbtriage only reads your databases. To let it take snapshots on them (an AWR snapshot before each Oracle "
-                "collection), set <code>allow_db_writes = true</code> under <code>[collect]</code> in targets.toml, then pick "
+                "dbtriage only reads your databases. To let it take snapshots on them (an AWR or Statspack snapshot before "
+                "an Oracle collection), set <code>allow_db_writes = true</code> under <code>[collect]</code> in targets.toml, then pick "
                 "the databases on their edit pages. This page cannot turn it on.")
 
     def _mcp_note(self) -> str:
