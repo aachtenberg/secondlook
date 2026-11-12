@@ -50,7 +50,7 @@ Settings page's Delivery card for the same reason. Blank means 3.
 A team with Oracle, PostgreSQL and SQL Server has three consoles; Second Look writes one note. The digest reads
 every database's ledger of open findings and the deploys and statements stored with its snapshots, and says, across
 the fleet: which findings opened since the last digest (new, or worse on the latest run), which of them share a
-cause, and which databases had no significant change. It is a note, under a page, not a dashboard.
+cause, and which databases had no significant change. It is a note, under a page, not a dashboard. Both fields are on the Settings page's Delivery card as well, and the web view's scheduler sends the digest like the standalone one.
 
 Two links join findings across databases, and they are not equally strong. The same deploy, from the change
 feed, is the strong one and crosses engines: "After `billing@1.4.2`, findings opened on ora-prod and pg-prod" is

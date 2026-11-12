@@ -96,7 +96,7 @@ A scheduled fleet note, not a dashboard: across targets, which findings opened s
 Two links join findings across targets, and they are not equally strong:
 
 - **The same deploy**, from bet 3. This is the link that crosses engines. “After `billing@1.4.2`, findings opened on `ora-prod` and `pg-prod`” is a true sentence, because the deploy id is the same on both.
-- **The same statement**, within one engine. Replicas, shards and read copies run the same SQL, so a normalized text hash (whitespace and literals stripped, computed before redaction and stored next to `sql_id`) ties them. Do not promise this across engines: Oracle and PostgreSQL rarely run the same text, and bind styles differ.
+- **The same statement**, within one engine. Replicas, shards and read copies run the same SQL, so a normalized text hash (whitespace, literals and bind markers stripped, computed on the stored, redacted text and kept next to `sql_id`; redaction replaces literals consistently, so the hash is stable across runs) ties them. Do not promise this across engines: Oracle and PostgreSQL rarely run the same text, and bind styles differ.
 
 OEM, pganalyze, and Query Store cannot write either sentence.
 

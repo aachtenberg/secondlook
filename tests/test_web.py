@@ -921,3 +921,20 @@ def test_files_max_tokens_and_fallback_models_on_the_cards(tmp_path, monkeypatch
     monkeypatch.setattr(llm, "test_model", lambda cfg: (seen.update(cfg) or (True, "ok")))
     app.test_agent({"fallback_models": "a, b", "max_tokens": "100"})
     assert seen["fallback_models"] == ["a", "b"] and seen["max_tokens"] == "100"  # the line is a list by the time a backend sees it
+
+
+def test_fleet_digest_schedule_and_channels_save_from_the_delivery_card(tmp_path):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    base = app.seed.delivery
+    form = {"channels": ["stdout"], "min_severity": ["info"], "gone_after_runs": [""], "digest_schedule": ["weekly"], "digest_channels": ["stdout, slack"]}
+    assert app.settings.put_delivery(app.parse_delivery_form(form), base=base) == []
+    app.reload()
+    assert app.cfg.delivery["digest"] == {"schedule": "weekly", "channels": ["stdout", "slack"]}
+    page = app.settings_page().decode()
+    assert 'name="digest_schedule" value="weekly"' in page and 'value="stdout, slack"' in page and "$digest" not in page
+    assert app.settings.put_delivery({"digest": {"schedule": "fortnightly", "channels": "stdout"}}, base=base) == ["digest schedule: weekly, daily, or a cron expression"]
+    assert app.settings.put_delivery({"digest": {"schedule": "daily", "channels": "pager"}}, base=base) == ["digest channels: unknown channel(s): pager"]
+    assert app.settings.put_delivery({"digest": {"schedule": "", "channels": ""}}, base=base) == []
+    app.reload()
+    assert "digest" not in app.cfg.delivery  # blank = off, and nothing is stored when the file is silent too
+    assert app.scheduler is None or app.scheduler.digest is not None  # the web view's scheduler sends it when scheduling is on
