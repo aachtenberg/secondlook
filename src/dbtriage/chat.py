@@ -34,7 +34,7 @@ Numbers get their units. Say so when the data does not support an answer. Plain 
 MAX_TURNS = 20          # questions per thread; the drawer is for a discussion, not a log
 MAX_QUESTION = 2000     # characters
 REPLAY_TURNS = 8        # earlier question/answer pairs replayed to the model
-KEY_RE = re.compile(r"^(review|finding-\d{1,2}|sql-[A-Za-z0-9_]{1,80})$")  # sql-<id>: a thread about one statement
+KEY_RE = re.compile(r"^(review|target|finding-\d{1,2}|sql-[A-Za-z0-9_]{1,80})$")  # sql-<id>: one statement; target: the database as a whole
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -85,12 +85,14 @@ class Chat:
     def context(self, snapshot_id: str, finding: int | str | None) -> str:
         """What the model is told before the first question: the review and, if asked, the one finding or statement.
         `finding` is a 1-based finding number, a thread key ("review", "finding-2", "sql-<id>") or None."""
-        sql_id = None
+        sql_id, whole_target = None, False
         if isinstance(finding, str):
             if not KEY_RE.match(finding):
                 raise ValueError(f"bad thread key {finding!r}")
             if finding.startswith("sql-"):
                 sql_id, finding = finding[4:], None
+            elif finding == "target":
+                whole_target, finding = True, None
             else:
                 finding = int(finding.split("-", 1)[1]) if finding.startswith("finding-") else None
         m = self.store.get_json(f"{snapshot_id}/manifest.json")
@@ -115,7 +117,37 @@ class Chat:
             if row is None:
                 raise ValueError(f"sql id {sql_id!r} is not in this snapshot's top SQL")
             parts += ["", f"The question is about SQL id {sql_id} (use get_sql_history for its past):", json.dumps(row, indent=1, default=str)]
+        if whole_target:
+            parts += ["", "The question is about the database as a whole, not only this snapshot (the latest one)."] + self._target_facts(m, snapshot_id, tr)
         return "\n".join(parts)
+
+    def _target_facts(self, m: dict, snapshot_id: str, tr: dict) -> list[str]:
+        """What the page's diagnosis block knows: the ledger of open findings (with life and tickets), what cleared
+        lately, and the change feed. The schedule is not in the store, so it is left out here."""
+        from dbtriage import diagnosis, ledger
+
+        out = []
+        try:
+            led = ledger.load(self.store, m["engine"], m["target"]) if self.store.exists(ledger.key(m["engine"], m["target"])) else None
+        except Exception as exc:  # noqa: BLE001 - a store problem is a fact for the model, not a crash for the chat
+            led, out = None, [f"The ledger could not be read: {exc}"]
+        cmp_ = self.store.get_json(f"{snapshot_id}/compare.json") if self.store.exists(f"{snapshot_id}/compare.json") else None
+        feed = self.store.get_json(f"{snapshot_id}/changes.json") if self.store.exists(f"{snapshot_id}/changes.json") else None
+        rows = diagnosis.lines(triage=tr, comparison=cmp_, manifest=m, ledger=led, changes=feed if isinstance(feed, list) else None, schedule=None,
+                               target=m["target"], latest_sid=snapshot_id)
+        out.append("The page's diagnosis (written by rules from stored data):")
+        out += [f"- {r['label']}: {r['text']}" for r in rows]
+        if led:
+            open_ = [e for e in led.get("entries") or [] if e.get("state") != "gone"]
+            if open_:
+                out += ["", "Open findings in the ledger (kind, subject, severity, state, first seen, tickets):"]
+                out += [f"- {e.get('kind')} {e.get('subject') or ''}: {e.get('severity')}, {e.get('state')}, since {(e.get('first_seen_at') or '')[:16]}"
+                        + (", tickets " + ", ".join(t.get("key", "") for t in (e.get("tickets") or {}).values() if isinstance(t, dict)) if e.get("tickets") else "")
+                        + f" · {e.get('title') or ''}" for e in open_[:20]]
+            gone = (led.get("tombstones") or [])[-5:]
+            if gone:
+                out += ["", "Cleared lately: " + "; ".join(f"{t.get('kind')} {t.get('subject') or ''} ({(t.get('gone_at') or '')[:10]})" for t in gone)]
+        return out
 
     def _sql_row(self, snapshot_id: str, sql_id: str) -> dict | None:
         rows = []

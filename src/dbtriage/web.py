@@ -137,15 +137,25 @@ footer{color:var(--mut);font-size:12px;padding:16px 32px;border-top:1px solid va
 .tile{padding:14px 16px;border-radius:var(--r);border:1px solid var(--line);background:var(--card);display:flex;flex-direction:column;gap:6px}
 .tile .lbl{font-size:12px;color:var(--mut)}.tile .num{font-size:22px;font-weight:600;letter-spacing:-.02em;font-family:var(--mono);line-height:1.1;color:var(--fg-strong)}
 .tile .num .delta{font-size:12px;font-weight:500;margin-left:6px;color:var(--mut)}.tile .num.high{color:var(--high)}.tile .num.medium{color:var(--medium)}.tile .num.low{color:var(--low)}.tile .num.info{color:var(--info)}
-/* diagnosis: five sentences from stored data, above the tiles */
-.diag ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}.diag li{display:flex;gap:12px;align-items:baseline;font-size:14px;line-height:1.45}
-.diag .lbl{flex:0 0 72px;font-size:12px;color:var(--mut);font-weight:500;padding-top:1px}.diag li.high .lbl{color:var(--high)}.diag li.medium .lbl{color:var(--medium)}.diag li.low .lbl{color:var(--low)}.diag li.info .lbl{color:var(--info)}
-.diag .cardhead .mut{font-size:12px}
-@media(max-width:640px){.diag li{flex-direction:column;gap:2px}.diag .lbl{flex:none}}
-/* the floating Ask button, bottom right, on the pages that have something to ask about */
-.ask-fab{position:fixed;right:18px;bottom:18px;z-index:40;display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 16px;border-radius:999px;background:var(--ai);color:#fff;font-weight:600;font-size:13px;box-shadow:0 6px 18px rgba(0,0,0,.18);text-decoration:none}
-.ask-fab:hover{filter:brightness(1.1);color:#fff}.ask-fab.off{background:var(--card);color:var(--mut);border:1px solid var(--line2);font-weight:500}.ask-fab svg{width:14px;height:14px}
-@media print{.ask-fab{display:none}}
+/* diagnosis: five cells from stored data, above the tiles */
+.diag{padding:0;overflow:hidden}.diag .cardhead{padding:12px 16px;border-bottom:1px solid var(--line)}.diag .cardhead .left{gap:10px}.diag .cardhead .right{gap:10px}
+.diag .gaps{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--medium)}.diag .gaps .dot{width:6px;height:6px}
+.diag .ask{height:28px;padding:0 10px;border-radius:6px;border:1px solid var(--line2);background:transparent;color:var(--ai);font-size:12px;font-weight:500;display:inline-flex;align-items:center;gap:6px}.diag .ask:hover{background:var(--ai-bg)}
+.dgrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr))}.dcell{padding:14px 16px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:6px;min-width:0}.dcell:last-child{border-right:0}
+.dcell .lbl{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}.dcell .lbl .dot{width:6px;height:6px;background:var(--mut)}
+.dcell .head{font-size:14px;font-weight:500;color:var(--fg-strong);overflow-wrap:anywhere}.dcell .sub{font-size:12px;color:var(--mut);overflow-wrap:anywhere}.dcell .sub a{font-weight:500}
+.dcell.info .lbl .dot{background:var(--info)}.dcell.low .lbl .dot{background:var(--low)}.dcell.medium .lbl .dot{background:var(--medium)}.dcell.high .lbl .dot{background:var(--high)}
+.dcell.gap{background:color-mix(in srgb,var(--medium) 14%,transparent)}.dcell.gap .lbl,.dcell.gap .lbl .dot{color:var(--medium);background:var(--medium)}.dcell.gap .lbl{background:none}.dcell.gap .sub{color:var(--fg2)}
+.dcell .head .sv.high{color:var(--high)}.dcell .head .sv.medium{color:var(--medium)}.dcell .head .sv.low{color:var(--low)}.dcell .head .sv.info{color:var(--info)}
+@media(max-width:1100px){.dgrid{grid-template-columns:repeat(3,minmax(0,1fr))}.dcell:nth-child(3){border-right:0}.dcell:nth-child(n+4){border-top:1px solid var(--line)}}
+@media(max-width:640px){.dgrid{grid-template-columns:1fr}.dcell{border-right:0}.dcell+.dcell{border-top:1px solid var(--line)}}
+/* the Ask dock: the discussion panel as a bottom-right window on a database's page, with a round button to open it */
+.discuss.dock{position:fixed;right:24px;bottom:24px;z-index:40;width:380px;max-width:calc(100vw - 48px);max-height:min(640px,calc(100vh - 48px));border-radius:14px;box-shadow:0 20px 48px rgba(0,0,0,.35)}
+.discuss.dock .dlog{max-height:360px}.discuss.dock .dhead .sub{display:block;font-size:11px;color:var(--mut);font-weight:400;line-height:1.2}.discuss.dock .dhead h2{font-size:13px;line-height:1.2}
+.discuss.dock .dhead a.x{width:28px;height:28px;border-radius:6px;color:var(--mut);display:inline-flex;align-items:center;justify-content:center}.discuss.dock .dhead a.x:hover{background:var(--card2);color:var(--fg);text-decoration:none}
+.ask-fab{position:fixed;right:24px;bottom:24px;z-index:40;width:48px;height:48px;padding:0;border-radius:50%;border:1px solid transparent;background:var(--ai);color:#fff;display:inline-flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(0,0,0,.3)}
+.ask-fab:hover{background:var(--ai);color:#fff;filter:brightness(1.1)}.ask-fab svg{width:20px;height:20px}.ask-fab.off{background:var(--card);color:var(--mut);border-color:var(--line2)}
+@media print{.ask-fab,.discuss.dock{display:none}}
 /* cards and tables */
 .card{border-radius:12px;border:1px solid var(--line);background:var(--card);padding:16px 20px;min-width:0;overflow-wrap:anywhere}.card table{overflow-wrap:normal}.card.flush{padding:0;overflow:hidden}
 .cardhead{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.card.flush .cardhead{padding:14px 16px;border-bottom:1px solid var(--line)}
@@ -308,6 +318,8 @@ def md_to_html(md: str, item_suffix: Callable[[int], str] | None = None) -> str:
 
 
 ICON = {  # inline stroke icons, 14px, currentColor
+    "external": "<svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M14 4h6v6M20 4l-8 8M10 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5'/></svg>",
+    "spark": "<svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9z'/><path d='M19 15l.7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7z'/></svg>",
     "plus": "<svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' aria-hidden='true'><path d='M12 5v14M5 12h14'/></svg>",
     "db": "<svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' aria-hidden='true'><ellipse cx='12' cy='6' rx='7' ry='3'/><path d='M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3'/></svg>",
     "chat": "<svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M21 12a8 8 0 0 1-11.6 7.1L4 21l1.9-5.4A8 8 0 1 1 21 12z'/></svg>",
@@ -433,11 +445,27 @@ def _show(v) -> str:
     return "unset" if v is None else str(v)
 
 
-def diagnosis_html(rows: list[dict]) -> str:
-    """The diagnosis card: a label and one sentence per line, coloured by severity through the label only."""
-    items = "".join(f"<li class='{html.escape(r.get('cls') or '')}'><span class='lbl'>{html.escape(r['label'])}</span><span>{html.escape(r['text'])}</span></li>" for r in rows)
-    return (f"<section class='card diag' aria-labelledby='diag-h'><div class='cardhead'><h2 id='diag-h'>Diagnosis</h2>"
-            f"<span class='mut'>from stored data, no model</span></div><ul>{items}</ul></section>")
+def diagnosis_html(rows: list[dict], ask_button: str = "") -> str:
+    """The diagnosis card: a header with the setup-gap count, the "stored data, no model" pill and the Ask button, then
+    one cell per line in a five-column grid (three, then one, as the page narrows). A gap cell is tinted and links to
+    where the fix is made; a severity word inside a headline is coloured."""
+    cells = []
+    for r in rows:
+        head = html.escape(r["head"])
+        if r.get("head_sev") and r["head_sev"] in head:
+            head = head.replace(r["head_sev"], f"<span class='sv {r['head_sev']}'>{r['head_sev']}</span>", 1)
+        sub = html.escape(r.get("sub") or "")
+        if r.get("link"):
+            text, href = r["link"]
+            link = f"<a href='{html.escape(href)}'>{html.escape(text)}</a>"
+            sub = f"{sub} {link}".strip() if sub else link
+        cls = " ".join(c for c in (r.get("cls") or "", "gap" if r.get("gap") else "") if c)
+        cells.append(f"<div class='dcell {cls}'><span class='lbl'><i class='dot'></i>{html.escape(r['label'])}</span><span class='head'>{head}</span>"
+                     + (f"<span class='sub'>{sub}</span>" if sub else "") + "</div>")
+    n = diagnosis.gaps(rows)
+    gaps = f"<span class='gaps'><i class='dot'></i>{n} setup gap{'s' if n != 1 else ''}</span>" if n else ""
+    return (f"<section class='card diag' aria-labelledby='diag-h'><div class='cardhead'><div class='left'><h2 id='diag-h'>Diagnosis</h2>{gaps}</div>"
+            f"<div class='right'><span class='pill2'>stored data, no model</span>{ask_button}</div></div><div class='dgrid'>{''.join(cells)}</div></section>")
 
 
 def _fmt_ts(iso: str | None) -> str:
@@ -885,10 +913,10 @@ class App:
                         for k, l in (("all", "All"), ("incidents", "Incidents"), ("scheduled", "Scheduled")))
         actions = f"<a class='btn' href='/t/{html.escape(name)}/compare'>Compare</a>" + self.capture_button()
         diag_rows = self.diagnosis_rows(name, t.engine, latest["id"] if latest else None, sched)
+        dock, ask_btn = self.ask_dock(name, latest["id"] if latest else None, diag_rows, total, pts, used)
         return self.page("target.html", name, refresh=True, active=name, target=html.escape(name), engine=t.engine, links="".join(links), pager=pager,
                          rows="\n".join(trs), strip=strip, status=status_of(latest["severity"] if latest else None), tiles=tiles_html, chips=chips,
-                         actions=actions, run_dialog=self.run_dialog(name), diagnosis=diagnosis_html(diag_rows),
-                         ask=self.ask_fab(latest["id"] if latest else None, diagnosis.question(name, diag_rows)))
+                         actions=actions, run_dialog=self.run_dialog(name), diagnosis=diagnosis_html(diag_rows, ask_btn), ask=dock)
 
     def diagnosis_rows(self, name: str, engine: str, latest_sid: str | None, sched: dict | None) -> list[dict]:
         """The five diagnosis lines for a database from stored data only (dbtriage.diagnosis). Every read is optional:
@@ -911,22 +939,37 @@ class App:
         except StorageUnavailable as exc:
             led_err = str(exc)[:120]
         return diagnosis.lines(triage=tr, comparison=cmp_, manifest=m, ledger=led, changes=feed if isinstance(feed, list) else None,
-                               schedule=sched, ledger_error=led_err)
+                               schedule=sched, ledger_error=led_err, target=name, latest_sid=latest_sid)
 
-    def ask_fab(self, latest_sid: str | None, q: str, here: bool = False) -> str:
-        """The floating "Ask AI" button. On a snapshot page (`here`) it opens that page's discussion; on a database page
-        it goes to the latest snapshot's discussion with the diagnosis as the first question. Nothing when chat is off;
-        a quiet link to the settings when no model provider is configured."""
-        if not self.allows("chat") or not latest_sid:
-            return ""
+    def ask_dock(self, name: str, latest_sid: str | None, rows: list[dict], total: int, pts: list[dict], metric: str) -> tuple[str, str]:
+        """(dock, header button). The dock is the discussion panel as a bottom-right window on the database's page,
+        on a `target` thread of the latest snapshot: its first message is the rules' synopsis, then three starter
+        questions drawn from the facts; the model answers only when asked. A round button opens it. Nothing when
+        chat is off or there is no review yet; a quiet button to the settings when no provider is configured."""
+        if not self.allows("chat") or not latest_sid or not self.store.exists(f"{latest_sid}/triage.json"):
+            return "", ""
         ok, why = llm.configured(self.cfg.agent)
+        T = html.escape(name)
         if not ok:
-            return (f"<a class='ask-fab off' href='/settings#agent' title='{html.escape(why)}'>{ICON['chat']}<span>Ask AI: configure a model</span></a>")
-        if here:
-            return f"<a class='ask-fab' href='#chat-review' data-chat='review'>{ICON['chat']}<span>Ask AI</span></a>"
-        from urllib.parse import quote
-
-        return f"<a class='ask-fab' href='/s/{html.escape(latest_sid)}?ask={quote(q)}#chat-review'>{ICON['chat']}<span>Ask AI about this database</span></a>"
+            fab = f"<a class='ask-fab off' href='/settings#agent' title='Ask AI: {html.escape(why)}' aria-label='Ask AI: configure a model provider'>{ICON['spark']}</a>"
+            return fab, f"<a class='ask' href='/settings#agent' title='{html.escape(why)}'>{ICON['spark']}Ask AI: configure a model</a>"
+        sugg = "".join(f"<button type='button' data-ask='{html.escape(q)}' data-key='target'>{html.escape(q)}</button>" for q in diagnosis.suggestions(rows, pts, metric))
+        intro = (f"<div class='dmsg assistant'><span class='avatar' title='from the rules, not the model'>R</span><div class='dtext'><p>{html.escape(diagnosis.synopsis(name, rows))}</p>"
+                 "<p class='dim'>Answers come from the stored snapshots and the ledger, never the live database.</p></div></div>"
+                 + (f"<div class='sugg'><span class='lbl'>Suggested</span>{sugg}</div>" if sugg else ""))
+        dock = (f"<aside id='discuss' class='discuss dock' aria-label='Ask AI about {T}' data-base='/api/snapshots/{html.escape(latest_sid)}/chat/' data-key='target' data-dock='1' data-ready='1' hidden>"
+                f"<div class='dhead'><div class='left'><span class='aicon' aria-hidden='true'>{ICON['spark']}</span><div><h2>Ask about {T}</h2>"
+                f"<span class='sub'>{total} snapshot{'s' if total != 1 else ''} · diagnosis · open findings</span></div></div><div class='row'>"
+                f"<a class='x' href='/s/{html.escape(latest_sid)}#chat-target' aria-label='Open the full discussion' title='Open the full discussion'>{ICON['external']}</a>"
+                f"<button type='button' class='x' id='discuss-close' aria-label='Close'>{ICON['x']}</button></div></div>"
+                "<div class='dctx'><span>Context</span><span class='pill2 mono focus' id='discuss-focus'>this database</span></div>"
+                f"<div class='dlog' id='chat-log'></div><template id='discuss-intro'>{intro}</template>"
+                f"<form class='dfoot' id='chat-form'><label><span class='sr'>Your question</span>"
+                "<textarea id='chat-q' rows='2' maxlength='2000' placeholder='Ask about this database…' required></textarea></label>"
+                f"<div class='drow'><span class='mut'>Enter to send · Shift+Enter for newline</span><button type='submit' id='chat-send' class='ai'>Send{ICON['arrow']}</button></div></form></aside>"
+                f"<button type='button' class='ask-fab' id='discuss-open' aria-label='Ask AI about {T}' title='Ask AI'>{ICON['spark']}</button>")
+        btn = f"<button type='button' class='ask' data-chat='target'>{ICON['spark']}Ask AI about this target</button>"
+        return dock, btn
 
     def snapshot(self, sid: str) -> bytes:
         d = self.snapshot_detail(sid)
@@ -1067,9 +1110,8 @@ class App:
                        f"<div class='drow'><span class='mut'>Enter to send · Shift+Enter for newline</span><button type='submit' id='chat-send' class='ai'{'' if ok else ' disabled'}>Send{ICON['arrow']}</button></div></form></aside>")
             discuss_btn = f"<button type='button' class='ai' id='discuss-open'>{ICON['chat']}Discuss with AI</button>"
         actions = f"<a class='btn' href='/t/{T}/compare?a={html.escape(sid)}'>Change reference</a>" + discuss_btn
-        fab = self.ask_fab(sid, "", here=True) if tr else ""
         return self.page("snapshot.html", sid, active=target, sid=sid, target=T, captured=captured, time=captured[11:19],
-                         mode=html.escape(m["window"]["mode"]) + vs + _db_snapshot_note(m.get("db_snapshot")), review=review, top_sql=top, charts=chart_html, actions=actions, discuss=discuss + fab,
+                         mode=html.escape(m["window"]["mode"]) + vs + _db_snapshot_note(m.get("db_snapshot")), review=review, top_sql=top, charts=chart_html, actions=actions, discuss=discuss,
                          sevpill=sev(tr.get("severity")) if tr else "", engine=html.escape(m.get("engine", "")))
 
     def error_page(self, code: int, msg: str) -> bytes:

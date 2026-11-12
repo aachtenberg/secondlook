@@ -128,14 +128,16 @@ $body
 
   // ---- discuss panel (snapshot page only)
   var box = document.getElementById('discuss'), DKEY = 'dbtriage.discuss';
-  var log, form, q, send, focus, intro, key = 'review', ready;
+  var log, form, q, send, focus, intro, key = 'review', ready, dock = false;
   if (box) {
+    key = box.getAttribute('data-key') || 'review'; dock = box.getAttribute('data-dock') === '1';
     log = document.getElementById('chat-log'); form = document.getElementById('chat-form'); q = document.getElementById('chat-q');
     send = document.getElementById('chat-send'); focus = document.getElementById('discuss-focus'); intro = document.getElementById('discuss-intro');
     ready = box.getAttribute('data-ready') === '1';
   }
   function keyLabel(k) {
     if (k === 'review') return 'whole review';
+    if (k === 'target') return 'this database';
     if (k.indexOf('finding-') === 0) return 'finding ' + k.slice(8);
     var id = k.slice(4); return 'sql ' + (id.length > 16 ? id.slice(0, 8) + '…' + id.slice(-4) : id);
   }
@@ -186,15 +188,15 @@ $body
       if (k !== key) openKey(k, put); else put();
     });
     var closed = null; try { closed = localStorage.getItem(DKEY) === 'closed'; } catch (e) {}
-    var deep = /^#chat-(review|finding-\d+|sql-[A-Za-z0-9_]+)$/.exec(location.hash);
+    var deep = /^#chat-(review|target|finding-\d+|sql-[A-Za-z0-9_]+)$/.exec(location.hash);
     var askq = null; try { askq = new URLSearchParams(location.search).get('ask'); } catch (e) {}
-    if (askq) { openKey('review', function () { q.value = askq; q.focus(); }); }  // the database page's Ask button: the diagnosis as the first question
-    else if (deep) openKey(deep[1]); else if (closed) box.hidden = true; else openKey('review', function () {});
+    if (askq) { openKey(key, function () { q.value = askq; q.focus(); }); }
+    else if (deep) openKey(deep[1]); else if (dock || closed) box.hidden = true; else openKey(key, function () {});  // the dock waits for a click
   }
   document.addEventListener('click', function (e) {
     var a = e.target.closest('a[data-panel]');
     if (a) { e.preventDefault(); open(a.getAttribute('href'), a.textContent); return; }
-    var c = e.target.closest('a[data-chat]');
+    var c = e.target.closest('a[data-chat],button[data-chat]');
     if (c && box) { e.preventDefault(); openKey(c.getAttribute('data-chat')); }
   });
 })();

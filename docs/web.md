@@ -32,20 +32,25 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
 Saving on the Settings page happens in place: the page stays where it is and the result appears as a toast in the
 corner. Changing the look reloads the page once, at the same spot, so the new colours apply.
 
-## The diagnosis block and the Ask button
+## The diagnosis card and the Ask dock
 
-A database's page opens with five sentences written by rules from stored data, with no model call: the latest
-review's severity and age (and whether the interval sat inside the usual band for that hour), the open findings
-with the worst, the oldest and their tickets, the last deploy or setting change and whether a finding opened after
-it, what opened and cleared in the last seven days and whether the model left rules findings out, and the next
-scheduled run or why the last one did not finish. It is instant, the same for everyone, and still there with the
-model off. Operators who copied `target.html` into `templates_dir` add `$diagnosis` and `$ask` to their copy to see it.
+A database's page opens with a **Diagnosis** card: five cells written by rules from stored data, with no model call.
+Health (the latest review's title and age, and whether the interval sat inside the usual band for that hour), Open
+(how many findings, the worst, the oldest, their tickets), Changes (the last deploy or setting change and whether a
+finding opened after it), Last 7 days (opened, cleared, net, and rules findings the model left out), Next (the next
+scheduled run, paused, or why the last one did not finish). A cell that is a *setup gap*, no change feed or no
+schedule, is tinted, counted in the header ("2 setup gaps") and links to where the fix is made. It is instant, the
+same for everyone, and still there with the model off. Operators who copied `target.html` into `templates_dir` add
+`$diagnosis` and `$ask` to their copy to see it.
 
-The floating **Ask AI** button, bottom right, is the model's part and is optional. On a database's page it opens the
-latest snapshot's discussion with those five sentences as the first question, so the prose starts from the facts the
-page shows; on a snapshot page it opens that page's discussion. The answer is stored with the snapshot like any
-discussion, and its footer shows the tokens it cost. The button appears only where there is something to ask about,
-only when the web view runs with `--allow-chat`, and points at the settings page when no model provider is configured.
+**Ask AI** is the model's optional part. A round button bottom right (and "Ask AI about this target" in the card's
+header) opens a dock: the discussion panel as a small window on the database's page, on a thread about the database
+as a whole rather than one snapshot. Its first message is the rules' synopsis of the five cells, then three starter
+questions drawn from the facts (the open finding, a spike in the trend, the missing schedule). The model sees the
+latest review, the ledger of open findings with their life and tickets, what cleared lately, and the change feed.
+Answers are stored with the latest snapshot like any discussion, footer showing their token cost; "Open the full
+discussion" takes the thread to the snapshot page. The dock appears only with `--allow-chat` and a review to talk
+about, and the button points at the settings page when no model provider is configured.
 
 ## Rules and model on the same review
 
