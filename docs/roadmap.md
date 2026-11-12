@@ -33,6 +33,7 @@ The bets below lean on these facts, so they are stated once.
 - Jira and Plane delivery keeps the created issue's key, id and url on the finding's ledger entry, comments on it for worse and cleared findings, and the `min_severity` gate is per finding (new or worse) when the review carries `life`; legacy reviews keep the whole-run gate. *(Done: bet 2.)*
 - Storage is per-snapshot prefixes on local disk, S3, Azure or Postgres, with an outage spool. The one cross-snapshot object is the per-target ledger `<engine>/<target>/findings.json`, written through the same interface and rebuildable with `dbtriage rebuild-ledger`. *(Done: bet 2.)*
 - The model run stores provider, model, token usage, a tool-call count, and `tools.json`: every tool call with its arguments and a truncated result, written even when the run fails. *(Done: the prerequisite for bet 8.)*
+- `dbtriage bundle` and the snapshot page's Download bundle link export one snapshot as a deterministic zip: a README for the reader, every stored file byte for byte (raw.json on request), the discussion threads and a checksums.txt. *(Done: bet 8.)*
 - There is no SQL text hash. `sql_id` is engine-specific and SQL text is redacted before storage.
 
 ## The groundwork: a finding with a kind and a subject
@@ -124,7 +125,7 @@ Two constraints from the data:
 - Cumulative engines (PostgreSQL, MySQL, MariaDB) need two consecutive snapshots to form an interval, so each week contributes a window only when both exist. Interval engines (Oracle AWR, SQL Server) contribute one snapshot per week.
 - A counter reset or restart inside a window (`counters_since`, AWR startup) voids that week. The band states how many weeks it is built from, and it is not written at all below three.
 
-### 8. The record you can hand someone
+### 8. The record you can hand someone *(landed)*
 
 Every run already keeps `manifest.json`, `compare.json`, `triage.json`, and discussions. Package one snapshot as a bundle a postmortem or an auditor can take: what triggered it, what was compared, which model and how many tokens, the redacted SQL, the findings with their agreement marks and life, and the decision (accepted, muted, ticketed). No live database in the bundle.
 
