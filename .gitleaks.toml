@@ -5,5 +5,8 @@ useDefault = true
 
 [allowlist]
 description = "lab defaults and documentation placeholders"
-stopwords = ["dbtriage", "CHANGE_ME", "PASSWORD", "example", "placeholder", "fake", "dummy",
-             "AKIAABCDEFGHIJKLMNOP"]  # the bundle test's made-up AWS key id (tests/test_bundle.py); the scan covers every branch's history
+stopwords = ["dbtriage", "CHANGE_ME", "PASSWORD", "example", "placeholder", "fake", "dummy"]
+# The bundle's masking test (tests/test_bundle.py) holds credential-shaped fakes on purpose, and the CI scan walks every
+# fetched branch's full history, so a shape that once sat in that file keeps tripping every PR. The file is allowlisted
+# by path rather than by value, so no key-shaped literal lives in this config.
+paths = ["tests/test_bundle\\.py"]
