@@ -63,6 +63,8 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
     lines = [f"{HEADER_ICON.get(sev, '')} **DB review · {triage['target']}** ({triage['engine']}, {triage.get('mode', 'adhoc')})", ""]
     if triage.get("summary"):
         lines += [triage["summary"], ""]
+    if usual := band_line(comparison):
+        lines += [usual, ""]
     if triage.get("agent_error"):
         from dbtriage.egress import plain_provider_error
 
@@ -86,6 +88,16 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
     lines += agreement_lines(triage)
     lines.append(footer(triage, comparison))
     return "\n".join(lines)
+
+
+def band_line(comparison: dict | None) -> str:
+    """The usual band's sentence for the whole interval, under the summary: "total SQL time 12 ms/s is inside the
+    usual Monday 02:00 band (6 weeks): median 10 ms/s, high 14 ms/s". Nothing when there is no band, or it did not
+    apply to this window."""
+    usual = (comparison or {}).get("band") or {}
+    if not usual.get("sentence"):
+        return ""
+    return f"_Usual band: {usual['sentence']}_"
 
 
 def agreement_lines(triage: dict) -> list[str]:

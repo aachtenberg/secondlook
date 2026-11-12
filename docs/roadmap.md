@@ -33,6 +33,7 @@ The bets below lean on these facts, so they are stated once.
 - Jira and Plane delivery keeps the created issue's key, id and url on the finding's ledger entry, comments on it for worse and cleared findings, and the `min_severity` gate is per finding (new or worse) when the review carries `life`; legacy reviews keep the whole-run gate. *(Done: bet 2.)*
 - Storage is per-snapshot prefixes on local disk, S3, Azure or Postgres, with an outage spool. The one cross-snapshot object is the per-target ledger `<engine>/<target>/findings.json`, written through the same interface and rebuildable with `dbtriage rebuild-ledger`. *(Done: bet 2.)*
 - The model run stores provider, model, token usage, a tool-call count, and `tools.json`: every tool call with its arguments and a truncated result, written even when the run fails. *(Done: the prerequisite for bet 8.)*
+- `band.py` builds the usual band for a snapshot's clock hour and weekday from the stored summaries of the past `band_weeks` weeks (median and high per load-profile metric, total SQL time and wait-class share; a week with a reset or restart inside its window is skipped and named; nothing below three weeks). `compare.py` writes it as `band` in `compare.json` and as one sentence in the evidence of the findings about those metrics; the chosen baseline stays the narrative comparison. *(Done: bet 7.)*
 - Every `top_sql` and `sessions` row carries `text_hash` next to `sql_id`: a short hash of the statement with literals, bind markers, comments and spacing taken out (`sqlnorm.py`). Redaction replaces literals consistently, so the hash of the stored text equals the hash of what the application sent, and it is the same on every replica of one engine. It is a same-engine join only. *(Done: bet 4.)*
 - The fleet digest (`fleet.py`, `dbtriage digest`, `[delivery] digest` in the scheduler) reads every ledger and the stored feeds and summaries, and writes the two cross-target sentences. Its last send is `fleet/digest.json`. *(Done: bet 4.)*
 - `dbtriage bundle` and the snapshot page's Download bundle link export one snapshot as a deterministic zip: a README for the reader, every stored file byte for byte (raw.json on request), the discussion threads and a checksums.txt. *(Done: bet 8.)*
@@ -116,7 +117,7 @@ Findings already require a fix and, when the fix changes the database, a rollbac
 
 Still no apply button. The difference from EverSQL is that the proposal cites a before and after Second Look measured, and it stays a suggestion.
 
-### 7. The usual band
+### 7. The usual band *(landed)*
 
 Baselines today are one snapshot: previous, same time yesterday, same time last week, or a pin. A Monday batch still looks like an incident when last Monday’s run is missing or was itself odd.
 
@@ -124,7 +125,7 @@ For each target, compare the current interval with the spread of the same clock 
 
 Two constraints from the data:
 
-- Cumulative engines (PostgreSQL, MySQL, MariaDB) need two consecutive snapshots to form an interval, so each week contributes a window only when both exist. Interval engines (Oracle AWR, SQL Server) contribute one snapshot per week.
+- Cumulative engines (PostgreSQL, MySQL, MariaDB, SQL Server) need two consecutive snapshots to form an interval, so each week contributes a window only when both exist. The one interval engine (Oracle AWR) contributes one snapshot per week.
 - A counter reset or restart inside a window (`counters_since`, AWR startup) voids that week. The band states how many weeks it is built from, and it is not written at all below three.
 
 ### 8. The record you can hand someone *(landed)*
@@ -137,7 +138,7 @@ Datadog exports charts. The model chat exports a transcript. The bundle is the r
 
 ## What to build first
 
-Status on 2026-11-11: the groundwork, bets 1, 2, 3 and 4 and the tool transcript have landed. The fleet note joins findings across targets by the deploy id and, within one engine, by the text hash.
+Status on 2026-11-11: the groundwork, bets 1, 2, 3 and 7 and the tool transcript have landed. Next is bet 4, the fleet note, which now has the deploy id to join findings across targets.
 
 The groundwork (kind and subject on the model's finding, one matcher), then bets 1 and 2, then the settings diff from bet 3, then deploy feeds.
 

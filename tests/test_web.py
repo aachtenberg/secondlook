@@ -923,6 +923,26 @@ def test_files_max_tokens_and_fallback_models_on_the_cards(tmp_path, monkeypatch
     assert seen["fallback_models"] == ["a", "b"] and seen["max_tokens"] == "100"  # the line is a list by the time a backend sees it
 
 
+def test_band_weeks_is_on_the_target_form_and_the_compare_page_uses_it(tmp_path, monkeypatch):
+    app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
+    name, fields = app.parse_target_form({"name": ["demo"], "engine": ["postgres"], "dsn": ["postgresql://x"], "band_weeks": ["8"]})
+    assert app.save_target("demo", fields) == []
+    assert app.cfg.targets["demo"].extra["band_weeks"] == 8
+    form = app.target_form("demo").decode()
+    assert 'name="band_weeks" type="number" min="0" max="52" value="8"' in form and "$band_weeks" not in form
+    assert app.save_target("demo", dict(fields, band_weeks="99")) != []  # out of range is refused
+    seen = {}
+    import dbtriage.cli as cli
+
+    def fake_compare_ids(store, engine, target, a, b, how=None, band_weeks=6):
+        seen["band_weeks"] = band_weeks
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(cli, "compare_ids", fake_compare_ids)  # the page imports it from cli at call time
+    app.compare_page("demo", "x", "y")
+    assert seen["band_weeks"] == 8  # the compare page honours the target's setting, like the CLI
+
+
 def test_fleet_digest_schedule_and_channels_save_from_the_delivery_card(tmp_path):
     app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
     base = app.seed.delivery

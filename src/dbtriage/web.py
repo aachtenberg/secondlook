@@ -1087,7 +1087,9 @@ class App:
             notice = self._notice("pick two different snapshots", "bad")
         else:
             try:
-                c = compare_ids(self.store, t.engine, name, a, b)
+                from dbtriage.band import weeks_of
+
+                c = compare_ids(self.store, t.engine, name, a, b, band_weeks=weeks_of(t.extra.get("band_weeks")))  # the target's own setting, as the CLI uses
             except (FileNotFoundError, KeyError, ValueError) as exc:
                 c, notice = None, self._notice(f"cannot compare: {type(exc).__name__}: {exc}", "bad")
             if c is None:
@@ -1269,7 +1271,10 @@ class App:
         except Exception as exc:  # noqa: BLE001 - any other store error is an answer, never a dropped request
             return 502, {"error": f"could not read the snapshot: {type(exc).__name__}: {str(exc)[:200]}"}
         try:
-            answer = chat.Chat(self.store, lambda: llm.make_backend(self.cfg.agent)).ask(sid, finding, question)
+            from dbtriage.band import weeks_for
+
+            answer = chat.Chat(self.store, lambda: llm.make_backend(self.cfg.agent),
+                               band_weeks_for=lambda name: weeks_for(self.cfg, name)).ask(sid, finding, question)
         except ValueError as exc:
             return 400, {"error": str(exc)}
         except StorageUnavailable as exc:  # the store went away during the discussion: the same 503 as before it
@@ -1439,6 +1444,7 @@ class App:
                          feed_releases="checked" if feed.get("releases") else "", feed_test=f"<button{ro} class=quiet name=action value=feed>Test feed</button>",
                          feed_result=feed_result, lookback_default=changes.DEFAULT_LOOKBACK_HOURS, correlate_default=changes.DEFAULT_CORRELATE_MINUTES,
                          call_timeout_ms=num("call_timeout_ms"), connect_timeout_s=num("connect_timeout_s"), min_snapshot_age_min=num("min_snapshot_age_min"),
+                         band_weeks=num("band_weeks"),
                          mask_report_literals="" if v.get("mask_report_literals") is False else "checked",
                          links=html.escape(links), notes=html.escape(v.get("notes") or ""), buttons=buttons,
                          baseline_opts="".join(f"<option value='{p}'{' selected' if (v.get('baseline_policy') or 'previous') == p else ''}>{LABELS[p]}</option>" for p in POLICIES),
@@ -1533,7 +1539,7 @@ class App:
                            "changes_file": changes_file, "changes": feed, "links": links, "notes": g("notes"),
                            "baseline_policy": g("baseline_policy") if g("baseline_policy") != "previous" else "", "baseline": g("baseline"),
                            "call_timeout_ms": g("call_timeout_ms"), "connect_timeout_s": g("connect_timeout_s"), "min_snapshot_age_min": g("min_snapshot_age_min"),
-                           "mask_report_literals": "mask_report_literals" in form}
+                           "band_weeks": g("band_weeks"), "mask_report_literals": "mask_report_literals" in form}
 
     def save_target(self, name: str, fields: dict, keep_secrets: bool = True) -> list[str]:
         """Blank dsn/password on an edit means 'keep what is stored'."""

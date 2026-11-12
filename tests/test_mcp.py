@@ -442,6 +442,26 @@ def test_compare_reports_an_outage_and_sql_history_names_its_args(cfg_store):
     assert "target (a name from list_targets)" in tool.description and "target" in tool.input_schema["required"]
 
 
+def test_compare_honours_the_targets_band_weeks(cfg_store, monkeypatch):
+    """The server builds the reviewer's tools without run(), which left band_weeks at the default: a target with 0
+    still got band sentences and one with 12 got 6. compare_snapshots reads the target's own setting."""
+    from dbtriage import band
+
+    cfg, st = cfg_store("[mcp]\nenabled = true\n")
+    asked = []
+
+    def usual_band(store, engine, target, sid, weeks=6, hours_tolerance=1, baseline=None):
+        asked.append((target, weeks, baseline))
+        return None
+
+    monkeypatch.setattr(band, "usual_band", usual_band)
+    tools = mcp_server.Tools(cfg, st)
+    cfg.targets["demo"].extra["band_weeks"] = 12
+    assert "sql" in tools.compare_snapshots(DEMO, DEMO_BASE) and asked == [("demo", 12, DEMO_BASE)]
+    cfg.targets["demo"].extra["band_weeks"] = 0
+    assert "sql" in tools.compare_snapshots(DEMO, DEMO_BASE) and asked == [("demo", 12, DEMO_BASE)]  # off: not asked
+
+
 def test_snapshot_ids_follow_configs_engines_and_name_rule():
     """SNAPSHOT_ID hard-coded three engines and its own name grammar (agent review on #9, 5752e9d)."""
     from dbtriage.config import ENGINES

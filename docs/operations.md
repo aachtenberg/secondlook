@@ -206,7 +206,10 @@ so three quiet hours do not clear it and its ticket is not told "cleared" every 
 no period and the run count applies, which is why the tombstone exists: when it comes back the next night it is the
 same finding, returned, with its ticket and its first-seen date. For a target with a batch cycle, also set its
 baseline policy to `same-time-yesterday` or `same-time-last-week` (configuration.md) so the batch window is compared
-with itself and the relative findings do not fire at all.
+with itself and the relative findings do not fire at all. Once the target has three or more weeks of snapshots, the
+review also says whether the hour is inside the usual band for that weekday and clock hour over the past `band_weeks`
+weeks (configuration.md), so a Monday 02:00 batch that is heavy every Monday reads as usual even when last Monday's
+run is missing or was itself odd.
 
 The review still caps at five findings, and an open finding never takes a slot from a new one: open findings that
 did not make the five are listed under **Still open** after them, with how long they have been open and how many

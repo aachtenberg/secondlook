@@ -80,11 +80,16 @@ class Tools:
         self._run = run  # cli.run_request, injected so tests need no database
 
     # ---------------------------------------------------------------- helpers
-    def _agent_tool(self, snapshot_id: str, name: str, args: dict) -> str:
+    def _agent(self):
+        """The reviewer's tools without a run(): compare_snapshots reads each target's own band_weeks, as the CLI does."""
         from dbtriage.agent import TriageAgent
+        from dbtriage.band import weeks_for
 
+        return TriageAgent(self.store, None, band_weeks_for=lambda name: weeks_for(self.cfg, name))
+
+    def _agent_tool(self, snapshot_id: str, name: str, args: dict) -> str:
         m = self._manifest(snapshot_id)
-        spec = next(t for t in TriageAgent(self.store, None).tool_specs(m["engine"], m["target"]) if t.name == name)
+        spec = next(t for t in self._agent().tool_specs(m["engine"], m["target"]) if t.name == name)
         return spec.fn(args)
 
     def _read(self, key: str, missing):
@@ -168,10 +173,8 @@ class Tools:
         return self._agent_tool(snapshot_id, "compare_snapshots", {"snapshot_id": snapshot_id, "baseline_id": baseline_id})
 
     def get_sql_history(self, target: str, sql_id: str, limit: int = 12) -> str:
-        from dbtriage.agent import TriageAgent
-
         t = self._target(target)
-        spec = next(s for s in TriageAgent(self.store, None).tool_specs(t.engine, target) if s.name == "get_sql_history")
+        spec = next(s for s in self._agent().tool_specs(t.engine, target) if s.name == "get_sql_history")
         out = spec.fn({"sql_id": sql_id, "limit": max(1, min(int(limit), 50))})  # 0 would mean every snapshot
         self._listed()  # it lists the target's snapshots: during an outage that is only the spool, not 'never seen'
         return out
