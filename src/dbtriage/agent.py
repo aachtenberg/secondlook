@@ -137,7 +137,8 @@ class TriageAgent:
             """
             cur, base = agent._summary(snapshot_id), agent._summary(baseline_id)
             before = agent.storage.previous(engine, target, baseline_id)
-            margin = int(agent.storage.get_json(f"{snapshot_id}/manifest.json").get("correlate_minutes") or cmp.CORRELATE_MINUTES)
+            margin = agent.storage.get_json(f"{snapshot_id}/manifest.json").get("correlate_minutes")
+            margin = cmp.CORRELATE_MINUTES if margin in (None, "") else int(margin)  # an explicit 0 is a choice, not a blank
             return json.dumps(cmp.compare(cur, base, agent._summary(before) if before else None,
                                           changes=agent._stored_changes(snapshot_id), correlate_minutes=margin), default=str)
 

@@ -196,8 +196,10 @@ def _github(spec: dict, start: datetime, end: datetime, base_dir: str | None) ->
         created = parse_time(d.get("created_at"))
         if created is None or created > end:
             continue
-        if created < start:
-            break  # newest first: everything after this is older still
+        if created < start - timedelta(days=1):
+            break  # newest first: a deployment requested more than a day before the window cannot have landed in it
+        # a deployment requested before the window may still have succeeded inside it; `within()` filters on the
+        # landing time below, so requested-before is not a reason to drop it here
         ref = d.get("ref") or (d.get("sha") or "")[:8]
         at, state, link = created, None, None
         if len(out) < MAX_DETAIL_CALLS:
