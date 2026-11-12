@@ -20,6 +20,7 @@ New work should make that review more trustworthy and more useful over time. It 
 - A SQL IDE, a trace product, or a live connection from the model. The reviewer-access picture is the enterprise pitch. Do not blur it.
 
 Coverage work still belongs on the list, and it is not the story. Query Store (SQL Server plan cache forgets statements) and Statspack (Oracle Standard Edition) make the same review possible on more databases. Ship them as coverage. Do not market them as the difference.
+*(Statspack done: an Oracle database without the Diagnostics Pack is read from Statspack when it is installed; `oracle_source` in `docs/configuration.md`.)*
 
 ## What the code already has
 

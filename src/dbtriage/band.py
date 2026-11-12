@@ -88,9 +88,9 @@ def _restart_inside(summary: dict, start: datetime, end: datetime) -> str | None
     timestamps on the database's own clock, so they are compared with each other as they are and the reason names
     that clock, never a UTC offset the value never had. Only without begin and end is the startup held against the
     UTC window given, which is approximate when the startup is naive: the database's clock may be hours from UTC."""
-    awr = summary.get("awr") or {}
+    awr = summary.get("awr") or summary.get("statspack") or {}  # Statspack's window has the same keys and clock
     if awr.get("note"):
-        return "the AWR window spans an instance restart"
+        return f"the {'AWR' if summary.get('awr') else 'Statspack'} window spans an instance restart"
     if not awr.get("startup"):
         return None
     try:
