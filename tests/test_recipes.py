@@ -127,6 +127,10 @@ def test_recipe_is_valid(recipe, monkeypatch):
     d = data.get("delivery", {})
     assert set(d.get("channels", [])) <= set(CHANNELS)
     for ch, conf in d.items():
+        if ch == "digest":  # [delivery.digest]: the fleet digest's schedule and channels (dbtriage.fleet), not a channel
+            assert set(conf) <= {"schedule", "channels"} and set(conf.get("channels", [])) <= set(CHANNELS), conf
+            scheduler.normalize(conf.get("schedule"))
+            continue
         if isinstance(conf, dict):
             assert ch in CHANNELS, f"unknown channel section [delivery.{ch}]"
             assert set(conf) - {"headers"} <= keys["channel"], (ch, set(conf) - keys["channel"])

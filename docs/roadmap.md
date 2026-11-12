@@ -33,6 +33,8 @@ The bets below lean on these facts, so they are stated once.
 - Jira and Plane delivery keeps the created issue's key, id and url on the finding's ledger entry, comments on it for worse and cleared findings, and the `min_severity` gate is per finding (new or worse) when the review carries `life`; legacy reviews keep the whole-run gate. *(Done: bet 2.)*
 - Storage is per-snapshot prefixes on local disk, S3, Azure or Postgres, with an outage spool. The one cross-snapshot object is the per-target ledger `<engine>/<target>/findings.json`, written through the same interface and rebuildable with `dbtriage rebuild-ledger`. *(Done: bet 2.)*
 - The model run stores provider, model, token usage, a tool-call count, and `tools.json`: every tool call with its arguments and a truncated result, written even when the run fails. *(Done: the prerequisite for bet 8.)*
+- Every `top_sql` and `sessions` row carries `text_hash` next to `sql_id`: a short hash of the statement with literals, bind markers, comments and spacing taken out (`sqlnorm.py`). Redaction replaces literals consistently, so the hash of the stored text equals the hash of what the application sent, and it is the same on every replica of one engine. It is a same-engine join only. *(Done: bet 4.)*
+- The fleet digest (`fleet.py`, `dbtriage digest`, `[delivery] digest` in the scheduler) reads every ledger and the stored feeds and summaries, and writes the two cross-target sentences. Its last send is `fleet/digest.json`. *(Done: bet 4.)*
 - `dbtriage bundle` and the snapshot page's Download bundle link export one snapshot as a deterministic zip: a README for the reader, every stored file byte for byte (raw.json on request), the discussion threads and a checksums.txt. *(Done: bet 8.)*
 - There is no SQL text hash. `sql_id` is engine-specific and SQL text is redacted before storage.
 
@@ -87,7 +89,7 @@ The review line that matters is specific: “plan hash changed in this window; d
 
 Shape it as evidence inside a finding, not as a third-party timeline page.
 
-### 4. One review for the fleet
+### 4. One review for the fleet *(landed)*
 
 A team with Oracle, PostgreSQL, and SQL Server has three consoles. Second Look already normalizes load, top SQL, waits, and sessions into one summary shape.
 
@@ -96,7 +98,7 @@ A scheduled fleet note, not a dashboard: across targets, which findings opened s
 Two links join findings across targets, and they are not equally strong:
 
 - **The same deploy**, from bet 3. This is the link that crosses engines. “After `billing@1.4.2`, findings opened on `ora-prod` and `pg-prod`” is a true sentence, because the deploy id is the same on both.
-- **The same statement**, within one engine. Replicas, shards and read copies run the same SQL, so a normalized text hash (whitespace and literals stripped, computed before redaction and stored next to `sql_id`) ties them. Do not promise this across engines: Oracle and PostgreSQL rarely run the same text, and bind styles differ.
+- **The same statement**, within one engine. Replicas, shards and read copies run the same SQL, so a normalized text hash (whitespace, literals and bind markers stripped, computed on the stored, redacted text and kept next to `sql_id`; redaction replaces literals consistently, so the hash is stable across runs) ties them. Do not promise this across engines: Oracle and PostgreSQL rarely run the same text, and bind styles differ.
 
 OEM, pganalyze, and Query Store cannot write either sentence.
 
@@ -135,7 +137,7 @@ Datadog exports charts. The model chat exports a transcript. The bundle is the r
 
 ## What to build first
 
-Status on 2026-11-11: the groundwork, bets 1, 2 and 3 and the tool transcript have landed. Next is bet 4, the fleet note, which now has the deploy id to join findings across targets.
+Status on 2026-11-11: the groundwork, bets 1, 2, 3 and 4 and the tool transcript have landed. The fleet note joins findings across targets by the deploy id and, within one engine, by the text hash.
 
 The groundwork (kind and subject on the model's finding, one matcher), then bets 1 and 2, then the settings diff from bet 3, then deploy feeds.
 

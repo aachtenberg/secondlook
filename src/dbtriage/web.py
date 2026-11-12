@@ -1189,8 +1189,10 @@ class App:
             code, out = self.start_run(name, "scheduled", reason, True, window_minutes=window, source="schedule")
             return code == 202, out.get("error", "started")
 
+        from dbtriage import fleet
+
         self.scheduler = scheduler.Scheduler(lambda: {n: t.extra for n, t in self.cfg.targets.items()}, fire,
-                                             on_tick=self._housekeeping)
+                                             on_tick=self._housekeeping, digest=fleet.Digest(lambda: self.cfg, self.store))
         self.scheduler.start()
 
     def _housekeeping(self):
@@ -1367,13 +1369,16 @@ class App:
             blocks.append(f"<fieldset class=chan><legend>{ch}</legend>{''.join(inputs)}<div class=row>{test}</div></fieldset>")
         return {"min_sev_opts": "".join(f"<option{' selected' if d.get('min_severity', 'info') == o else ''}>{o}</option>" for o in SEVERITIES),
                 "gone_after_runs": html.escape(str(d.get("gone_after_runs") or "")),
+                "digest_schedule": html.escape(str((d.get("digest") or {}).get("schedule") or "")),
+                "digest_channels": html.escape(", ".join((d.get("digest") or {}).get("channels") or [])),
                 "channel_toggles": toggles, "channel_blocks": "\n".join(blocks),
                 "delivery_buttons": f"<button{ro}>Save</button> <button{ro} class=quiet name=action value='test:stdout'>Send test via stdout</button>"}
 
     @staticmethod
     def parse_delivery_form(form: dict) -> dict:
         g = lambda k: form.get(k, [""])[0].strip()  # noqa: E731
-        data: dict = {"channels": form.get("channels", []), "min_severity": g("min_severity"), "gone_after_runs": g("gone_after_runs")}  # absent = every box unchecked
+        data: dict = {"channels": form.get("channels", []), "min_severity": g("min_severity"), "gone_after_runs": g("gone_after_runs"),  # absent = every box unchecked
+                      "digest": {"schedule": g("digest_schedule"), "channels": g("digest_channels")}}
         for ch, spec in CHANNEL_FIELDS.items():
             data[ch] = {name: g(f"{ch}.{name}") for name, _kind, _d in spec}
         return data

@@ -75,6 +75,7 @@ of an environment variable, and the value is read from the process at run time.
 | `[delivery]` | `channels` | Settings › Delivery: Enabled channels |
 | `[delivery]` | `min_severity` | Settings › Delivery: Below this severity only stdout fires |
 | `[delivery]` | `gone_after_runs` | Settings › Delivery: A finding is gone after |
+| `[delivery.digest]` | `schedule`, `channels` | Settings › Delivery: Fleet digest schedule, Fleet digest channels |
 | `[delivery.ntfy]` | `url`, `topic`, `token_env`, `min_severity` | Settings › Delivery › ntfy |
 | `[delivery.slack]`, `[delivery.teams]` | `webhook_url`, `webhook_url_env`, `min_severity` | Settings › Delivery › slack, teams (a typed URL is masked afterwards) |
 | `[delivery.email]` | `smtp_host`, `smtp_port`, `starttls`, `from`, `to`, `user_env`, `password_env`, `min_severity` | Settings › Delivery › email |

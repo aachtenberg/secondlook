@@ -73,6 +73,8 @@ document.addEventListener('change', function (e) {  // delegated: schedule rows 
 <form method="post" action="/settings/delivery" class="grid" data-ajax>
 <label>Below this severity only stdout fires <select name="min_severity">$min_sev_opts</select></label>
 <label>A finding is gone after <input name="gone_after_runs" type="number" min="1" max="1000" value="$gone_after_runs" placeholder="3"><small class="mut">Periods of a finding's own cadence it must be missing before the review says it is gone and its ticket is told, or runs before it has a cadence; blank = 3.</small></label>
+<label>Fleet digest schedule <input name="digest_schedule" value="$digest_schedule" placeholder="weekly · daily · 0 3 * * 1"><small class="mut">One note across every database: what opened, what the same deploy or statement caused on more than one, and which were quiet. <code>weekly</code> is Monday 03:00, <code>daily</code> is 03:00, or a cron expression, server time; blank turns it off.</small></label>
+<label>Fleet digest channels <input name="digest_channels" value="$digest_channels" placeholder="email, slack (blank = the enabled channels)"></label>
 <div class="row"><span class="mut">Enabled channels:</span> $channel_toggles</div>
 $channel_blocks
 <div class="row">$delivery_buttons</div>
