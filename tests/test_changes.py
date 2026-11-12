@@ -104,16 +104,20 @@ def test_github_deployments_with_statuses(monkeypatch):
         {"id": 3, "sha": "c3c3c3c3c3", "ref": "v1.4.3", "environment": "production", "created_at": "2026-11-05T11:00:00Z"},  # after the window
         {"id": 2, "sha": "b2b2b2b2b2", "ref": "v1.4.2", "environment": "production", "created_at": "2026-11-05T10:10:00Z"},
         {"id": 1, "sha": "a1a1a1a1a1", "ref": "v1.4.1", "environment": "production", "created_at": "2026-11-05T09:00:00Z"},
-        {"id": 0, "sha": "0000000000", "ref": "v1.4.0", "environment": "production", "created_at": "2026-11-01T09:00:00Z"},  # older than start: stop
+        {"id": 4, "sha": "d4d4d4d4d4", "ref": "v1.3.9", "environment": "production", "created_at": "2026-11-05T08:50:00Z"},  # requested before the window, landed inside it
+        {"id": 0, "sha": "0000000000", "ref": "v1.4.0", "environment": "production", "created_at": "2026-11-01T09:00:00Z"},  # over a day before start: stop
     ]
     calls = fake_http(monkeypatch, {
         f"{api}/deployments/2/statuses": [{"state": "success", "created_at": "2026-11-05T10:14:00Z", "environment_url": "https://billing.example.com"}],
         f"{api}/deployments/1/statuses": [{"state": "failure", "created_at": "2026-11-05T09:05:00Z"}, {"state": "pending", "created_at": "2026-11-05T09:01:00Z"}],
+        f"{api}/deployments/4/statuses": [{"state": "success", "created_at": "2026-11-05T09:02:00Z"}],
         f"{api}/deployments?": deployments,
     })
     t = tgt(changes={"source": "github", "repo": "acme/billing", "environment": "production", "token_env": "GH_TOKEN"})
     got = changes.fetch(t, END - timedelta(hours=2), END)
     assert got == [
+        {"time": "2026-11-05T09:02:00+00:00", "kind": "deploy", "description": "billing@v1.3.9 to production",
+         "link": "https://github.com/acme/billing/commit/d4d4d4d4d4", "source": "github"},  # requested at 08:50, landed at 09:02: in the window
         {"time": "2026-11-05T09:05:00+00:00", "kind": "deploy", "description": "billing@v1.4.1 to production (failure)",
          "link": "https://github.com/acme/billing/commit/a1a1a1a1a1", "source": "github"},  # requested at 09:00, failed at 09:05; no url from the status
         {"time": "2026-11-05T10:14:00+00:00", "kind": "deploy", "description": "billing@v1.4.2 to production",
@@ -122,7 +126,7 @@ def test_github_deployments_with_statuses(monkeypatch):
     first = calls[0]
     assert first.full_url == f"{api}/deployments?per_page=100&environment=production"
     assert first.get_header("Authorization") == "Bearer t0k" and first.get_header("Accept") == "application/vnd.github+json"
-    assert len(calls) == 3  # one statuses call per deployment in the window, none for the one after it or the one before start
+    assert len(calls) == 4  # one statuses call per deployment that may have landed in the window, none for the one after it or the one a day before
 
 
 def test_github_releases_when_asked_and_no_deployments(monkeypatch):
@@ -230,3 +234,16 @@ def test_collect_stores_the_feed_with_the_snapshot(monkeypatch, tmp_path):
     monkeypatch.setattr(changes, "fetch", boom)  # fetch never raises, but even if it did the capture must land
     sid = cli.collect(cfg, st, req)
     assert st.exists(f"{sid}/manifest.json") and not st.exists(f"{sid}/changes.json")
+
+
+def test_an_explicit_zero_margin_survives_the_manifest(tmp_path):
+    from dbtriage.cli import stored_changes
+    from dbtriage.storage import LocalStorage
+
+    st = LocalStorage(tmp_path)
+    sid = "postgres/demo/2026-11-05/20261105T100000Z"
+    st.put_json(f"{sid}/changes.json", [])
+    st.put_json(f"{sid}/manifest.json", {"correlate_minutes": 0})
+    assert stored_changes(st, sid) == ([], 0)  # 0 means inside the window only, not the default
+    st.put_json(f"{sid}/manifest.json", {})
+    assert stored_changes(st, sid)[1] == changes.DEFAULT_CORRELATE_MINUTES

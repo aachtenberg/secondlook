@@ -248,6 +248,9 @@ def test_changes_come_from_the_store_and_legacy_snapshots_from_the_file(tmp_path
     st.put_json(f"{ids[-1]}/manifest.json", {**m, "correlate_minutes": 5})  # the margin is the one recorded at capture
     cmp5 = json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))
     assert cmp5["changes"] == [] and "changes" not in next(f for f in cmp5["findings"] if f["kind"] == "sql_regressed")["evidence"]
+    st.put_json(f"{ids[-1]}/manifest.json", {**m, "correlate_minutes": 0})  # an explicit 0 is "inside the window only", not the 30-minute default
+    cmp0 = json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))
+    assert cmp0["changes"] == []
 
     rules = rule_based_triage(cmp)
     reg = next(f for f in rules["findings"] if f["kind"] == "sql_regressed")

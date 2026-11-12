@@ -76,7 +76,8 @@ def stored_changes(store: Storage, sid: str) -> tuple[list[dict] | None, int]:
     manifest = store.get_json(f"{sid}/manifest.json")
     if not store.exists(f"{sid}/changes.json"):
         return None, changes.DEFAULT_CORRELATE_MINUTES
-    return store.get_json(f"{sid}/changes.json"), int(manifest.get("correlate_minutes") or changes.DEFAULT_CORRELATE_MINUTES)
+    margin = manifest.get("correlate_minutes")  # an explicit 0 ("inside the window only") must survive, so no `or`
+    return store.get_json(f"{sid}/changes.json"), changes.DEFAULT_CORRELATE_MINUTES if margin in (None, "") else int(margin)
 
 
 def summary_of(store: Storage, sid: str) -> dict:
