@@ -14,6 +14,7 @@ API (same auth):
   GET  /api/targets/<name>/sql/<sql_id>     per-snapshot history of one statement (calls, time, CPU time, plan hash)
   GET  /api/snapshots/<id>                  manifest + triage + findings + top SQL
   GET  /api/snapshots/<id>/files/<name>     a stored file (summary.json, awr.txt ...)
+  GET  /bundle/<id>                         the snapshot as a zip (README, every stored file, checksums; ?raw=1 adds raw.json)
   POST /api/run                             {"target", "mode", "reason", "no_llm", "baseline_policy", "baseline"}  (needs --allow-run)
   GET  /api/settings                        effective settings + targets (DSNs masked) + allow_db_writes (read-only)
   PUT  /api/settings                        {"web": {...}, "agent": {...}, "delivery": {...}} (a flat body = web)  (needs --allow-edit);
@@ -305,6 +306,7 @@ ICON = {  # inline stroke icons, 14px, currentColor
     "x": "<svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' aria-hidden='true'><path d='M6 6l12 12M18 6 6 18'/></svg>",
     "arrow": "<svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M5 12h14M13 6l6 6-6 6'/></svg>",
     "clock": "<svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' aria-hidden='true'><circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/></svg>",
+    "download": "<svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M12 4v11m0 0-4-4m4 4 4-4M5 19h14'/></svg>",
 }
 STATUS = {"info": "healthy", "low": "degraded", "medium": "degraded", "high": "incident"}
 
@@ -1010,6 +1012,7 @@ class App:
             discuss_btn = f"<button type='button' class='ai' id='discuss-open'>{ICON['chat']}Discuss with AI</button>"
         actions = f"<a class='btn' href='/t/{T}/compare?a={html.escape(sid)}'>Change reference</a>" + discuss_btn
         return self.page("snapshot.html", sid, active=target, sid=sid, target=T, captured=captured, time=captured[11:19],
+                         bundle_url=f"/bundle/{html.escape(sid)}", download_icon=ICON["download"],
                          mode=html.escape(m["window"]["mode"]) + vs + _db_snapshot_note(m.get("db_snapshot")), review=review, top_sql=top, charts=chart_html, actions=actions, discuss=discuss,
                          sevpill=sev(tr.get("severity")) if tr else "", engine=html.escape(m.get("engine", "")))
 
@@ -1648,7 +1651,7 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store" if "html" in ctype or "json" in ctype else "max-age=3600")
+            self.send_header("Cache-Control", "no-store" if any(k in ctype for k in ("html", "json", "zip")) else "max-age=3600")
             self.send_header("X-Content-Type-Options", "nosniff")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
@@ -1766,6 +1769,8 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 if path.startswith("/f/"):
                     sid, _, name = path[3:].rpartition("/")
                     return self._file(sid, name)
+                if path.startswith("/bundle/"):
+                    return self._bundle(path[8:], q.get("raw", ["0"])[0] == "1")
                 if path == "/api/targets":
                     return self._json(app.target_rows())
                 if m := re.match(r"^/api/targets/([^/]+)/snapshots$", path):
@@ -1805,6 +1810,16 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                 return self._error(404, "file not exposed", self.path.startswith("/api/"))
             data = app.store.get(f"{sid}/{name}")
             self._send(data, "application/json" if name.endswith(".json") else "text/plain; charset=utf-8")
+
+        def _bundle(self, sid: str, raw: bool):
+            """The snapshot as a zip (dbtriage.bundle), behind the same gate as the file drawer: a signed-in viewer.
+            raw.json goes in only when the drawer exposes it too. An unknown snapshot is the 404 above."""
+            from dbtriage import bundle
+
+            data = bundle.build(app.store, sid, raw and ("raw.json" in app.web["files"] or "*" in app.web["files"]))
+            name = bundle.filename(app.manifest_of(sid), sid)
+            access.audit("bundle", sid)
+            self._send(data, "application/zip", extra={"Content-Disposition": f'attachment; filename="{name}"'})
 
         def do_POST(self):  # noqa: N802
             if envfile.refresh():
