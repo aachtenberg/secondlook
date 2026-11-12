@@ -45,6 +45,33 @@ own periods a finding must be missing before the review says it is gone and its 
 many runs while it has no period yet. It sits under `[delivery]` because flapping is a channel problem, and on the
 Settings page's Delivery card for the same reason. Blank means 3.
 
+## The fleet digest
+
+A team with Oracle, PostgreSQL and SQL Server has three consoles; Second Look writes one note. The digest reads
+every database's ledger of open findings and the deploys and statements stored with its snapshots, and says, across
+the fleet: which findings opened since the last digest (new, or worse on the latest run), which of them share a
+cause, and which databases had no significant change. It is a note, under a page, not a dashboard.
+
+Two links join findings across databases, and they are not equally strong. The same deploy, from the change
+feed, is the strong one and crosses engines: "After `billing@1.4.2`, findings opened on ora-prod and pg-prod" is
+true because the deploy id is the same on both. The same statement, by the normalized text hash stored next to
+`sql_id` on every snapshot (whitespace, literals and bind markers taken out), ties replicas, shards and read
+copies of one engine: "The same statement is high on pg-prod and pg-replica". It is never claimed across engines:
+Oracle and PostgreSQL rarely run the same text, and when they do the planner and the fix differ.
+
+```toml
+[delivery.digest]
+schedule = "weekly"                  # weekly (Monday 03:00), daily (03:00), or cron in the server's local time
+channels = ["email"]                 # default: the [delivery] channels
+```
+
+The scheduler (`dbtriage scheduler`) sends it when the slot comes, through the usual channels: each channel's
+`min_severity` gates on the highest opened finding, and a ticket channel opens one issue for the note. The last
+send is kept in the store at `fleet/digest.json`, so a restart does not send it twice, and a slot that passed
+while the scheduler was down is sent once it is back, covering the time since the last digest. `dbtriage digest
+--since 7d` (or `24h`, or an ISO time) prints the same note now, and `--deliver` sends it; a hand-run digest does
+not move the schedule's clock. This table can only be set in `targets.toml`.
+
 ## Connecting to a database
 
 Each database needs a **read-only monitoring user**. The lab's grants are in `compose/*/01-init.sql` and are a

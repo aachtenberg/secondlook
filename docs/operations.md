@@ -18,6 +18,7 @@
 | `dbtriage flush-spool` | push work saved during a store outage now |
 | `dbtriage deliver <snapshot> [--force]` | re-send a stored review; `--force` ignores the severity gates and finding life and posts it as it stands |
 | `dbtriage rebuild-ledger -t <db>` | recompute the database's ledger of open findings from its stored reviews (below, "A finding's life") |
+| `dbtriage digest [--since 7d\|24h\|ISO] [--deliver] [--channels ...]` | the fleet note: findings opened on every database, the deploy or statement they share, the quiet ones (configuration.md, "The fleet digest") |
 | `dbtriage copy-store --from URL --to URL`, `dbtriage copy-settings --from X --to Y` | move snapshots or settings, for example from files into Postgres |
 
 `--baseline-policy` and `--baseline` work on `run`, `compare` and `triage` (see configuration.md).
@@ -302,4 +303,4 @@ database inside the container, so a recreate starts it over too, AWR history inc
   statements when plans are evicted.
 - Statspack, for Oracle Standard Edition. Taking Statspack snapshots can already plug in through the
   `dbtriage.db_snapshot` entry point ([configuration](configuration.md#letting-dbtriage-take-snapshots-on-the-database)); reading them is the missing part.
-- A weekly trend digest across many snapshots.
+- The fleet digest in the web view's scheduler (`dbtriage web --schedule`); today `dbtriage scheduler` sends it.
