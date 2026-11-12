@@ -92,7 +92,7 @@ def test_next_cell_paused_next_and_failed():
 
 def test_suggestions_name_a_trend_spike():
     rows = diagnosis.lines(triage=None, comparison=None, manifest=None, ledger=None, changes=None, schedule={"schedule": "x", "label": "hourly", "paused": False, "next": NOW}, now=NOW)
-    pts = [{"value": 10, "captured_at": iso(hours=3)}, {"value": 900, "captured_at": iso(hours=2)}, {"value": 12, "captured_at": iso(hours=1)}]
+    pts = [{"value": 10, "t": NOW - timedelta(hours=3)}, {"value": 900, "t": NOW - timedelta(hours=2)}, {"value": 12, "captured_at": iso(hours=1)}]
     assert diagnosis.suggestions(rows, pts, "aborted_connects/s") == [f"Why did aborted_connects spike at {iso(hours=2)[11:16]}?"]
     assert diagnosis.suggestions(rows, [], None) == ["What deserves attention first on this database, and why?"]
 

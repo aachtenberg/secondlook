@@ -203,7 +203,8 @@ def suggestions(rows: list[dict], trend: list[dict] | None = None, metric: str |
         median = vals[len(vals) // 2]
         peak = max(pts, key=lambda p: p["value"])
         if median > 0 and peak["value"] >= 2 * median or (median == 0 and peak["value"] > 0):
-            at = str(peak.get("captured_at") or peak.get("at") or "")[11:16]
+            when = peak.get("t") or peak.get("captured_at") or peak.get("at")  # web.trend_points keeps a datetime under "t"
+            at = when.strftime("%H:%M") if isinstance(when, datetime) else str(when or "")[11:16]
             out.append(f"Why did {metric.removesuffix('/s')} spike{f' at {at}' if at else ''}?")
     changes = by.get("Changes")
     if changes and not changes.get("gap") and changes["head"].startswith(("deploy", "parameter")):
