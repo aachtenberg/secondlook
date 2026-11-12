@@ -1,11 +1,15 @@
-"""SQL Server collector: the plan-cache statistics, wait statistics, sessions and requests, performance counters and
-configuration, through the DMVs. Works on SQL Server 2016 and later (spills from 2016 SP2 / 2017 CU3), on Linux or
-Windows, and Azure SQL Managed Instance; the counters are cumulative, like Postgres and MySQL, so two snapshots are
-compared as an interval. Statements are the connected database's.
+"""SQL Server collector: top SQL, wait statistics, sessions and requests, performance counters and configuration,
+through the DMVs. Works on SQL Server 2016 and later (spills from 2016 SP2 / 2017 CU3), on Linux or Windows, and Azure
+SQL Managed Instance; the counters are cumulative, like Postgres and MySQL, so two snapshots are compared as an
+interval. Statements are the connected database's.
+
+Top SQL comes from Query Store when it is on and holds the window (top_sql_source = "auto", the default): its runtime
+statistics are already the window's, so the summary says top_sql_kind = "interval" and the comparison takes them as
+they are. Otherwise from the plan cache, cumulative since each plan was cached, and forgotten when a plan is evicted.
 
 The login needs VIEW SERVER STATE (SQL Server 2022: VIEW SERVER PERFORMANCE STATE is enough) and, in the database
-it connects to, VIEW DATABASE STATE. It needs no other permission: collection only reads. Driver: Microsoft's
-mssql-python (uv sync --extra sqlserver), which needs no separate ODBC install.
+it connects to, VIEW DATABASE STATE (which also reads Query Store). It needs no other permission: collection only
+reads. Driver: Microsoft's mssql-python (uv sync --extra sqlserver), which needs no separate ODBC install.
 
 dsn: mssql://user:password@host:1433/database?encrypt=yes&trust_server_certificate=no
      or a connection string as is, for anything else (Entra ID, ...):
@@ -13,6 +17,8 @@ dsn: mssql://user:password@host:1433/database?encrypt=yes&trust_server_certifica
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, unquote, urlparse
 
 import mssql_python  # the optional extra; importing this module without it tells get_collector to say so
@@ -21,7 +27,9 @@ from dbtriage.collectors.base import Snapshot, Window, num, utcnow
 from dbtriage.config import Target
 from dbtriage.redact import redact_sql
 
-TAG = "/* dbtriage */"  # on every statement the collector runs, so the plan-cache view can leave them out
+TAG = "/* dbtriage */"  # in every statement the collector runs, so the plan cache and Query Store can leave them out
+TOP_SQL_SOURCES = ("auto", "query_store", "plan_cache")
+QS_READABLE = ("READ_WRITE", "READ_ONLY")  # actual_state_desc values whose runtime statistics can be read
 
 # Waits that only mean "nothing to do" (idle threads, timers, background queues): they would drown the real ones.
 IDLE_WAITS = (
@@ -112,10 +120,79 @@ def connect(target: Target, login_timeout_s: int | None = None):
     return conn
 
 
+def _tagged(sql: str) -> str:
+    """The tag after the statement's first word: Query Store keeps only the statement's own text, which starts at that
+    word, so a comment in front of it is lost there; the plan cache's batch text has it either way."""
+    head, *rest = re.split(r"\s+", sql.strip(), maxsplit=1)
+    return f"{head} {TAG} {rest[0] if rest else ''}"
+
+
 def _rows(cur, sql: str, *params) -> list[dict]:
-    cur.execute(f"{TAG}\n{sql}", *params) if params else cur.execute(f"{TAG}\n{sql}")
+    cur.execute(_tagged(sql), *params) if params else cur.execute(_tagged(sql))
     cols = [d[0].lower() for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _utc(d: datetime) -> datetime:
+    """Query Store times are UTC; a naive window time is taken as UTC too."""
+    return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
+
+
+def _dto(d: datetime) -> str:
+    """A datetimeoffset literal for convert(datetimeoffset, ?): the server compares instants, whatever the driver does
+    with an aware datetime parameter."""
+    return _utc(d).strftime("%Y-%m-%d %H:%M:%S.%f") + " +00:00"
+
+
+QS_SUMS = (("duration_us", "avg_duration"), ("cpu_us", "avg_cpu_time"), ("logical_reads", "avg_logical_io_reads"),
+           ("physical_reads", "avg_physical_io_reads"), ("rows_", "avg_rowcount"), ("spills", "avg_tempdb_space_used"))
+
+
+def _qs_statements(rows: list[dict]) -> list[dict]:
+    """Query Store's rows per interval (and execution type) added up per query hash and plan hash, heaviest first. Each
+    row holds averages and an execution count, so a total is the sum of average times count; Query Store's times are
+    microseconds, made milliseconds here like the plan cache's. The text is the query text that used the most time:
+    one query hash can cover several texts that differ only in their literals."""
+    out: dict[tuple, dict] = {}
+    for r in rows:
+        calls = num(r["count_executions"]) or 0
+        g = out.setdefault((r["sql_id"], r["plan_hash"]), {"sql_id": r["sql_id"], "plan_hash": r["plan_hash"], "calls": 0,
+                                                            **{k: 0.0 for k, _ in QS_SUMS}, "last_execution_time": None, "_texts": {}})
+        g["calls"] += calls
+        for k, avg in QS_SUMS:
+            g[k] += (num(r[avg]) or 0) * calls
+        g["_texts"][r["query_text_id"]] = g["_texts"].get(r["query_text_id"], 0) + (num(r["avg_duration"]) or 0) * calls
+        last = r["last_execution_time"]
+        if last is not None and (g["last_execution_time"] is None or _utc(last) > _utc(g["last_execution_time"])):
+            g["last_execution_time"] = last
+    for g in out.values():
+        texts = g.pop("_texts")
+        g["query_text_id"] = max(texts, key=texts.get)
+        g["total_time_ms"], g["cpu_time_ms"] = round(g.pop("duration_us") / 1000, 3), round(g.pop("cpu_us") / 1000, 3)
+    return sorted(out.values(), key=lambda g: -g["total_time_ms"])
+
+
+def _top_sql_row(s: dict, source: str) -> dict:
+    """One top-SQL row in the summary's shape, from either source: the same sql_id (query hash) and plan_hash (query
+    plan hash) forms, so findings, ledger identities and the fleet's text hash do not change with the source."""
+    calls, total = num(s["calls"]), num(s["total_time_ms"])
+    row = {
+        "sql_id": s["sql_id"], "text": redact_sql(s["text"]), "calls": calls, "total_time_ms": total,
+        "mean_time_ms": round(total / calls, 3) if calls and total is not None else None,
+        "cpu_time_ms": num(s["cpu_time_ms"]), "rows": num(s["rows_"]), "io_blocks_hit": num(s["logical_reads"]),
+        "io_blocks_read": num(s["physical_reads"]), "temp_blocks": num(s["spills"]), "plan_hash": s["plan_hash"],
+    }
+    if source == "query_store":
+        for k in ("rows", "io_blocks_hit", "io_blocks_read", "temp_blocks"):  # averages times counts: whole numbers really
+            row[k] = round(row[k]) if row[k] is not None else None
+        last = s.get("last_execution_time")
+        row["last_execution_time"] = _utc(last).isoformat() if last else None
+        if s.get("wait_categories"):
+            row["wait_categories"] = s["wait_categories"]
+    else:
+        # this plan's counters start when it was cached, not when the instance did: a new value means they started over
+        row["since"] = s["since"].isoformat() if s["since"] else None
+    return row
 
 
 class SQLServerCollector:
@@ -160,15 +237,138 @@ class SQLServerCollector:
                 raise
             return _rows(cur, sql.format(spills="0", n=n))
 
+    def _query_store(self, cur, n: int, window: Window) -> tuple[list[dict], dict] | None:
+        """The window's statements from Query Store, or None when it holds no interval overlapping the window, with the
+        span those intervals cover up to now: an interval is often an hour, longer than the window, and the open one
+        has only run so far. The server picks the top query hash and plan hash pairs by time and returns their rows per
+        interval (every execution type: aborted and failed runs count too); _qs_statements adds them up. dbtriage's
+        own statements are left out."""
+        end, start = _dto(window.end), _dto(window.start)
+        span = _rows(cur, """select count(*) as intervals, min(start_time) as start_,
+                                    case when max(end_time) > sysdatetimeoffset() then sysdatetimeoffset() else max(end_time) end as end_
+                             from sys.query_store_runtime_stats_interval
+                             where start_time < convert(datetimeoffset, ?) and end_time > convert(datetimeoffset, ?)""", end, start)[0]
+        if not span["intervals"]:
+            return None
+        sql = """
+            with r as (
+                select q.query_hash, p.query_plan_hash, q.query_text_id, rs.count_executions, rs.avg_duration,
+                       rs.avg_cpu_time, rs.avg_logical_io_reads, rs.avg_physical_io_reads, rs.avg_rowcount,
+                       {tempdb} as avg_tempdb_space_used, rs.last_execution_time
+                from sys.query_store_runtime_stats rs
+                join sys.query_store_runtime_stats_interval i on i.runtime_stats_interval_id = rs.runtime_stats_interval_id
+                join sys.query_store_plan p on p.plan_id = rs.plan_id
+                join sys.query_store_query q on q.query_id = p.query_id
+                join sys.query_store_query_text qt on qt.query_text_id = q.query_text_id
+                where i.start_time < convert(datetimeoffset, ?) and i.end_time > convert(datetimeoffset, ?)
+                  and q.query_hash <> 0x0000000000000000 and qt.query_sql_text not like '%/* dbtriage */%'
+            ), top_ as (
+                select top ({n}) query_hash, query_plan_hash from r
+                group by query_hash, query_plan_hash order by sum(avg_duration * count_executions) desc
+            )
+            select convert(varchar(18), r.query_hash, 1) as sql_id, convert(varchar(18), r.query_plan_hash, 1) as plan_hash,
+                   r.query_text_id, r.count_executions, r.avg_duration, r.avg_cpu_time, r.avg_logical_io_reads,
+                   r.avg_physical_io_reads, r.avg_rowcount, r.avg_tempdb_space_used, r.last_execution_time
+            from r join top_ on top_.query_hash = r.query_hash and top_.query_plan_hash = r.query_plan_hash"""
+        try:
+            per_interval = _rows(cur, sql.format(tempdb="rs.avg_tempdb_space_used", n=n), end, start)
+        except Exception as exc:  # noqa: BLE001 - avg_tempdb_space_used (pages, as total_spills) is 2017 and later
+            if "avg_tempdb_space_used" not in str(exc):
+                raise
+            per_interval = _rows(cur, sql.format(tempdb="0", n=n), end, start)
+        rows = _qs_statements(per_interval)
+        ids = sorted({int(r["query_text_id"]) for r in rows})
+        texts = {int(t["query_text_id"]): t["text"] for t in _rows(
+            cur, f"""select query_text_id, query_sql_text as text from sys.query_store_query_text
+                     where query_text_id in ({",".join(map(str, ids))})""")} if ids else {}
+        for r in rows:
+            r["text"] = texts.get(int(r["query_text_id"]))
+        self._query_waits(cur, rows, end, start)
+        return rows, {"start": _utc(span["start_"]), "end": _utc(span["end_"])}
+
+    def _query_waits(self, cur, rows: list[dict], end: str, start: str) -> None:
+        """Each statement's wait time by Query Store's wait category over the same intervals, as wait_categories on its
+        row (SQL Server 2017 and later; skipped quietly where the view is missing). Idle is left out."""
+        ids = sorted({r["sql_id"] for r in rows if re.fullmatch(r"0x[0-9A-Fa-f]{16}", str(r["sql_id"]))})
+        if not ids:
+            return
+        try:
+            waits = _rows(cur, f"""
+                select convert(varchar(18), q.query_hash, 1) as sql_id, convert(varchar(18), p.query_plan_hash, 1) as plan_hash,
+                       ws.wait_category_desc as category, sum(ws.total_query_wait_time_ms) as time_ms
+                from sys.query_store_wait_stats ws
+                join sys.query_store_runtime_stats_interval i on i.runtime_stats_interval_id = ws.runtime_stats_interval_id
+                join sys.query_store_plan p on p.plan_id = ws.plan_id
+                join sys.query_store_query q on q.query_id = p.query_id
+                where i.start_time < convert(datetimeoffset, ?) and i.end_time > convert(datetimeoffset, ?)
+                  and ws.wait_category_desc <> 'Idle' and q.query_hash in ({",".join(ids)})
+                group by q.query_hash, p.query_plan_hash, ws.wait_category_desc
+                having sum(ws.total_query_wait_time_ms) > 0""", end, start)
+        except Exception as exc:  # noqa: BLE001 - sys.query_store_wait_stats is 2017 and later
+            if "query_store_wait_stats" not in str(exc):
+                raise
+            return
+        by_plan: dict[tuple, dict] = {}
+        for w in waits:
+            by_plan.setdefault((w["sql_id"], w["plan_hash"]), {})[w["category"]] = num(w["time_ms"])
+        for r in rows:
+            cats = by_plan.get((r["sql_id"], r["plan_hash"]))
+            if cats:
+                r["wait_categories"] = dict(sorted(cats.items(), key=lambda kv: -(kv[1] or 0)))
+
+    def _source(self) -> str:
+        source = str(self.target.extra.get("top_sql_source") or "auto").strip().lower().replace("-", "_")
+        if source not in TOP_SQL_SOURCES:
+            raise SystemExit(f"target {self.target.name!r}: top_sql_source is auto, query_store or plan_cache, not {source!r}")
+        return source
+
+    def _top_sql(self, cur, n: int, window: Window, db: dict, name: str) -> tuple[list[dict], str, dict | None, list[str]]:
+        """(statements, source, the span they cover or None, notes): Query Store when top_sql_source allows it and it
+        holds the window, else the plan cache, with a note saying which and why."""
+        source, state = self._source(), db.get("query_store") or "OFF"
+        if source == "plan_cache":
+            return self._statements(cur, n), "plan_cache", None, ["top SQL from the plan cache (top_sql_source = plan_cache)"]
+        if state not in QS_READABLE:
+            if source == "query_store":
+                raise SystemExit(f"target {self.target.name!r}: top_sql_source = \"query_store\", but Query Store is {state} "
+                                 f"on {name}; turn it on there, or set top_sql_source to auto or plan_cache")
+            return self._statements(cur, n), "plan_cache", None, [f"top SQL from the plan cache: Query Store is {state} on {name}"]
+        try:
+            found = self._query_store(cur, n, window)
+        except Exception as exc:  # noqa: BLE001 - auto falls back; forced, the snapshot fails with the server's reason
+            if source == "query_store":
+                raise
+            return self._statements(cur, n), "plan_cache", None, [
+                f"top SQL from the plan cache: Query Store could not be read ({type(exc).__name__}: {str(exc)[:200]})"]
+        if found is None and source == "auto":
+            return self._statements(cur, n), "plan_cache", None, [
+                "top SQL from the plan cache: Query Store holds no runtime statistics for the window"]
+        rows, span = found or ([], None)
+        notes = ["top SQL from Query Store" + ("" if found else ": it holds no runtime statistics for the window")]
+        if state == "READ_ONLY":
+            notes.append("Query Store is READ_ONLY, so it records nothing new: the window may be only partly covered")
+        if span and (abs(span["start"] - _utc(window.start)) > timedelta(minutes=1)
+                     or abs(span["end"] - _utc(window.end)) > timedelta(minutes=1)):
+            m = db.get("qs_interval_minutes")
+            notes.append(f"Query Store keeps runtime statistics per {f'{m}-minute ' if m else ''}interval, so top SQL covers "
+                         f"{span['start']:%Y-%m-%d %H:%M} to {span['end']:%Y-%m-%d %H:%M} UTC, not the window's "
+                         f"{_utc(window.start):%Y-%m-%d %H:%M} to {_utc(window.end):%Y-%m-%d %H:%M}")
+        return rows, "query_store", span, notes
+
     def collect(self, window: Window) -> Snapshot:
+        self._source()  # a misspelt top_sql_source fails before connecting
         conn = connect(self.target)
         try:
             cur = conn.cursor()
             info = _rows(cur, """select @@version as version, db_name() as db, sqlserver_start_time,
                                         cpu_count, physical_memory_kb
                                  from sys.dm_os_sys_info""")[0]
+            db = _rows(cur, """select compatibility_level, recovery_model_desc, is_read_committed_snapshot_on,
+                                      (select actual_state_desc from sys.database_query_store_options) as query_store,
+                                      (select interval_length_minutes from sys.database_query_store_options) as qs_interval_minutes
+                               from sys.databases where database_id = db_id()""")[0]
             n = int(self.target.top_n)
-            statements = self._statements(cur, n)
+            statements, source, sql_span, notes = self._top_sql(cur, n, window, db, info["db"])
             waits = _rows(cur, """select wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
                                   from sys.dm_os_wait_stats where wait_time_ms > 0""")
             counters = _rows(cur, """select rtrim(object_name) as object_name, rtrim(counter_name) as counter_name,
@@ -200,9 +400,6 @@ class SQLServerCollector:
             config = {r["name"]: r["value_in_use"] for r in _rows(
                 cur, "select name, value_in_use from sys.configurations where name in (%s)" % ",".join("?" * len(SETTINGS)),
                 *SETTINGS)}
-            db = _rows(cur, """select compatibility_level, recovery_model_desc, is_read_committed_snapshot_on,
-                                      (select actual_state_desc from sys.database_query_store_options) as query_store
-                               from sys.databases where database_id = db_id()""")[0]
         finally:
             conn.close()
 
@@ -228,8 +425,9 @@ class SQLServerCollector:
             "version": info["version"].splitlines()[0].strip(),
             "captured_at": utcnow().isoformat(),
             "window": window.as_dict(),
-            # wait statistics and performance counters start over when the instance restarts; each statement's counters
-            # start when its plan was cached (its "since"), so an evicted and recompiled plan is a reset of that row only
+            # wait statistics and performance counters start over when the instance restarts; each plan-cache statement's
+            # counters start when its plan was cached (its "since"), so an evicted and recompiled plan is a reset of that
+            # row only. Query Store's statements are the window's own and outlive a restart
             "counters_since": info["sqlserver_start_time"].isoformat() if info["sqlserver_start_time"] else None,
             "load_profile": {
                 **load,
@@ -243,15 +441,13 @@ class SQLServerCollector:
                 "cache_hit_ratio": round((lookups - reads) / lookups, 4) if lookups and reads is not None else None,
                 "page_life_expectancy_s": ple,
             },
-            "top_sql": [{
-                "sql_id": s["sql_id"], "text": redact_sql(s["text"]), "calls": num(s["calls"]),
-                "total_time_ms": num(s["total_time_ms"]),
-                "mean_time_ms": round(num(s["total_time_ms"]) / num(s["calls"]), 3) if num(s["calls"]) else None,
-                "cpu_time_ms": num(s["cpu_time_ms"]), "rows": num(s["rows_"]), "io_blocks_hit": num(s["logical_reads"]),
-                "io_blocks_read": num(s["physical_reads"]), "temp_blocks": num(s["spills"]), "plan_hash": s["plan_hash"],
-                # this plan's counters start when it was cached, not when the instance did: a new value means they started over
-                "since": s["since"].isoformat() if s["since"] else None,
-            } for s in statements],
+            "top_sql": [_top_sql_row(s, source) for s in statements],
+            "top_sql_source": source,
+            # Query Store's figures already are the window's: the comparison takes them as they are instead of subtracting
+            # the baseline's (load profile and waits stay cumulative either way)
+            **({"top_sql_kind": "interval",
+                "top_sql_window": {k: v.isoformat() for k, v in sql_span.items()} if sql_span else None}
+               if source == "query_store" else {}),
             "wait_events": [{"class": wait_class(w["wait_type"]), "event": w["wait_type"], "count": num(w["waiting_tasks_count"]),
                              "time_ms": num(w["wait_time_ms"]), "signal_ms": num(w["signal_wait_time_ms"])} for w in real_waits[:40]],
             "sessions": sessions,
@@ -262,10 +458,12 @@ class SQLServerCollector:
                          "read_committed_snapshot": bool(db["is_read_committed_snapshot_on"]), "query_store": db["query_store"],
                          "cpu_count": num(info["cpu_count"]), "physical_memory_mb": round(num(info["physical_memory_kb"]) / 1024)},
             "findings": [],
-            "notes": [] if statements else ["the plan cache returned no statements (just restarted, or cleared)"],
+            "notes": notes + ([] if statements or source == "query_store" else
+                              ["the plan cache returned no statements (just restarted, or cleared)"]),
         }
         raw = {
-            "dm_exec_query_stats": [dict(s, text=redact_sql(s["text"])) for s in statements],
+            ("query_store_runtime_stats" if source == "query_store" else "dm_exec_query_stats"):
+                [dict(s, text=redact_sql(s["text"])) for s in statements],
             "dm_os_wait_stats": real_waits,
             "dm_os_performance_counters": counters,
             "dm_exec_requests": [dict(r, text=redact_sql(r["text"])) for r in requests],

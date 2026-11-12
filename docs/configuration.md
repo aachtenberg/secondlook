@@ -90,12 +90,13 @@ good starting point.
 **SQL Server** (2016 and later, on Windows or Linux, and Azure SQL Managed Instance; spills from 2016 SP2 and 2017
 CU3) uses Microsoft's
 `mssql-python` driver, an optional extra: `uv sync --extra sqlserver`. It needs no separate ODBC install. dbtriage
-reads the plan cache (`sys.dm_exec_query_stats` for the database it connects to, one row per query hash and plan, so
-a new plan shows as a plan change),
+reads top SQL for the database it connects to from Query Store when it is on, else from the plan cache
+(`sys.dm_exec_query_stats`), one row per query hash and plan either way, so a new plan shows as a plan change (see
+[Query Store or the plan cache](#sql-server-query-store-or-the-plan-cache)). It also reads
 wait statistics (idle and background waits left out), active and blocked requests, performance counters and the
 server configuration. These counters are cumulative, like Postgres and MySQL, so two snapshots are compared as an
-interval. A restart of the instance starts them over, and a statement's own counters start over when its plan leaves the
-cache and comes back, which the comparison sees too.
+interval. A restart of the instance starts them over, and a plan-cache statement's own counters start over when its
+plan leaves the cache and comes back, which the comparison sees too.
 
 - The login needs `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 (`VIEW SERVER STATE` on earlier versions) and,
   in the database it connects to, `VIEW DATABASE STATE` and `VIEW DEFINITION`. The last only lets it see table and
@@ -123,6 +124,47 @@ keep working, and a run for that database stops with a clear message until the v
 
 Relative paths in `targets.toml` (a `file://./data` store, `changes_file`, a change feed's `path`, `logo`,
 `custom_css`, `templates_dir`) are relative to `targets.toml` itself, not to the directory you start dbtriage from.
+
+## SQL Server: Query Store or the plan cache
+
+SQL Server keeps statement statistics in two places, and each database picks one for its top SQL:
+
+```toml
+[targets.prod-sql]
+engine = "sqlserver"
+top_sql_source = "auto"              # auto | query_store | plan_cache
+```
+
+- **Query Store** keeps runtime statistics per interval inside the database. It still has a statement after its plan
+  left the cache, and it outlives a restart. Its figures already are the window's, so the comparison takes them as
+  they are and subtracts nothing; the load profile and waits beside them stay cumulative and are compared as an
+  interval as before. From SQL Server 2017 each statement also carries its wait time by Query Store's wait category.
+- **The plan cache** (`sys.dm_exec_query_stats`) is cumulative since each plan was cached, and forgets a statement
+  when its plan is evicted.
+
+`auto`, the default, reads Query Store when its actual state is `READ_WRITE` or `READ_ONLY` and it holds runtime
+statistics for intervals overlapping the window; otherwise the plan cache. `query_store` reads only Query Store and
+fails the snapshot when it is off. `plan_cache` never looks at Query Store. Every snapshot records the source as
+`top_sql_source` in `summary.json`, and says which and why in its notes (`summary.json` and `manifest.json`). The
+statement names are the same from both sources (`sql_id` is the query hash, `plan_hash` the query plan hash), so a
+finding, its ledger entry and the fleet digest's statement link carry across a change of source. A snapshot whose
+baseline came from Query Store but which itself fell back to the plan cache counts the plan cache's figures whole,
+as after a restart, and claims no plan change.
+
+**An interval is often longer than the window.** Query Store adds up by `INTERVAL_LENGTH_MINUTES` (60 by default)
+and an interval cannot be split, so a window that starts inside an interval reads all of it. The span the statements
+actually cover is stored as `top_sql_window`, the snapshot notes it when it differs from the window, and the
+comparison works out per-second statement rates over that span rather than the window. A shorter interval gives
+tighter windows; changing it is for the database's owner, not for dbtriage. Query Store's default capture mode
+(`AUTO`) also leaves out statements too cheap and rare to matter.
+
+**Permission.** Reading Query Store needs `VIEW DATABASE STATE` in the database, which the login already needs for
+the plan cache and index usage:
+
+```sql
+USE app;
+GRANT VIEW DATABASE STATE TO dbtriage;
+```
 
 ## The change feed
 

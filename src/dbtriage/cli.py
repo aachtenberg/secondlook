@@ -71,6 +71,7 @@ def collect(cfg: Config, store: Storage, req: TriageRequest) -> str:
         "changes_sources": ([str(spec["source"])] if spec else []) + (["webhook"] if any(i.get("source") == "webhook" for i in feed) else []),
         **({"correlate_minutes": changes.correlate_minutes(spec)} if "changes.json" in files else {}),
         **({"db_snapshot": db_snapshot} if db_snapshot else {}),
+        **({"notes": snap.summary["notes"]} if snap.summary.get("notes") else {}),  # e.g. where SQL Server's top SQL came from
     })
     return sid
 

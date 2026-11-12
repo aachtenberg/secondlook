@@ -371,7 +371,5 @@ database inside the container, so a recreate starts it over too, AWR history inc
 
 ## What's next
 
-- Query Store for SQL Server: interval statistics for the window, instead of the plan cache, which forgets
-  statements when plans are evicted.
 - Statspack, for Oracle Standard Edition. Taking Statspack snapshots can already plug in through the
   `dbtriage.db_snapshot` entry point ([configuration](configuration.md#letting-dbtriage-take-snapshots-on-the-database)); reading them is the missing part.

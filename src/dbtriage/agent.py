@@ -193,7 +193,9 @@ class TriageAgent:
                 s = agent._summary(sid)
                 for q in s.get("top_sql", []):
                     if str(q.get("sql_id")) == sql_id:
-                        rows.append({"snapshot": sid, "captured_at": s["captured_at"], "metrics_kind": s.get("metrics_kind", "cumulative"),
+                        # SQL Server's Query Store rows are the window's own even though the snapshot's counters are cumulative
+                        kind = s.get("top_sql_kind") or s.get("metrics_kind", "cumulative")
+                        rows.append({"snapshot": sid, "captured_at": s["captured_at"], "metrics_kind": kind,
                                      **{k: q.get(k) for k in ("calls", "total_time_ms", "mean_time_ms", "cpu_time_ms", "rows", "io_blocks_read", "plan_hash")}})
             return json.dumps(rows or f"sql_id {sql_id} not in the top SQL of the last {len(ids)} snapshots")
 

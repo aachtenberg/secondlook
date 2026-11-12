@@ -121,8 +121,9 @@ def measures(iv: dict) -> dict[str, float]:
             out[k] = float(v)
         elif elapsed:
             out[k] = round(v / elapsed, 6)
-    if elapsed:
-        out["sql_time_ms"] = round(sum((s.get("total_time_ms") or 0) for s in (iv.get("sql") or {}).values()) / elapsed, 6)
+    sql_elapsed = iv.get("sql_elapsed_s") or elapsed  # Query Store's statements cover their own intervals
+    if sql_elapsed:
+        out["sql_time_ms"] = round(sum((s.get("total_time_ms") or 0) for s in (iv.get("sql") or {}).values()) / sql_elapsed, 6)
     for cls, c in ((iv.get("waits") or {}).get("classes") or {}).items():
         out[f"wait_share:{cls}"] = c.get("share", 0)
     return out

@@ -194,6 +194,10 @@ dsn_env = "EXAMPLE_PG_DSN"             # preferred: the connection string lives 
 #                                      or a connection string: Server=tcp:host,1433;Database=db;Authentication=...;Encrypt=yes
 # connect_timeout_s = 10               longest the login may take
 # call_timeout_ms = 120000             longest any single query may take (also Oracle)
+# top_sql_source = "auto"              where top SQL comes from: auto | query_store | plan_cache. auto reads Query Store
+#                                      when it is READ_WRITE or READ_ONLY and holds runtime statistics for the window,
+#                                      else the plan cache, and the snapshot notes which and why. query_store fails the
+#                                      snapshot when Query Store is off. Needs VIEW DATABASE STATE (docs/configuration.md)
 
 # [targets.example-oracle]
 # engine = "oracle"
