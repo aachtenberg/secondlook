@@ -13,6 +13,7 @@ from typing import Any
 from anthropic import beta_tool  # used only to derive JSON schemas from the docstrings below
 from pydantic import BaseModel, Field
 
+from dbtriage import changes
 from dbtriage import compare as cmp
 from dbtriage.findings import KINDS, SUBJECT_KEYS, known_kind, subject_of
 from dbtriage.llm import Backend, ToolSpec
@@ -66,30 +67,25 @@ class TriageAgent:
         s["id"] = snapshot_id
         return s
 
+    def _stored_changes(self, snapshot_id: str) -> list[dict] | None:
+        """The change feed captured with the snapshot (changes.json), or None when the snapshot has none."""
+        key = f"{snapshot_id}/changes.json"
+        return self.storage.get_json(key) if self.storage.exists(key) else None
+
     def _changes(self, snapshot_id: str, hours: int) -> list[dict]:
-        """Deploys / parameter changes / incidents. Prototype source: an optional changes.json
-        next to the config (a list of {time, kind, description, link}). Swap in GitLab/CI later."""
+        """Deploys, parameter changes, jobs and failovers in the hours before the capture, from the feed stored with
+        the snapshot. Snapshots from before the feed was stored carry only a changes_file path: those are still read
+        from disk, so an old snapshot's review does not lose what it had."""
         manifest = self.storage.get_json(f"{snapshot_id}/manifest.json")
-        path = manifest.get("changes_file")
-        if not path:
-            return []
         from datetime import datetime, timedelta
-        from pathlib import Path
 
         end = datetime.fromisoformat(manifest["captured_at"])
-        start = end - timedelta(hours=hours)
-        items = json.loads(Path(path).read_text())
-        out = []
-        for it in items:
-            try:
-                t = datetime.fromisoformat(it["time"])
-            except (KeyError, ValueError):
-                continue
-            if t.tzinfo is None:
-                t = t.replace(tzinfo=end.tzinfo)
-            if start <= t <= end:
-                out.append(it)
-        return sorted(out, key=lambda i: i["time"])
+        items = self._stored_changes(snapshot_id)
+        if items is None:
+            if not manifest.get("changes_file"):
+                return []
+            items = changes.read_file(manifest["changes_file"])
+        return changes.within(items, end - timedelta(hours=hours), end)
 
     # ----------------------------------------------------------------- tools
     def _tools(self, engine: str, target: str):
@@ -141,7 +137,10 @@ class TriageAgent:
             """
             cur, base = agent._summary(snapshot_id), agent._summary(baseline_id)
             before = agent.storage.previous(engine, target, baseline_id)
-            return json.dumps(cmp.compare(cur, base, agent._summary(before) if before else None), default=str)
+            margin = agent.storage.get_json(f"{snapshot_id}/manifest.json").get("correlate_minutes")
+            margin = cmp.CORRELATE_MINUTES if margin in (None, "") else int(margin)  # an explicit 0 is a choice, not a blank
+            return json.dumps(cmp.compare(cur, base, agent._summary(before) if before else None,
+                                          changes=agent._stored_changes(snapshot_id), correlate_minutes=margin), default=str)
 
         @beta_tool
         def get_sql_history(sql_id: str, limit: int = 12) -> str:
@@ -305,11 +304,12 @@ def rule_based_triage(comparison: dict) -> dict:
         return {"severity": "info", "title": "no significant change", "summary": "No heuristic findings in this window.",
                 "checked": "load profile, top SQL, wait classes, sessions, tables against the previous snapshot",
                 "confidence": "medium", "findings": [], "source": "rules"}
+    window_start = (comparison.get("current") or {}).get("start")
     findings = [{
         "severity": f["severity"] if f["severity"] in ("high", "medium", "low") else "low",
         "kind": f["kind"], "subject": subject_of(f), "where": _where(f), "summary": f["title"][:120],
         "impact": _impact(f["kind"]),
-        "evidence": ([f["detail"]] if f.get("detail") else []) + _evidence_lines(f.get("evidence") or {}),
+        "evidence": ([f["detail"]] if f.get("detail") else []) + _evidence_lines(f.get("evidence") or {}, window_start=window_start),
         "fix": _advice(f),
     } for f in found[:5]]
     return {
@@ -320,13 +320,31 @@ def rule_based_triage(comparison: dict) -> dict:
     }
 
 
-def _evidence_lines(evidence: dict, limit: int = 3) -> list[str]:
-    """Three evidence lines, but a settings change in the same window always makes the cut:
+def _evidence_lines(evidence: dict, limit: int = 3, window_start: str | None = None) -> list[str]:
+    """Three evidence lines, but a settings change or a deploy in the same window always makes the cut:
     that correlation is the point of the finding, and it would otherwise be the fourth item."""
-    items = [(k, v) for k, v in evidence.items() if k != "sql_id"]
+    items = [(k, v) for k, v in evidence.items() if k not in ("sql_id", "changes")]
     keep = [kv for kv in items if kv[0] == "settings_changed"]
     rest = [kv for kv in items if kv[0] != "settings_changed"][:max(limit - len(keep), 0)]
-    return [f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in rest + keep]
+    return [f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in rest + keep] + _change_lines(evidence.get("changes"), window_start)
+
+
+def _change_lines(found: list[dict] | None, window_start: str | None, limit: int = 3) -> list[str]:
+    """One sentence per correlated change: "deploy billing@1.4.2 to production landed 6 minutes before the window"."""
+    from datetime import datetime
+
+    out = []
+    for c in (found or [])[:limit]:
+        when = ""
+        try:
+            t, s = datetime.fromisoformat(c["time"]), datetime.fromisoformat(window_start)
+            mins = round((s - t).total_seconds() / 60)
+            when = (f" {mins} minute{'s' if mins != 1 else ''} before the window" if mins > 0
+                    else f" {-mins} minute{'s' if mins != -1 else ''} into the window" if mins < 0 else " at the start of the window")
+        except (KeyError, TypeError, ValueError):
+            when = f" at {c.get('time')}" if c.get("time") else ""
+        out.append(f"{c.get('kind', 'change')} {c.get('description', '')} landed{when}")
+    return out
 
 
 def _where(f: dict) -> str:

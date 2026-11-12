@@ -150,7 +150,8 @@ engine = "postgres"                    # postgres | mysql | oracle | sqlserver
 dsn_env = "EXAMPLE_PG_DSN"             # preferred: the connection string lives in your secret store
 # dsn = "postgresql://dbtriage@db.example.com:5432/app"   or inline (stored, masked in the web view)
 # top_n = 25                           how many statements to keep per snapshot
-# changes_file = "changes/example.json"   recent deploys and parameter changes, shown to the reviewer (relative to this file)
+# changes_file = "changes/example.json"   recent deploys and parameter changes, shown to the reviewer (relative to this file);
+#                                      the short form of [targets.example-postgres.changes] with source = "file"
 # notes = "Batch window 02:00-04:00. Owned by the payments team."   context the reviewer reads with every review
 # links = [{label = "Grafana", url = "https://grafana.example.com/d/abc"}]   shown next to the database
 # baseline_policy = "previous"         previous | same-time-yesterday | same-time-last-week | pinned
@@ -158,6 +159,19 @@ dsn_env = "EXAMPLE_PG_DSN"             # preferred: the connection string lives 
 # schedule = "0 * * * *"               cron in the server's local time, or "every 15m", "every 2h", "hourly", "daily"
 # schedule_window = 60                 minutes each scheduled run looks back
 # schedule_paused = false
+
+# [targets.example-postgres.changes]  the change feed: deploys read when a snapshot is taken and stored with it, so a
+#                                      regression's evidence can say which deploy landed just before it (docs/configuration.md)
+# source = "github"                    file | github | gitlab
+# path = "changes/example.json"        file: a JSON list of {time, kind, description, link} (relative to this file)
+# repo = "acme/billing"                github: owner/name, read with GET /repos/{repo}/deployments and their statuses
+# project = "acme/billing"             gitlab: the project path or numeric id, read with GET /projects/{id}/deployments
+# environment = "production"           only this environment's deployments (blank: all of them)
+# token_env = "GITHUB_TOKEN"           the environment variable holding the forge token (blank: anonymous, public repos only)
+# base_url = "https://api.github.com"  github: another API host (GitHub Enterprise); gitlab: your instance (default https://gitlab.com)
+# releases = false                     github: when a repository records no deployments, read its releases instead
+# lookback_hours = 48                  how far before the snapshot's window the feed is read
+# correlate_minutes = 30               a change this long before the window still counts as beside a regression in it
 
 # [targets.example-mysql]
 # engine = "mysql"                     MySQL 8, or MariaDB with performance_schema = ON

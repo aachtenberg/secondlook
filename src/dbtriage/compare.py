@@ -16,6 +16,9 @@ GAUGES = {"sessions_total", "sessions_active", "sessions_blocked", "cache_hit_ra
           "elapsed_s", "avg_active_sessions", "page_life_expectancy_s"}  # SQL Server's page life expectancy is a level
 
 
+CORRELATE_MINUTES = 30  # a change this long before the window still counts as beside it
+
+
 def _is_gauge(name: str) -> bool:
     return name in GAUGES or name.endswith("_ratio")
 
@@ -210,10 +213,11 @@ def _pct(before, after):
     return round((after - before) / abs(before) * 100, 1)
 
 
-def diff(ref: dict | None, cur: dict) -> dict:
+def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correlate_minutes: int = CORRELATE_MINUTES) -> dict:
     """Compare the current interval with a reference interval (same hour last week,
     the previous run, the pre-deploy snapshot ...). ref may be None: then only the
-    current interval is described and findings are 'what is heavy now'."""
+    current interval is described and findings are 'what is heavy now'.
+    `changes` is the snapshot's stored change feed; the ones in or just before the window are evidence."""
     out: dict[str, Any] = {
         "current": {"snapshot": cur.get("snapshot"), "start": cur["start"], "end": cur["end"], "elapsed_s": cur["elapsed_s"],
                     "counters_reset": cur.get("counters_reset", False)},
@@ -222,7 +226,7 @@ def diff(ref: dict | None, cur: dict) -> dict:
         "load_profile": {}, "sql": {"new": [], "gone": [], "changed": [], "top": []},
         "waits": {"current": cur["waits"]["classes"], "reference": ref["waits"]["classes"] if ref else None, "shifts": []},
         "tables": [], "sessions": cur.get("sessions", []), "engine_findings": cur.get("findings", []),
-        "settings_changed": [], "findings": [],
+        "settings_changed": [], "changes": [], "findings": [],
     }
     findings: list[dict] = out["findings"]
     ec, er = cur["elapsed_s"], (ref or {}).get("elapsed_s")
@@ -387,6 +391,16 @@ def diff(ref: dict | None, cur: dict) -> dict:
             if f["kind"] in CORRELATED_KINDS:
                 f["evidence"]["settings_changed"] = names
 
+    # the change feed: a deploy inside the window, or just before it, is written into the same findings as the
+    # settings change, so the review can say "plan changed; billing@1.4.2 landed 6 minutes earlier" with both ids
+    near = changes_near(changes, cur.get("start"), cur["end"], cur.get("elapsed_s"), correlate_minutes)
+    out["changes"] = near
+    if near:
+        brief = [{"time": c["time"], "kind": c["kind"], "description": c["description"]} for c in near]
+        for f in findings:
+            if f["kind"] in CORRELATED_KINDS or f["kind"] == "sql_new":  # a new statement is what a deploy brings
+                f["evidence"]["changes"] = brief
+
     findings.sort(key=lambda f: -f["score"])
     out["severity"] = findings[0]["severity"] if findings else "info"
     return out
@@ -394,6 +408,34 @@ def diff(ref: dict | None, cur: dict) -> dict:
 
 SETTINGS_FINDINGS_CAP = 5  # one finding per changed parameter up to here, then a single "N more" line
 CORRELATED_KINDS = ("sql_regressed", "plan_change", "wait_shift")  # the regressions a parameter change can explain
+CHANGE_KINDS = ("deploy", "parameter", "job", "failover")  # feed kinds that are evidence; "other" holds notes and feed errors
+
+
+def changes_near(changes: list[dict] | None, start: str | None, end: str, elapsed_s: float | None, margin_minutes: int) -> list[dict]:
+    """Feed items dated inside the window, or up to margin_minutes before it, oldest first. The window's start is the
+    interval's start, or elapsed_s before its end when the snapshot does not carry one (an AWR window without a begin)."""
+    if not changes:
+        return []
+    from datetime import timedelta
+
+    t_end = _ts(end)
+    t_start = _ts(start) if start else t_end - timedelta(seconds=elapsed_s or 0)
+    if t_start.tzinfo is None:
+        t_start = t_start.replace(tzinfo=t_end.tzinfo)
+    lo = t_start - timedelta(minutes=margin_minutes)
+    out = []
+    for c in changes:
+        if not isinstance(c, dict) or c.get("kind") not in CHANGE_KINDS:
+            continue
+        try:
+            t = _ts(c["time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=t_end.tzinfo)
+        if lo <= t <= t_end:
+            out.append(c)
+    return sorted(out, key=lambda c: c["time"])
 
 
 def settings_changed(before: dict | None, after: dict | None) -> list[dict]:
@@ -422,16 +464,18 @@ def _f(score: float, kind: str, title: str, detail: str, evidence: dict) -> dict
     return {"score": score, "severity": sev, "kind": kind, "title": title, "detail": detail or "", "evidence": evidence}
 
 
-def compare(current: dict, baseline: dict | None, before_baseline: dict | None = None) -> dict:
+def compare(current: dict, baseline: dict | None, before_baseline: dict | None = None, changes: list[dict] | None = None,
+            correlate_minutes: int = CORRELATE_MINUTES) -> dict:
     """Entry point used by the CLI and the agent tool.
 
     cumulative engines: current interval = baseline->current, reference = before_baseline->baseline
     interval engines:   current interval = current, reference = baseline
+    `changes` is the current snapshot's stored change feed (changes.json), when it has one.
     """
     if current.get("metrics_kind") == "interval":
-        return diff(interval_of(baseline) if baseline else None, interval_of(current))
+        return diff(interval_of(baseline) if baseline else None, interval_of(current), changes, correlate_minutes)
     if baseline is None:
         raise ValueError("cumulative engine needs a baseline snapshot to form an interval")
     cur = interval_between(baseline, current)
     ref = interval_between(before_baseline, baseline) if before_baseline else None
-    return diff(ref, cur)
+    return diff(ref, cur, changes, correlate_minutes)

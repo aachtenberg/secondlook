@@ -376,11 +376,20 @@ def test_finding_cell_status_and_compare_search(tmp_path):
     assert "293bbb76…905968b" in finding_cell("New heavy SQL 293bbb76350e7dfa6f6db911f2905968b") and "293bbb76350e7dfa6f6db911f2905968b</span>" not in finding_cell("New heavy SQL 293bbb76350e7dfa6f6db911f2905968b")
     assert finding_cell(None) == "<span class='mut'>not triaged</span>" and "<script" not in finding_cell("<script>x</script> 10%")
     assert status_of("info") == "<span class='status info'><i class='dot'></i>healthy</span>" and "incident" in status_of("high") and "degraded" in status_of("medium")
-    app = App(config(tmp_path), store(tmp_path), False, None)
+    st = store(tmp_path)
+    st.put_json(f"{SID}/changes.json", [  # the window is the minute to 10:00; a deploy 10 minutes before it sits beside the settings change
+        {"time": "2026-11-05T09:50:00+00:00", "kind": "deploy", "description": "billing@1.4.2 to production", "link": "https://github.com/acme/billing/commit/abc", "source": "github"},
+        {"time": "2026-11-05T09:59:00+00:00", "kind": "other", "description": "github: HTTP Error 401", "link": None, "source": "github", "error": True},
+        {"time": "2026-11-05T08:00:00+00:00", "kind": "deploy", "description": "<early>", "link": "javascript:alert(1)", "source": "file"}])
+    app = App(config(tmp_path), st, False, None)
     page = app.compare_page("demo", None, None).decode()
     assert "<h1>Compare</h1>" in page and page.count("<option value='postgres/demo/2026-11-05/20261105T100000Z'") == 2 and "selected>2026-11-05 10:00:00" in page
     assert "Heuristic findings" in page and "<figure class='chart'>" in page and "Baseline</span>" in page
     assert "<h2>Settings changed</h2>" in page and "<td><code>work_mem</code></td><td class=mono>4MB</td><td class=mono>64MB</td>" in page and "<code>jit</code>" not in page
+    assert "<h2>Changes</h2><span class='mut'>1</span>" in page and "<td class=mono>2026-11-05 09:50:00</td><td>deploy</td>" in page
+    assert "<a href='https://github.com/acme/billing/commit/abc' rel='noopener' target='_blank'>billing@1.4.2 to production</a>" in page
+    assert "HTTP Error 401" not in page and "early" not in page  # a feed error and an old item are not changes beside this window
+    assert "changes.json" in app.snapshot_detail(SID)["files"] and f"href='/f/{SID}/changes.json'" in app.snapshot(SID).decode()  # the file drawer offers it
     assert "pick two different snapshots" in app.compare_page("demo", SID, SID).decode()
     s = app.search("dem").decode()
     assert "<a class='btn' href='/t/demo'>demo</a>" in s and "Nothing matched" not in s

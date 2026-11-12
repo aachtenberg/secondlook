@@ -217,3 +217,59 @@ def test_silent_model_and_missing_key_fall_back_to_the_rules(tmp_path, monkeypat
     monkeypatch.setattr(llm, "make_backend", lambda c: (_ for _ in ()).throw(SystemExit("[agent] GROQ_API_KEY is not set")))
     r, _ = triage(cfg, st, sid, base, "adhoc", True)
     assert r["source"] == "rules" and "GROQ_API_KEY is not set" in r["agent_error"]
+
+
+def test_changes_come_from_the_store_and_legacy_snapshots_from_the_file(tmp_path):
+    """The feed stored with the snapshot wins; a snapshot from before the feed was stored still reads its changes_file."""
+    st = _store(tmp_path)
+    ids = st.list_snapshots("postgres", "demo")
+    st.put_json(f"{ids[-1]}/changes.json", [
+        {"time": "2026-11-05T10:04:00+00:00", "kind": "deploy", "description": "billing@1.4.2 to production", "link": None, "source": "github"},
+        {"time": "2026-11-05T10:19:00+00:00", "kind": "other", "description": "github: HTTP Error 401: Unauthorized", "link": None, "source": "github", "error": True},
+        {"time": "2026-11-02T10:00:00+00:00", "kind": "deploy", "description": "three days ago", "link": None, "source": "github"}])
+    m = st.get_json(f"{ids[-1]}/manifest.json")
+    st.put_json(f"{ids[-1]}/manifest.json", {**m, "changes_sources": ["github"], "correlate_minutes": 15})
+    agent = TriageAgent(st, backend=None)
+    tools = {t.name: t for t in agent._tools("postgres", "demo")}
+
+    ch = json.loads(tools["get_recent_changes"].call({"snapshot_id": ids[-1], "hours": 48}))
+    assert [c["description"] for c in ch] == ["billing@1.4.2 to production", "github: HTTP Error 401: Unauthorized"]  # not the file's "v2"
+    assert ch[1]["error"] is True
+    assert [c["description"] for c in json.loads(tools["get_recent_changes"].call({"snapshot_id": ids[-1], "hours": 100}))][0] == "three days ago"
+    legacy = json.loads(tools["get_recent_changes"].call({"snapshot_id": ids[-2], "hours": 48}))  # manifest has changes_file, no changes.json
+    assert [c["description"] for c in legacy] == ["v2"] and legacy[0]["source"] == "file"
+    st.put_json(f"{ids[0]}/manifest.json", {k: v for k, v in st.get_json(f"{ids[0]}/manifest.json").items() if k != "changes_file"})
+    assert json.loads(tools["get_recent_changes"].call({"snapshot_id": ids[0], "hours": 48})) == []
+
+    cmp = json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))  # window 10:10-10:20
+    reg = next(f for f in cmp["findings"] if f["kind"] == "sql_regressed")
+    assert reg["evidence"]["changes"] == [{"time": "2026-11-05T10:04:00+00:00", "kind": "deploy", "description": "billing@1.4.2 to production"}]
+    assert cmp["changes"][0]["source"] == "github" and len(cmp["changes"]) == 1  # the feed error is not a change
+    st.put_json(f"{ids[-1]}/manifest.json", {**m, "correlate_minutes": 5})  # the margin is the one recorded at capture
+    cmp5 = json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))
+    assert cmp5["changes"] == [] and "changes" not in next(f for f in cmp5["findings"] if f["kind"] == "sql_regressed")["evidence"]
+    st.put_json(f"{ids[-1]}/manifest.json", {**m, "correlate_minutes": 0})  # an explicit 0 is "inside the window only", not the 30-minute default
+    cmp0 = json.loads(tools["compare_snapshots"].call({"snapshot_id": ids[-1], "baseline_id": ids[-2]}))
+    assert cmp0["changes"] == []
+
+    rules = rule_based_triage(cmp)
+    reg = next(f for f in rules["findings"] if f["kind"] == "sql_regressed")
+    assert reg["evidence"][-1] == "deploy billing@1.4.2 to production landed 6 minutes before the window"
+    assert not any(e.startswith("changes:") for e in reg["evidence"])
+
+
+def test_change_lines_wording():
+    from dbtriage.agent import _change_lines, _evidence_lines
+
+    start = "2026-11-05T10:10:00+00:00"
+    found = [{"time": "2026-11-05T10:09:00+00:00", "kind": "deploy", "description": "a@1"},
+             {"time": "2026-11-05T10:10:00+00:00", "kind": "job", "description": "stats"},
+             {"time": "2026-11-05T10:12:00+00:00", "kind": "failover", "description": "to replica 2"},
+             {"time": "2026-11-05T10:13:00+00:00", "kind": "deploy", "description": "fourth"}]
+    assert _change_lines(found, start) == ["deploy a@1 landed 1 minute before the window", "job stats landed at the start of the window",
+                                           "failover to replica 2 landed 2 minutes into the window"]
+    assert _change_lines([{"kind": "deploy", "description": "undated"}], start) == ["deploy undated landed"]
+    assert _change_lines(found[:1], None) == ["deploy a@1 landed at 2026-11-05T10:09:00+00:00"]
+    ev = {"sql_id": "q1", "a": 1, "b": 2, "c": 3, "d": 4, "settings_changed": ["jit"], "changes": found[:1]}
+    lines = _evidence_lines(ev, window_start=start)  # three plain lines, then the settings change, then the deploy: both always make the cut
+    assert lines[:2] == ["a: 1", "b: 2"] and lines[2:] == ['settings_changed: ["jit"]', "deploy a@1 landed 1 minute before the window"]

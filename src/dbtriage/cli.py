@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from dbtriage import changes
 from dbtriage import compare as cmp
 from dbtriage import dbsnap
 from dbtriage.collectors import get_collector
@@ -49,15 +50,34 @@ def collect(cfg: Config, store: Storage, req: TriageRequest) -> str:
     store.put_json(f"{sid}/raw.json", snap.raw)
     for name, text in snap.reports.items():
         store.put_text(f"{sid}/{name}", text)
+    files = ["summary.json", "raw.json"]
+    spec = changes.spec_of(target)
+    if spec:  # the feed is read now and kept with the snapshot, so the review never reads outside the store
+        try:
+            store.put_json(f"{sid}/changes.json", changes.fetch(target, window.start - changes.lookback(spec), captured, cfg.base_dir))
+            files.append("changes.json")
+        except Exception as exc:  # noqa: BLE001 - fetch never raises; a store that cannot take the file must not lose the capture
+            print(f"{target.name}: could not store changes.json ({type(exc).__name__}: {str(exc)[:200]})", file=sys.stderr)
     store.put_json(f"{sid}/manifest.json", {
         "id": sid, "engine": target.engine, "target": target.name, "captured_at": snap.summary["captured_at"],
         "window": window.as_dict(), "metrics_kind": snap.summary.get("metrics_kind", "cumulative"),
         "trigger": {"source": req.source, "reason": req.reason, **({"actor": req.actor} if req.actor else {})},
-        "files": ["summary.json", "raw.json"], "reports": sorted(snap.reports),
+        "files": files, "reports": sorted(snap.reports),
         "changes_file": target.changes_file,
+        "changes_sources": [str(spec["source"])] if spec else [],
+        **({"correlate_minutes": changes.correlate_minutes(spec)} if spec else {}),
         **({"db_snapshot": db_snapshot} if db_snapshot else {}),
     })
     return sid
+
+
+def stored_changes(store: Storage, sid: str) -> tuple[list[dict] | None, int]:
+    """The change feed kept with a snapshot and how close a change must sit to its window to count, for compare()."""
+    manifest = store.get_json(f"{sid}/manifest.json")
+    if not store.exists(f"{sid}/changes.json"):
+        return None, changes.DEFAULT_CORRELATE_MINUTES
+    margin = manifest.get("correlate_minutes")  # an explicit 0 ("inside the window only") must survive, so no `or`
+    return store.get_json(f"{sid}/changes.json"), changes.DEFAULT_CORRELATE_MINUTES if margin in (None, "") else int(margin)
 
 
 def summary_of(store: Storage, sid: str) -> dict:
@@ -79,13 +99,14 @@ def compare_ids(store: Storage, engine: str, target: str, sid: str, baseline: st
     """compare() for a snapshot id, resolving the baseline and the one before it. None if nothing to compare.
     `how` = (policy, reason) is recorded under reference so the review can say why this baseline."""
     cur = summary_of(store, sid)
+    feed, margin = stored_changes(store, sid)
     if cur.get("metrics_kind") == "interval":
-        out = cmp.compare(cur, summary_of(store, baseline) if baseline else None)
+        out = cmp.compare(cur, summary_of(store, baseline) if baseline else None, changes=feed, correlate_minutes=margin)
     elif not baseline:
         return None
     else:
         before = store.previous(engine, target, baseline)
-        out = cmp.compare(cur, summary_of(store, baseline), summary_of(store, before) if before else None)
+        out = cmp.compare(cur, summary_of(store, baseline), summary_of(store, before) if before else None, changes=feed, correlate_minutes=margin)
     if out.get("reference") is not None and how:
         out["reference"]["policy"], out["reference"]["reason"] = how
     return out

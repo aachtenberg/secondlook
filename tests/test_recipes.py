@@ -59,7 +59,7 @@ def known_env() -> set[str]:
 def mentioned(text: str, key: str) -> bool:
     """`key = ...` or a `[section.key]` table header, commented out or not."""
     k = re.escape(key)
-    return re.search(rf"^\s*#?\s*({k}\s*=|\[[a-z_.]*\.{k}\])", text, re.M) is not None
+    return re.search(rf"^\s*#?\s*({k}\s*=|\[[a-z_.-]*\.{k}\])", text, re.M) is not None  # a target's name may carry '-'
 
 
 # --------------------------------------------------------------------------- the references are complete
