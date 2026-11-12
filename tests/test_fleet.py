@@ -208,6 +208,31 @@ def test_a_store_blip_lists_the_target_as_not_read_and_still_counts_it(tmp_path)
     assert md.rstrip().endswith("Could not be read:\n- pg-replica: connection reset")
 
 
+def test_a_degraded_store_is_not_quiet(tmp_path):
+    """ResilientStorage answers from its spool while the store is down: a ledger there loads, the listing is the
+    spool's alone, and nothing raises. The digest must say the target was not read, not that it was quiet; and a
+    changes.json the spool lacks is read, not tested for, so the outage surfaces instead of hiding a deploy."""
+    from dbtriage.storage import ResilientStorage
+
+    st, cfg = fleet_store(tmp_path)
+    spool = LocalStorage(tmp_path / "spool")
+    rs = ResilientStorage(_Down(tmp_path / "data"), spool)
+    when = UNTIL - timedelta(days=1)
+    write_ledger(spool, "mysql", "mysql-quiet", [])
+    snapshot(spool, "mysql", "mysql-quiet", when, [], [(BILLING, UNTIL - timedelta(days=2))])  # wholly in the spool
+    write_ledger(spool, "postgres", "pg-replica", [])
+    snapshot(spool, "postgres", "pg-replica", when, [])  # its changes.json, if it has one, is on the store alone
+    dg = fleet.digest(cfg, rs, SINCE, UNTIL)
+    t = dg["targets"]["mysql-quiet"]
+    assert t["error"] == "store degraded: store down" and t["snapshots"] == 1 and t["deploys"] == [BILLING]  # read, and flagged
+    assert dg["targets"]["pg-replica"]["error"] == "store down" and dg["targets"]["pg-prod"]["error"] == "store down"
+    assert dg["quiet"] == [] and dg["unreviewed"] == [] and dg["deploys"] == []
+    md = fleet.render(dg)
+    assert "No significant change" not in md and "No snapshot" not in md
+    assert "Could not be read:\n" in md and "- mysql-quiet: store degraded: store down" in md and "- pg-replica: store down" in md
+    assert "5 databases" in md  # the fleet is still five
+
+
 def test_parse_since():
     assert fleet.parse_since("7d", UNTIL) == SINCE and fleet.parse_since("24h", UNTIL) == UNTIL - timedelta(hours=24)
     assert fleet.parse_since("90m", UNTIL) == UNTIL - timedelta(minutes=90)
@@ -396,11 +421,46 @@ def test_a_failed_send_leaves_the_clock_alone(tmp_path, monkeypatch):
     assert fleet.last_sent(st) == later
 
 
+def test_an_unknown_channel_is_a_failed_send(tmp_path, monkeypatch):
+    """A misspelt channel sent nothing; that must not read like a week the gate held back, which would move the clock."""
+    st, cfg = fleet_store(tmp_path)
+    _digest_cfg(cfg, ["pager"])
+    dig = fleet.Digest(lambda: cfg, st)
+    assert dig.fire(SLOT, NOW, "schedule") == (False, "no channel took it (pager failed); not sent")
+    assert fleet.last_sent(st) is None and "claimed_at" not in json.loads(st.get(fleet.DIGEST_KEY))  # the claim was given back
+    failed = []
+    assert d.deliver(cfg.delivery, fleet.as_triage(fleet.digest(cfg, st, SINCE, UNTIL)), "x", ["pager"], failed=failed) == [] and failed == ["pager"]
+    # no channel at all is not a send either
+    cfg.delivery = {"channels": [], "digest": {"schedule": "weekly"}}
+    assert dig.fire(SLOT, NOW, "schedule") == (False, "no channel took it (none configured); not sent")
+    assert fleet.last_sent(st) is None
+    # a known channel the gate held back, and nothing else: the week had nothing to say, and the clock moves
+    monkeypatch.setitem(d.CHANNELS, "fake", lambda c, t, md: None)
+    cfg.delivery = {"channels": ["stdout"], "fake": {"min_severity": "high"}, "digest": {"schedule": "weekly", "channels": ["fake"]}}
+    for n in cfg.targets:
+        write_ledger(st, cfg.targets[n].engine, n, [])
+    assert dig.fire(SLOT, NOW, "schedule") == (True, "sent") and fleet.last_sent(st) == NOW
+
+
 class _Down(LocalStorage):
+    """A store that answers nothing."""
+
     def get(self, key):
         raise StorageUnavailable("store down")
 
+    def exists(self, key):
+        raise StorageUnavailable("store down")
+
+    def list_keys(self, prefix):
+        raise StorageUnavailable("store down")
+
     def version_of(self, key):
+        raise StorageUnavailable("store down")
+
+    def put(self, key, data):
+        raise StorageUnavailable("store down")
+
+    def put_if(self, key, data, expected):
         raise StorageUnavailable("store down")
 
 

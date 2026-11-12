@@ -72,8 +72,8 @@ def _deploys(store: Storage, sids: list[str], since: datetime, until: datetime) 
     in several snapshots' feeds (the lookback), so it is keyed by its text."""
     out: dict[str, datetime] = {}
     for sid in sids:
-        if not store.exists(f"{sid}/changes.json"):
-            continue
+        # read, not exists-then-read: ResilientStorage.exists answers False for a key only the unreachable store
+        # holds, which would pass a deploy off as absent; get raises instead, and the target is marked unread
         try:
             items = store.get_json(f"{sid}/changes.json")
         except (FileNotFoundError, ValueError):
@@ -127,7 +127,9 @@ def digest(cfg, store: Storage, since: datetime, until: datetime) -> dict:
     the same-statement links within one engine, `quiet`: targets reviewed in the window with nothing new or worse,
     and `unreviewed`: targets with no snapshot in the window, which is not the same as quiet. A target the store
     could not answer for is kept with `error` (and nothing else), so the note says it was not read instead of
-    counting a smaller fleet."""
+    counting a smaller fleet; one read while the store was degraded (ResilientStorage answering from its spool,
+    where a missing object does not raise) keeps what was read but carries `error` too, since "nothing in the spool"
+    is not "nothing happened"."""
     targets: dict[str, dict] = {}
     deploy_targets: dict[str, dict[str, datetime]] = {}  # description -> {target: time}
     statements: dict[tuple[str, str], list[dict]] = {}   # (engine, hash) -> open sql findings carrying it
@@ -160,6 +162,9 @@ def digest(cfg, store: Storage, since: datetime, until: datetime) -> dict:
         opened.sort(key=lambda f: (-RANK.get(f["severity"], 0), f["first_seen_at"] or ""))
         targets[name] = {"engine": t.engine, "opened": opened, "snapshots": len(sids),
                          "deploys": sorted(deploys, key=deploys.get)}
+        if why := getattr(store, "degraded", None):  # nothing raised, but the spool may be all that answered
+            print(f"digest: {name}: store degraded ({why}); may be incomplete", file=sys.stderr)
+            targets[name]["error"] = f"store degraded: {why}"
 
     links = []
     for text, seen in sorted(deploy_targets.items(), key=lambda kv: min(kv[1].values())):
@@ -170,7 +175,7 @@ def digest(cfg, store: Storage, since: datetime, until: datetime) -> dict:
             # "where nothing opened" is said only of a target with nothing opened; one whose news predates the deploy
             # is in neither list
             links.append({"deploy": text, "at": min(seen.values()).isoformat(), "targets": after,
-                          "quiet": sorted(n for n in seen if n not in after and not targets[n]["opened"])})
+                          "quiet": sorted(n for n in seen if n not in after and not targets[n]["opened"] and "error" not in targets[n])})
     same = []
     for (engine, h), rows in sorted(statements.items()):
         by_target = {}
@@ -321,8 +326,10 @@ class Digest:
         now. The slot is claimed first, by a conditional write on fleet/digest.json, so two scheduler processes on one
         store (`dbtriage scheduler` and `web --schedule`) send one digest, not two: the one whose claim the store
         refused stands down. The clock (sent_at) moves when a channel took the note or the severity gate held it
-        back; when the store or every channel failed the claim is given back and the next digest covers this window
-        too, and when the store cannot be read at all nothing is sent, since "no record" may mean "sent last week"."""
+        back; when the store or every channel failed, or no known channel was there to try, the claim is given back
+        and the next digest covers this window too, and when the store cannot be read at all nothing is sent, since
+        "no record" may mean "sent last week"."""
+        from dbtriage.deliver import CHANNELS, channel_names
         from dbtriage.scheduler import parse
 
         cfg = self.config()
@@ -354,9 +361,12 @@ class Digest:
         except StorageUnavailable as exc:
             self._release(kept, held)
             return False, f"store unavailable ({exc}); not sent"
-        if not done and failed:  # the gate let it through and no channel took it: the window stays open
+        # nothing taken and something failed, or nothing was even there to try: the window stays open. Only a week
+        # the gate held back, where a real channel chose not to post, is a week with nothing to say
+        tried = [n for n in channel_names(cfg.delivery, channels) if n in CHANNELS]
+        if not done and (failed or not tried):
             self._release(kept, held)
-            return False, f"no channel took it ({', '.join(failed)} failed); not sent"
+            return False, f"no channel took it ({', '.join(failed) + ' failed' if failed else 'none configured'}); not sent"
         record = {"sent_at": now.isoformat(), "since": d["since"], "until": d["until"], "severity": d["severity"], "delivered": done}
         try:
             self.store.put_json_if(DIGEST_KEY, record, held)
