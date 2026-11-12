@@ -33,6 +33,26 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
 Saving on the Settings page happens in place: the page stays where it is and the result appears as a toast in the
 corner. Changing the look reloads the page once, at the same spot, so the new colours apply.
 
+## The diagnosis card and the Ask dock
+
+A database's page opens with a **Diagnosis** card: five cells written by rules from stored data, with no model call.
+Health (the latest review's title and age, and, once a usual band has been stored with the comparison, whether the interval sat inside it), Open
+(how many findings, the worst, the oldest, their tickets), Changes (the last deploy or setting change and whether a
+finding opened after it), Last 7 days (opened, cleared, net, and rules findings the model left out), Next (the next
+scheduled run, paused, or why the last one did not finish). A cell that is a *setup gap*, no change feed or no
+schedule, is tinted, counted in the header ("2 setup gaps") and links to where the fix is made. It is instant, the
+same for everyone, and still there with the model off. Operators who copied `target.html` into `templates_dir` add
+`$diagnosis` and `$ask` to their copy to see it.
+
+**Ask AI** is the model's optional part. A round button bottom right (and "Ask AI about this target" in the card's
+header) opens a dock: the discussion panel as a small window on the database's page, on a thread about the database
+as a whole rather than one snapshot. Its first message is the rules' synopsis of the five cells, then three starter
+questions drawn from the facts (the open finding, a spike in the trend, the missing schedule). The model sees the
+latest review, the ledger of open findings with their life and tickets, what cleared lately, and the change feed.
+Answers are stored with the latest snapshot like any discussion, footer showing their token cost; "Open the full
+discussion" takes the thread to the snapshot page. The dock appears only with `--allow-chat` and a review to talk
+about, and the button points at the settings page when no model provider is configured.
+
 ## Rules and model on the same review
 
 The rules run on every snapshot, whether or not a model reviews it, and both results are stored in `triage.json`

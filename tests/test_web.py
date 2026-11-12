@@ -923,6 +923,40 @@ def test_files_max_tokens_and_fallback_models_on_the_cards(tmp_path, monkeypatch
     assert seen["fallback_models"] == ["a", "b"] and seen["max_tokens"] == "100"  # the line is a list by the time a backend sees it
 
 
+def test_target_page_has_the_diagnosis_card_and_the_ask_dock(tmp_path, monkeypatch):
+    app = App(config(tmp_path), store(tmp_path), False, None)
+    page = app.target("demo", 0).decode()
+    assert "<section class='card diag' aria-labelledby='diag-h'>" in page and page.index("diag-h") < page.index("<div class=\"tiles\">")
+    assert "<span class='gaps'><i class='dot'></i>2 setup gaps</span>" in page and "stored data, no model" in page
+    assert page.count("<div class='dcell") == 5 and "<i class='dot'></i>Health</span><span class='head'>" in page
+    assert "<span class='head'>Nothing tracked yet</span>" in page  # no ledger in the fixture store
+    assert "<div class='dcell medium gap'><span class='lbl'><i class='dot'></i>Changes</span><span class='head'>No change feed</span>" in page
+    assert "<a href='/targets/demo'>Set one</a>" in page and "<a href='/settings#schedule'>Add schedule</a>" in page
+    assert "$diagnosis" not in page and "$ask" not in page and "ask-fab" not in page.split("</style>")[-1]  # chat is off: no dock, no button
+    chat = App(config(tmp_path), store(tmp_path), False, None, allow_chat=True)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False); monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    off = chat.target("demo", 0).decode()
+    assert "<a class='ask-fab off' href='/settings#agent'" in off and "Ask AI: configure a model</a>" in off and "id='discuss'" not in off
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    on = chat.target("demo", 0).decode()
+    assert f"<aside id='discuss' class='discuss dock' aria-label='Ask AI about demo' data-base='/api/snapshots/{SID}/chat/' data-key='target' data-dock='1' data-ready='1' hidden>" in on
+    assert "<h2>Ask about demo</h2>" in on and "2 snapshots · diagnosis · open findings" in on and "<button type='button' class='ask-fab' id='discuss-open'" in on
+    assert "<button type='button' class='ask' data-chat='target'>" in on and "data-key='target'>What deserves attention first" in on or "data-key='target'>Suggest a snapshot schedule" in on
+    assert ">R</span><div class='dtext'><p>demo: " in on  # the synopsis comes from the rules
+    snap = chat.snapshot(SID).decode()
+    assert "ask-fab" not in snap.split("</style>")[-1]  # the snapshot page keeps its Discuss button, no second floating one
+    # the ledger and a change feed, when present, feed the cells
+    from dbtriage import ledger as led
+    st = app.store
+    led.save(st, "postgres", "demo", {"entries": [{"kind": "sql_regressed", "subject": "q1", "title": "q1 slow", "severity": "medium", "state": "still_open",
+                                                   "first_seen": SID, "first_seen_at": "2026-11-05T09:00:00+00:00", "tickets": {"jira": {"key": "DBA-7"}}}],
+                                      "tombstones": [], "updated": SID, "prior": None, "generation": 0})
+    st.put_json(f"{SID}/changes.json", [{"time": "2026-11-05T09:55:00+00:00", "kind": "deploy", "description": "billing@2 to production", "link": None, "source": "webhook"}])
+    page = app.target("demo", 0).decode()
+    assert "<span class='head'>1 finding, worst <span class='sv medium'>medium</span></span>" in page and "ticket DBA-7" in page and f"<a href='/s/{SID}'>oldest since 2026-11-05</a>" in page
+    assert "<span class='head'>deploy billing@2 to production</span>" in page and "1 setup gap</span>" in page
+
+
 def test_band_weeks_is_on_the_target_form_and_the_compare_page_uses_it(tmp_path, monkeypatch):
     app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
     name, fields = app.parse_target_form({"name": ["demo"], "engine": ["postgres"], "dsn": ["postgresql://x"], "band_weeks": ["8"]})

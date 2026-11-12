@@ -152,3 +152,18 @@ def test_ask_validation(tmp_path):
             return llm.AgentResult(text="", stop_reason="refusal", model="m", refused=True)
     a = chat.Chat(st, Refuses).ask(SID, None, "hi")
     assert "declined" in a["text"]
+
+
+
+def test_target_thread_tells_the_model_about_the_whole_database(tmp_path):
+    from dbtriage import ledger
+
+    st = store(tmp_path)
+    c = chat.Chat(st, Fake)
+    ledger.save(st, "postgres", "demo", {"entries": [{"kind": "blocking", "subject": "", "title": "3 blocked", "severity": "high", "state": "worse",
+                                                      "first_seen": SID, "first_seen_at": "2026-11-05T09:00:00+00:00", "tickets": {"jira": {"key": "DBA-1"}}}],
+                                         "tombstones": [{"kind": "bloat", "subject": "t", "gone_at": "2026-11-04T09:00:00+00:00"}], "updated": SID, "prior": None, "generation": 0})
+    ctx = c.context(SID, "target")
+    assert "about the database as a whole" in ctx and "- Health:" in ctx and "- Open: 1 finding, worst high" in ctx
+    assert "- blocking : high, worse, since 2026-11-05T09:00, tickets DBA-1 · 3 blocked" in ctx and "Cleared lately: bloat t (2026-11-04)" in ctx
+    assert chat.KEY_RE.match("target") and chat.thread_path(SID, "target").endswith("/chat/target.json")
