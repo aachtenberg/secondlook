@@ -43,12 +43,13 @@ Add `--config /path/to/targets.toml` after `dbtriage` if the file is not in that
 |---|---|
 | `list_targets` | the databases dbtriage watches, each with its latest snapshot and the review's severity and summary |
 | `list_snapshots` | a database's snapshots, newest first, with when and why each was taken and its severity |
-| `get_review` | one snapshot's review: findings with kind, subject (the sql_id, table, wait class or parameter named), impact, evidence and fix, what was checked, the baseline, and the rules' own findings as `heuristics` |
+| `get_review` | one snapshot's review: findings with kind, subject (the sql_id, table, wait class or parameter named), impact, evidence, fix and, when the fix is a concrete change, a `proposal` (statement, rollback, runner, window, the snapshot ids that justify it), what was checked, the baseline, and the rules' own findings as `heuristics` |
 | `get_report` | one section of a snapshot: load profile, top SQL, waits, ASH, sessions, tables, settings ... |
 | `compare_snapshots` | the comparison of two snapshots: load deltas, new and changed SQL, plan changes, wait shifts, settings changed, and the deploys that sit beside them |
 | `get_sql_history` | one statement across a database's snapshots: calls, time, CPU time (Oracle, SQL Server), plan |
 | `get_raw_report` | a page of an engine-native report stored with a snapshot, such as Oracle's AWR text |
 | `get_recent_changes` | deploys, parameter changes, jobs and failovers in the hours before a snapshot, from the change feed stored with it (GitHub or GitLab deployments, or a changes file) |
+| `get_operator_answers` | results a person pasted into a discussion after running a read the model proposed, for a snapshot and the previous one of the same target; each marked as supplied by a person, not measured |
 | `run_review` | collect and review a database now, only with `allow_run = true` |
 
 The read tools are the reviewer's own, so they share its limits: SQL literals are masked before anything is

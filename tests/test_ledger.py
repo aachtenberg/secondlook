@@ -770,6 +770,58 @@ def test_record_tickets_persists_them_in_the_ledger_and_the_review(tmp_path):
     assert out["life"][0]["tickets"]["jira"]["key"] == "DBA-1" and out["life"][1]["tickets"] == {}
 
 
+def test_a_proposal_rides_into_the_issue_and_the_comment_and_is_told_once(monkeypatch):
+    seen = fake_post(monkeypatch, {"/rest/api/2/issue": {"id": "1", "key": "DBA-12"}})
+    p = {"statement": "ANALYZE public.t;", "rollback": "none needed", "runner": "DBA", "window": "tonight", "justified_by": [sid(1), sid(0)]}
+    f = dict(review(rule("stale_stats", severity="high")), proposal=p)
+    md = "the review\n   - **Change proposal:**\n     ```\n     ANALYZE public.t;\n     ```"
+    cfg = {"channels": ["jira"], "jira": JIRA}
+    # a new finding: the issue body is the markdown, which carries the block; the ticket records that it was told
+    t = triage([{"state": "new", "first_seen": sid(1), "tickets": {}}], [f])
+    assert d.deliver(cfg, t, md) == ["jira"] and len(seen) == 1 and "ANALYZE public.t;" in seen[0][1]["fields"]["description"]
+    assert t["life"][0]["tickets"]["jira"] == {"key": "DBA-12", "id": "1", "url": "https://j.example.net/browse/DBA-12", "proposal_sent": True}
+    seen.clear()
+    # a still-open finding whose ticket predates the proposal: one comment with only the proposal, then silence
+    ticket = {"key": "DBA-12", "id": "1", "url": "u"}
+    still = triage([{"state": "still_open", "first_seen": sid(0), "tickets": {"jira": ticket}}], [f])
+    assert d.deliver(cfg, still, md) == ["jira"] and [u for u, _ in seen] == ["https://j.example.net/rest/api/2/issue/DBA-12/comment"]
+    body = seen[0][1]["body"]
+    assert body.startswith(f"change proposal: sql_id q1: stale_stats on q1\nsnapshot {sid(1)}\n\n- **Change proposal:**\n  ```\n  ANALYZE public.t;\n  ```")
+    assert "- **Undo:** none needed" in body and "- **Run by:** DBA · tonight" in body and f"`{sid(1)}`, `{sid(0)}`" in body and "the review" not in body
+    assert still["life"][0]["tickets"]["jira"]["proposal_sent"] is True and ticket == {"key": "DBA-12", "id": "1", "url": "u"}  # copied, not mutated
+    seen.clear()
+    again = triage([{"state": "still_open", "first_seen": sid(0), "tickets": {"jira": dict(ticket, proposal_sent=True)}}], [f])
+    assert d.deliver(cfg, again, md) == [] and seen == []
+    # a finding that got worse: the comment carries the review, proposal included, and that counts as told
+    worse = triage([{"state": "worse", "first_seen": sid(0), "tickets": {"jira": ticket}}], [f])
+    assert d.deliver(cfg, worse, md) == ["jira"] and len(seen) == 1 and "ANALYZE public.t;" in seen[0][1]["body"]
+    assert worse["life"][0]["tickets"]["jira"]["proposal_sent"] is True
+    seen.clear()
+    # no proposal: nothing new is said, and the ticket record is as it was
+    plain = triage([{"state": "still_open", "first_seen": sid(0), "tickets": {"jira": ticket}}], [review(rule("stale_stats", severity="high"))])
+    assert d.deliver(cfg, plain, md) == [] and seen == [] and "proposal_sent" not in plain["life"][0]["tickets"]["jira"]
+    # Plane gets the same comment, as HTML
+    pl = triage([{"state": "still_open", "first_seen": sid(0), "tickets": {"plane": {"key": "OPS-7", "id": "uuid-7", "url": "u"}}}], [f])
+    assert d.deliver({"channels": ["plane"], "plane": PLANE}, pl, md) == ["plane"] and seen[0][0].endswith("/issues/uuid-7/comments/")
+    assert "ANALYZE public.t;" in seen[0][1]["comment_html"] and pl["life"][0]["tickets"]["plane"]["proposal_sent"] is True
+
+
+def test_record_tickets_keeps_the_proposal_marker(tmp_path):
+    st = LocalStorage(tmp_path)
+    rules = [rule("stale_stats", severity="high")]
+    out = run(st, 0, rules)
+    out.update(engine=ENGINE, target=TARGET, snapshot=sid(0), findings=[review(f) for f in rules])
+    out["life"][0]["tickets"] = {"jira": {"key": "DBA-1", "id": "1", "url": "u"}}
+    ledger.record_tickets(st, out)
+    nxt = run(st, 1, rules)
+    assert nxt["life"][0]["tickets"] == {"jira": {"key": "DBA-1", "id": "1", "url": "u"}}  # not told yet
+    nxt.update(engine=ENGINE, target=TARGET, snapshot=sid(1), findings=[review(f) for f in rules])
+    nxt["life"][0]["tickets"]["jira"] = dict(nxt["life"][0]["tickets"]["jira"], proposal_sent=True)  # what _ticket_run leaves
+    ledger.record_tickets(st, nxt)
+    assert ledger.load(st, ENGINE, TARGET)["entries"][0]["tickets"]["jira"]["proposal_sent"] is True
+    assert run(st, 2, rules)["life"][0]["tickets"]["jira"]["proposal_sent"] is True  # the next run's delivery sees it and stays quiet
+
+
 # ---------------------------------------------------------------- the page and the markdown
 def test_markdown_shows_the_life_and_the_still_open_list():
     from dbtriage.report import render_markdown

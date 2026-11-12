@@ -314,6 +314,9 @@ def test_server_chat_routes(server):
     with pytest.raises(HTTPError) as e:  # the fixture server runs without --allow-chat
         get(f"{server}/api/snapshots/{SID}/chat/review", method="POST", data=b'{"question": "hi"}')
     assert e.value.code == 403
+    with pytest.raises(HTTPError) as e:  # a pasted result is gated the same way
+        get(f"{server}/api/snapshots/{SID}/chat/review/answer", method="POST", data=b'{"proposal": 1, "result": "x"}')
+    assert e.value.code == 403
     status, _, body = get(f"{server}/health")
     assert json.loads(body)["chat_enabled"] is False
 
@@ -456,6 +459,43 @@ def test_snapshot_detail_review_card_and_discuss_panel(tmp_path, monkeypatch):
     code, ans = app.chat_ask(SID, "sql-q1", "what is it?")
     assert code == 200 and ans["text"] == "it selects one" and app.chat_thread(SID, "sql-q1")["messages"][0]["text"] == "what is it?"
     assert app.chat_ask(SID, "sql-nope", "x")[0] == 400
+
+
+def test_proposed_read_answer_route_and_panel_markup(tmp_path, monkeypatch):
+    """A proposed read in the model's answer renders as a block with Copy and a paste form; the answer route stores
+    the pasted result masked, and the thread renders it as supplied by a person. Same gates as a question."""
+    from dbtriage import llm
+
+    class Proposes:
+        name = "fake"
+        def __init__(self, cfg): pass
+        def run(self, system, task, tools, max_iterations=25, require_tool=None, stop_when=None):
+            return llm.AgentResult(text="Look for a seq scan:\n\n```proposed-read\nEXPLAIN SELECT 1 FROM t WHERE a = 'b';\n```\n\nthen tell me.",
+                                   stop_reason="end_turn", model="m")
+
+    monkeypatch.setattr(llm, "make_backend", lambda cfg: Proposes(cfg))
+    st = store(tmp_path)
+    off = App(config(tmp_path), st, allow_run=False, token=None)
+    assert off.chat_answer(SID, "review", 1, "x")[0] == 403
+    app = App(config(tmp_path), st, allow_run=False, token=None, allow_chat=True)
+    assert app.chat_answer(SID, "review", 1, "x") == (400, {"error": "this thread has no proposed read 1"})
+    code, ans = app.chat_ask(SID, "review", "what should I run?")
+    assert code == 200 and ans["proposals"][0]["n"] == 1
+    h = ans["html"]
+    assert h.startswith("<p>Look for a seq scan:</p>\n<div class='pread' data-proposal='1'><div class='plbl'>Proposed read 1 · run it yourself; nothing runs from here</div>"
+                        "<pre><code>EXPLAIN SELECT 1 FROM t WHERE a = &#x27;b&#x27;;</code></pre>")
+    assert "<button type='button' class='quiet' data-copy='1'>Copy</button>" in h and "data-answer='1' aria-expanded='false'>Paste the result</button>" in h
+    assert "<form class='panswer' data-proposal='1' hidden><label><span class='sr'>Result of proposed read 1</span><textarea name='result'" in h
+    assert "<button type='submit' class='ai'>Save result</button>" in h and h.endswith("</form></div>\n<p>then tell me.</p>") and "```" not in h
+    code, r = app.chat_answer(SID, "review", "1", "Seq Scan on t\n  Filter: (a = 'b')")
+    assert code == 200 and r["role"] == "operator" and r["text"] == "Seq Scan on t\n  Filter: (a = '?')"
+    assert r["html"] == ("<div class='plbl'>Result for proposed read 1 · supplied by a person, not measured by Second Look</div>"
+                         "<pre class='presult'>Seq Scan on t\n  Filter: (a = &#x27;?&#x27;)</pre>")
+    t = app.chat_thread(SID, "review")
+    assert [m["role"] for m in t["messages"]] == ["user", "assistant", "operator"] and t["messages"][2]["html"] == r["html"] and "pread" in t["messages"][1]["html"]
+    assert app.chat_answer(SID, "review", "one", "x")[0] == 400 and app.chat_answer(SID, "review", 1, "")[0] == 400
+    assert app.chat_answer("postgres/demo/2026-11-05/nope", "review", 1, "x")[0] == 404
+    assert "'proposed-read" not in app.snapshot(SID).decode()  # the page is untouched; the panel renders threads from the API
 
 
 def test_base_script_has_no_duplicate_function_names(tmp_path):
@@ -727,6 +767,26 @@ def test_agreement_marks_and_dropped_rules_findings(tmp_path):
     st.put_json(f"{SID}/triage.json", {"severity": "medium", "title": "x", "source": "agent", "findings": findings, "heuristics": heur})
     page = app.snapshot(SID).decode()
     assert "q1 slowed down" in page and "class='mark" not in page and "class='dropped'" not in page and "Agreement:" not in page
+
+
+def test_finding_card_with_and_without_a_change_proposal(tmp_path):
+    st = store(tmp_path)
+    older = "postgres/demo/2026-11-05/20261105T090000Z"
+    p = {"statement": "CREATE INDEX CONCURRENTLY t_a_idx ON public.t (a) <b>;", "rollback": "DROP INDEX CONCURRENTLY t_a_idx;",
+         "runner": "DBA in a change window", "window": "tonight", "justified_by": [SID, older]}
+    findings = [{"severity": "high", "kind": "seq_scans", "subject": "public.t", "where": "table public.t", "summary": "Full scans", "impact": "i", "evidence": ["e"], "fix": "add an index", "proposal": p},
+                {"severity": "low", "kind": "sql_regressed", "subject": "q1", "where": "sql_id q1", "summary": "Slower", "impact": "i", "evidence": [], "fix": "look at q1"}]
+    st.put_json(f"{SID}/triage.json", {"severity": "high", "title": "Full scans", "source": "rules", "confidence": "low", "findings": findings})
+    page = App(config(tmp_path), st, False, None).snapshot(SID).decode()
+    card = page.split("<ol class='flist'>")[1].split("</ol>")[0]
+    first, second = card.split("<li><div class='fh'>")[1:]
+    assert "<dt>Fix</dt><dd>add an index</dd><dt>Change proposal</dt><dd class='proposal'>" in first and "Change proposal" not in second
+    assert "<pre id='proposal-1' class='stmt'>CREATE INDEX CONCURRENTLY t_a_idx ON public.t (a) &lt;b&gt;;</pre>" in first  # escaped, never trusted
+    assert "<button type='button' class='copy' data-copy='proposal-1' aria-label='Copy the statement'>Copy</button>" in first
+    assert "<dt>Undo</dt><dd>DROP INDEX CONCURRENTLY t_a_idx;</dd>" in first and "<dt>Run by</dt><dd>DBA in a change window · tonight</dd>" in first
+    assert f"<a class='mono' href='/s/{SID}' title='{SID}'>20261105T100000Z</a>" in first and f"href='/s/{older}'" in first
+    assert "Second Look never applies changes" in first and "style=" not in card and "Apply" not in card  # no apply button, ever
+    assert "button[data-copy]" in page and second.endswith("<dt>Fix</dt><dd>look at q1</dd></dl></li>")  # the copy script; the plain card as it was
 
 
 # --------------------------------------------------------------------------- every knob on the Settings pages

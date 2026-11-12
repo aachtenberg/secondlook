@@ -145,11 +145,21 @@ $body
     var d = document.createElement('div'); d.className = 'dmsg ' + role;
     if (role === 'user') { d.textContent = html; }
     else {
-      var a = document.createElement('span'); a.className = 'avatar'; a.textContent = 'AI'; d.appendChild(a);
+      var a = document.createElement('span'), person = role === 'operator';  // a result a person pasted for a proposed read
+      a.className = person ? 'avatar person' : 'avatar'; a.textContent = person ? 'P' : 'AI'; if (person) a.title = 'supplied by a person'; d.appendChild(a);
       var t = document.createElement('div'); t.className = 'dtext'; t.innerHTML = html; d.appendChild(t);
       if (footer) { var f = document.createElement('div'); f.className = 'foot'; f.textContent = footer; t.appendChild(f); }
     }
     log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+  }
+  function copyStmt(text, btn) {
+    var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); };
+    var fallback = function () {  // no clipboard API (plain http): select the statement so Ctrl+C takes it
+      var r = document.createRange(); r.selectNodeContents(btn.closest('.pread').querySelector('code'));
+      var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); try { document.execCommand('copy'); } catch (e) {}
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { fallback(); done(); });
+    else { fallback(); done(); }
   }
   function showBox(on) {
     box.hidden = !on; try { localStorage.setItem(DKEY, on ? 'open' : 'closed'); } catch (e) {}
@@ -182,10 +192,32 @@ $body
     document.getElementById('discuss-close').addEventListener('click', function () { showBox(false); });
     document.getElementById('discuss-open').addEventListener('click', function () { if (box.hidden) openKey(key); else q.focus(); });
     log.addEventListener('click', function (e) {
+      var c = e.target.closest('button[data-copy]');
+      if (c) { copyStmt(c.closest('.pread').querySelector('code').textContent, c); return; }
+      var p = e.target.closest('button[data-answer]');
+      if (p) {  // open or close the paste box under this proposed read
+        var f = p.closest('.pread').querySelector('form.panswer'); f.hidden = !f.hidden; p.setAttribute('aria-expanded', f.hidden ? 'false' : 'true');
+        if (!f.hidden) f.querySelector('textarea').focus(); return;
+      }
       var b = e.target.closest('button[data-ask]'); if (!b) return;
       var text = b.getAttribute('data-ask'), k = b.getAttribute('data-key') || key;
       var put = function () { q.value = text; q.focus(); };
       if (k !== key) openKey(k, put); else put();
+    });
+    log.addEventListener('submit', function (e) {  // a pasted result: stored with the thread, nothing runs from here
+      var f = e.target.closest('form.panswer'); if (!f) return;
+      e.preventDefault();
+      var ta = f.querySelector('textarea'), btn = f.querySelector('button[type=submit]'), text = ta.value.trim(); if (!text) return;
+      btn.disabled = true;
+      fetch(box.getAttribute('data-base') + key + '/answer', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+                       body: JSON.stringify({ proposal: parseInt(f.getAttribute('data-proposal'), 10), result: text }) })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+        .then(function (x) {
+          if (x.ok) { ta.value = ''; f.hidden = true; f.closest('.pread').querySelector('button[data-answer]').setAttribute('aria-expanded', 'false'); msg('operator', x.j.html); }
+          else { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = x.j.error || 'failed'; }
+        })
+        .catch(function (err) { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = err.message; })
+        .then(function () { btn.disabled = false; });
     });
     var closed = null; try { closed = localStorage.getItem(DKEY) === 'closed'; } catch (e) {}
     var deep = /^#chat-(review|target|finding-\d+|sql-[A-Za-z0-9_]+)$/.exec(location.hash);

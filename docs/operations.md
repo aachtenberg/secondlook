@@ -151,8 +151,29 @@ Pick channels in `[delivery] channels` or on the Settings page, where each has a
 - **A full record.** Every run keeps what triggered it and why (`manifest.json`), what was compared (`compare.json`),
   what was said (`triage.json`, discussions), and what the model read to say it (`tools.json`: every tool call with its
   arguments and the first 2000 characters of its result, kept even when the model failed to submit a review).
-- **People decide.** dbtriage recommends fixes and never applies them. Automatic fixes, if ever added, belong
-  behind an approval step with a ready rollback.
+- **People decide.** dbtriage recommends fixes and never applies them. A change proposal on a finding is a
+  statement to copy, with its undo and the snapshots that justify it; there is no apply button ("The fix as a
+  change proposal" below). Automatic fixes, if ever added, belong behind an approval step with a ready rollback.
+
+## A proposed read, answered by a person
+
+A discussion answer can carry a *proposed read*: one read-only statement the model wants run (an `EXPLAIN`, a wait
+slice, a stats query), marked in its text as a fenced `proposed-read` block with a line above saying what to look
+for. Nothing runs it. The web view has no connection to any database, and `dbtriage ask` has none either; the
+statement is text for a person to copy. The person runs it on their side, with their own credentials, and pastes
+the result into the thread (web: **Paste the result** under the block; API: `POST
+/api/snapshots/<id>/chat/<key>/answer` with `{proposal, result}`, behind the same `--allow-chat` gate as a
+question).
+
+The pasted result is stored in the thread file (`<snapshot>/chat/<key>.json`) as a message with role `operator`,
+after the same masking as a report: quoted strings become `'?'`, and a line that is itself a SQL statement (the
+read echoed back with the real values it was run with) is masked as SQL text is. Numbers on other lines stay,
+because a plan's costs and row counts are the point. The text is cut at 20 KB, and a thread holds at most 10 pasted
+results. It is labelled **supplied by a person** on the page, in the thread replayed to the model, in the audit
+bundle, and in `get_operator_answers`, the reviewer's tool that returns the results stored with a snapshot and with
+the previous snapshot of the same target, newest first, at most 12 of them and 60 KB of text, saying how many older
+ones it left out. The reviewer may cite such a result as evidence; it may not present it as something Second Look
+measured.
 
 ## The record you can hand someone
 
@@ -254,8 +275,30 @@ and a `subject`, the exact sql_id, table, wait class or parameter it names; `fin
 when the model and the rules found the same thing, or when a finding is the same one as in the previous snapshot.
 
 The reviewer's tools are `get_report`, `get_raw_report` (pages through the AWR text), `compare_snapshots`,
-`get_sql_history`, `get_recent_changes` and `submit_review`. Reports are never pasted into the prompt; the model
-asks for what it needs, so the numbers stay exact.
+`get_sql_history`, `get_recent_changes`, `get_operator_answers` (results a person pasted for a proposed read) and
+`submit_review`. Reports are never pasted into the prompt; the model asks for what it needs, so the numbers stay
+exact.
+
+## The fix as a change proposal
+
+When a finding's fix is a concrete change, the finding also carries a `proposal`: the exact `statement` (a
+`CREATE INDEX`, a statistics gather, a parameter change, a rewrite), its `rollback`, who would run it as a role
+(`runner`: "DBA in a change window", "the application team"), when (`window`), and `justified_by`, the ids of the
+snapshots whose numbers justify it, the current snapshot and the baseline at least. `fix` stays the one-sentence
+advice. The model fills it only when it has a concrete change; `submit_review` refuses a statement without a
+rollback, and a proposal that does not cite the current snapshot, so the model fixes it and retries. The rules
+fill it for the kinds where the statement follows from the evidence alone (`stale_stats`, `bloat`, `seq_scans`,
+`setting_changed`), in the engine's own dialect, with a placeholder where the rules cannot know a detail such as
+the index columns; the other kinds say what to look at and carry no proposal.
+
+The proposal is rendered under the finding in the markdown (the statement in a code fence, then **Undo**, **Run
+by** and **Justified by**) and on the snapshot page, where the statement has a Copy button. It rides into the Jira or
+Plane issue and into the comment on an existing ticket; when a proposal appears for a finding whose ticket predates
+it, the ticket gets it as one comment, once (`proposal_sent` on the ticket record in the ledger).
+
+The difference from a tuning tool's "apply" button is the justification and the safety: the proposal cites the
+before and after Second Look measured, it always comes with its undo, and nothing is applied. There is no apply
+button anywhere; a person copies the statement and runs it under their own change process.
 
 ## Code layout
 

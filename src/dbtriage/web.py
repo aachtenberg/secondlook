@@ -30,6 +30,7 @@ API (same auth):
   POST /api/schedule/<name>/run             collect and review now with the scheduled window  (needs --allow-run)
   GET  /api/snapshots/<id>/chat/<key>       discussion thread; key = review | target | finding-<n> | sql-<sql id>
   POST /api/snapshots/<id>/chat/<key>       {"question"} -> the model's answer, grounded in the stored snapshot  (needs --allow-chat)
+  POST /api/snapshots/<id>/chat/<key>/answer  {proposal, result}: what a person got from a proposed read, stored masked
   GET  /health
 
 Everything the UI edits is kept in one JSON overlay file (see dbtriage.settings); targets.toml stays the seed.
@@ -226,6 +227,8 @@ button.ai,.btn.ai{background:var(--ai);border-color:transparent;color:#fff;font-
 .fh{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.fh .n{font-family:var(--mono);font-size:12px;color:var(--mut)}.fh .where{font-size:12px;color:var(--fg2)}.fh .fs{font-weight:500;color:var(--fg-strong)}
 .fh .chat-link{margin-left:auto}.flist dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin:10px 0 0;font-size:13px}.flist dt{color:var(--mut);font-size:12px}.flist dd{margin:0;color:var(--fg2)}
 .flist dd ul{margin:0;padding-left:16px}
+.proposal{display:grid;gap:8px}.proposal .prow{display:flex;gap:8px;align-items:flex-start}.proposal .stmt{flex:1;min-width:0;font-family:var(--mono)}.proposal .copy{height:28px;padding:0 10px;border-radius:6px;border:1px solid var(--line2);background:var(--card2);color:var(--fg2);font-size:12px;white-space:nowrap}
+.proposal dl{margin:0}.proposal .ids{display:flex;flex-wrap:wrap;gap:4px 10px}.proposal p{margin:0;font-size:12px}
 .checked{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--mut)}.checked .lbl{font-weight:500;color:var(--fg2)}
 .mark{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap}.mark.both{border-color:var(--info);color:var(--info)}.mark.model_only{border-color:var(--ai);color:var(--ai)}.mark.rules_only{border-color:var(--medium);color:var(--medium)}
 .dropped{font-size:13px;color:var(--fg2);padding-top:10px;border-top:1px solid var(--line)}.dropped .lbl{font-weight:500;color:var(--fg2)}.dropped>.lbl{display:block;margin-bottom:6px}.dropped .agree{font-size:12px;color:var(--mut)}
@@ -264,6 +267,11 @@ aside.discuss[hidden]{display:none}
 .dfoot{padding:12px 14px 14px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px;margin:0}.dfoot textarea{resize:none;width:100%}
 .dwarn{display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--medium)}.dwarn svg{flex:none;margin-top:1px}
 .drow{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px}.drow button{height:32px}
+.dmsg.operator{display:flex;gap:10px;font-size:13px}.avatar.person{background:var(--card2);color:var(--fg2);border:1px solid var(--line2)}
+.pread{border:1px solid var(--line2);border-radius:8px;background:var(--card2);padding:8px 10px;display:flex;flex-direction:column;gap:6px}
+.plbl{font-size:11px;color:var(--mut);font-weight:500}.pread pre,.presult{margin:0;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow-y:auto}
+.prow{display:flex;gap:6px}.prow button{height:26px;font-size:12px;padding:0 10px}
+form.panswer{display:flex;flex-direction:column;gap:6px;margin:0}form.panswer[hidden]{display:none}form.panswer textarea{width:100%;resize:vertical;font-family:var(--mono);font-size:12px}form.panswer .drow button{height:28px}
 @media(max-width:820px){aside.discuss{max-width:none;min-height:480px;position:static}}
 /* review text */
 .review p{margin:0 0 8px}.review ol{padding-left:22px;margin:8px 0}.review ol>li{margin-bottom:10px}.review ul{margin:4px 0 0;padding-left:18px;color:var(--fg2)}.review ul li{margin:2px 0}
@@ -316,6 +324,34 @@ def md_to_html(md: str, item_suffix: Callable[[int], str] | None = None) -> str:
             close_ul()  # a blank line ends a bullet run but not the numbered list around it
     close_ol()
     return "\n".join(out)
+
+
+def chat_html(msg: dict) -> str:
+    """One discussion message as HTML. An answer's proposed reads (fenced proposed-read blocks) become blocks of
+    their own, each with the statement to copy and a place to paste what it returned; an operator message is the
+    pasted result under a label that says a person supplied it."""
+    if msg.get("role") == "operator":
+        lbl = f"Result for proposed read {int(msg.get('proposal') or 0)} · supplied by a person, not measured by Second Look"
+        lbl += " · cut at 20 KB" if msg.get("truncated") else ""
+        return f"<div class='plbl'>{lbl}</div><pre class='presult'>{html.escape(msg.get('text') or '')}</pre>"
+    text = msg.get("text") or ""
+    props = iter(msg.get("proposals") or chat.proposals(text))
+    out = []
+    for i, piece in enumerate(chat.PROPOSAL_RE.split(text)):
+        if i % 2 == 0:
+            out.append(md_to_html(piece))
+            continue
+        p = next(props, None) or {"n": 0, "statement": piece.strip()}
+        n, stmt = int(p["n"]), html.escape(p["statement"])
+        out.append(f"<div class='pread' data-proposal='{n}'><div class='plbl'>Proposed read {n} · run it yourself; nothing runs from here</div>"
+                   f"<pre><code>{stmt}</code></pre>"
+                   f"<div class='prow'><button type='button' class='quiet' data-copy='{n}'>Copy</button>"
+                   f"<button type='button' class='quiet' data-answer='{n}' aria-expanded='false'>Paste the result</button></div>"
+                   f"<form class='panswer' data-proposal='{n}' hidden><label><span class='sr'>Result of proposed read {n}</span>"
+                   f"<textarea name='result' rows='5' maxlength='{chat.MAX_RESULT}' placeholder='Paste what it returned; quoted values are masked before it is stored' required></textarea></label>"
+                   "<div class='drow'><span class='mut'>Stored with the snapshot, labelled as supplied by a person</span>"
+                   "<button type='submit' class='ai'>Save result</button></div></form></div>")
+    return "\n".join(x for x in out if x)
 
 
 ICON = {  # inline stroke icons, 14px, currentColor
@@ -468,6 +504,26 @@ def diagnosis_html(rows: list[dict], ask_button: str = "") -> str:
     gaps = f"<span class='gaps'><i class='dot'></i>{n} setup gap{'s' if n != 1 else ''}</span>" if n else ""
     return (f"<section class='card diag' aria-labelledby='diag-h'><div class='cardhead'><div class='left'><h2 id='diag-h'>Diagnosis</h2>{gaps}</div>"
             f"<div class='right'><span class='pill2'>stored data, no model</span>{ask_button}</div></div><div class='dgrid'>{''.join(cells)}</div></section>")
+
+
+def proposal_html(p: dict | None, n: int, esc: Callable[[str], str]) -> str:
+    """The change proposal under finding `n` of the review card: the statement in a <pre> with a Copy button, its
+    undo, who runs it and when, the snapshots whose numbers justify it as links, and the sentence that nothing is
+    applied here. Empty for a finding without one, so older reviews render as they did. `esc` is the card's escaper
+    (it also links SQL ids)."""
+    if not p or not p.get("statement"):
+        return ""
+    from dbtriage.report import NEVER_APPLIED
+
+    runner = " · ".join(esc(x) for x in (p.get("runner"), p.get("window")) if x)
+    ids = "".join(f"<a class='mono' href='/s/{html.escape(str(s))}' title='{html.escape(str(s))}'>{html.escape(str(s).rsplit('/', 1)[-1])}</a>"
+                  for s in p.get("justified_by") or [])
+    rows = ((f"<dt>Undo</dt><dd>{esc(p['rollback'])}</dd>" if p.get("rollback") else "")
+            + (f"<dt>Run by</dt><dd>{runner}</dd>" if runner else "")
+            + (f"<dt>Justified by</dt><dd class='ids'>{ids}</dd>" if ids else ""))
+    return (f"<dt>Change proposal</dt><dd class='proposal'><div class='prow'><pre id='proposal-{n}' class='stmt'>{html.escape(str(p['statement']))}</pre>"
+            f"<button type='button' class='copy' data-copy='proposal-{n}' aria-label='Copy the statement'>Copy</button></div>"
+            + (f"<dl>{rows}</dl>" if rows else "") + f"<p class='mut'>{html.escape(NEVER_APPLIED)}</p></dd>")
 
 
 def _fmt_ts(iso: str | None) -> str:
@@ -1037,7 +1093,8 @@ class App:
                     ev = "".join(f"<li>{link_ids(e)}</li>" for e in (f.get("evidence") or [])[:4])
                     dl = ((f"<dt>Impact</dt><dd>{link_ids(f['impact'])}</dd>" if f.get("impact") else "")
                           + (f"<dt>Evidence</dt><dd><ul>{ev}</ul></dd>" if ev else "")
-                          + (f"<dt>Fix</dt><dd>{link_ids(f['fix'])}</dd>" if f.get("fix") else ""))
+                          + (f"<dt>Fix</dt><dd>{link_ids(f['fix'])}</dd>" if f.get("fix") else "")
+                          + proposal_html(f.get("proposal"), i, link_ids))
                     items.append(f"<li><div class='fh'><span class='n'>{i}</span>{sev(f.get('severity'))}{marks.get(i - 1, '')}"
                                  f"<code class='where'>{link_ids(f.get('where', ''))}</code><span class='fs'>{link_ids(f.get('summary', ''))}</span>{badge}{disc}</div>"
                                  + (f"<dl>{dl}</dl>" if dl else "") + "</li>")
@@ -1352,15 +1409,17 @@ class App:
         t = chat.load_thread(self.store, sid, key)
         for x in t["messages"]:
             if x["role"] == "assistant":
-                x["html"], x["footer"] = md_to_html(x["text"]), chat.footer(x)
+                x["html"], x["footer"] = chat_html(x), chat.footer(x)
+            elif x["role"] == "operator":
+                x["html"] = chat_html(x)
         return t
 
-    def chat_ask(self, sid: str, key: str, question: str) -> tuple[int, dict]:
+    def _chat_gate(self, sid: str) -> tuple[int, dict] | None:
+        """Why a discussion request cannot go ahead, or None: the flag, the group, then the snapshot itself."""
         if not self.allow_chat:
             return 403, {"error": "discussion is disabled (start with --allow-chat)"}
         if not self.allows("chat"):
             return 403, {"error": "your group cannot use chat"}
-        finding = key if key.startswith("sql-") else (int(key.split("-", 1)[1]) if key.startswith("finding-") else None)
         try:  # decided from the snapshot itself: read it, so an outage is a 503, not a missing snapshot
             if not key_ok(sid):
                 raise FileNotFoundError(sid)
@@ -1371,11 +1430,38 @@ class App:
             return 503, {"error": f"the store is unavailable: {exc}"}
         except Exception as exc:  # noqa: BLE001 - any other store error is an answer, never a dropped request
             return 502, {"error": f"could not read the snapshot: {type(exc).__name__}: {str(exc)[:200]}"}
-        try:
-            from dbtriage.band import weeks_for
+        return None
 
-            answer = chat.Chat(self.store, lambda: llm.make_backend(self.cfg.agent),
-                               band_weeks_for=lambda name: weeks_for(self.cfg, name)).ask(sid, finding, question)
+    def _chat(self) -> "chat.Chat":
+        from dbtriage.band import weeks_for
+
+        return chat.Chat(self.store, lambda: llm.make_backend(self.cfg.agent), band_weeks_for=lambda name: weeks_for(self.cfg, name))
+
+    def chat_answer(self, sid: str, key: str, proposal, result: str) -> tuple[int, dict]:
+        """A person pasted what proposed read `proposal` returned when they ran it: store it with the thread, masked
+        and labelled as supplied by a person. The same gates as a question; no model call."""
+        if gate := self._chat_gate(sid):
+            return gate
+        try:
+            n = int(proposal)
+        except (TypeError, ValueError):
+            return 400, {"error": "proposal must be the number of a proposed read in this thread"}
+        try:
+            msg = self._chat().answer(sid, key, n, result)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        except StorageUnavailable as exc:
+            return 503, {"error": f"the store is unavailable: {exc}"}
+        msg["html"] = chat_html(msg)
+        access.audit("chat-answer", f"{sid} {key} proposed read {n}")
+        return 200, msg
+
+    def chat_ask(self, sid: str, key: str, question: str) -> tuple[int, dict]:
+        if gate := self._chat_gate(sid):
+            return gate
+        finding = key if key.startswith("sql-") else (int(key.split("-", 1)[1]) if key.startswith("finding-") else None)
+        try:
+            answer = self._chat().ask(sid, finding, question)
         except ValueError as exc:
             return 400, {"error": str(exc)}
         except StorageUnavailable as exc:  # the store went away during the discussion: the same 503 as before it
@@ -1385,7 +1471,7 @@ class App:
         except Exception as exc:  # noqa: BLE001 - provider errors must not kill the server
             print(f"web: chat for {sid}/{key} failed:\n{traceback.format_exc()}", file=sys.stderr)
             return 502, {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
-        answer["html"], answer["footer"] = md_to_html(answer["text"]), chat.footer(answer)
+        answer["html"], answer["footer"] = chat_html(answer), chat.footer(answer)
         access.audit("chat", f"{sid} {key}")
         return 200, answer
 
@@ -1972,6 +2058,14 @@ def make_server(cfg: Config, store: Storage, host: str, port: int, allow_run: bo
                         return
                     ok, msg = app.test_agent(json.loads(self._read_body() or b"{}"))
                     return self._json({"ok": ok, "message": msg})
+                if m := re.match(r"^/api/snapshots/(.+?)/chat/([^/]+)/answer$", path):
+                    if not chat.KEY_RE.match(m[2]):
+                        return self._error(400, "bad thread key", True)
+                    if int(self.headers.get("Content-Length", 0) or 0) > 1_000_000:  # a plan or a wait slice, not a table dump
+                        return self._error(413, "result too large", True)
+                    body = json.loads(self._read_body() or b"{}")
+                    code, out = app.chat_answer(m[1], m[2], body.get("proposal"), str(body.get("result", "")))
+                    return self._json(out, code)
                 if m := re.match(r"^/api/snapshots/(.+?)/chat/([^/]+)$", path):
                     if not chat.KEY_RE.match(m[2]):
                         return self._error(400, "bad thread key", True)

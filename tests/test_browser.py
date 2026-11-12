@@ -238,6 +238,42 @@ def test_discuss_panel_round_trip(page, web_server, fake_llm):
     expect(page.locator("#chat-log .dmsg.user")).to_have_text("what changed?")
 
 
+def test_discuss_proposed_read_and_pasted_result(page, web_server, fake_llm):
+    """The model's proposed read is a block with Copy and a paste box; a saved result shows as supplied by a person,
+    masked, survives a reload, and the next question carries it to the model."""
+    page.goto(web_server + f"/s/{INCIDENT}")
+    q = page.locator("#chat-q")
+    q.fill("can you explain it?")
+    q.press("Enter")
+    block = page.locator("#chat-log .pread")
+    expect(block).to_be_visible()
+    expect(block.locator(".plbl")).to_have_text("Proposed read 1 · run it yourself; nothing runs from here")
+    expect(block.locator("code")).to_contain_text("EXPLAIN SELECT count(*) FROM orders")
+    block.get_by_role("button", name="Copy").click()
+    expect(block.get_by_role("button", name="Copied")).to_be_visible()
+    expect(block.locator("form.panswer")).to_be_hidden()
+    block.get_by_role("button", name="Paste the result").click()
+    ta = block.get_by_label("Result of proposed read 1")
+    expect(ta).to_be_visible()
+    ta.fill("Seq Scan on orders  (cost=0.00..35.50 rows=10 width=4)\n  Filter: (status = 'open')")
+    block.get_by_role("button", name="Save result").click()
+    op = page.locator("#chat-log .dmsg.operator")
+    expect(op).to_be_visible()
+    expect(op.locator(".avatar")).to_have_text("P")
+    expect(op.locator(".plbl")).to_contain_text("supplied by a person")
+    expect(op.locator("pre")).to_contain_text("Filter: (status = '?')")  # masked before it was stored
+    expect(block.locator("form.panswer")).to_be_hidden()
+    page.reload()
+    expect(page.locator("#chat-log .dmsg.operator .plbl")).to_contain_text("Result for proposed read 1")
+    expect(page.locator("#chat-log .pread code")).to_contain_text("EXPLAIN")
+    q = page.locator("#chat-q")
+    q.fill("so what does it say?")
+    q.press("Enter")
+    expect(page.locator("#chat-log .dmsg.assistant .dtext").last).to_contain_text("Fake answer to: so what does it say?")
+    sent = "\n".join(m.get("content") or "" for m in fake_llm.requests[-1]["messages"] if m["role"] == "user")
+    assert "Result supplied by a person for proposed read 1 (not measured by Second Look):\nSeq Scan on orders" in sent
+
+
 def test_discuss_threads_per_finding_and_query(page, web_server):
     page.goto(web_server + f"/s/{INCIDENT}")
     focus = page.locator("#discuss-focus")

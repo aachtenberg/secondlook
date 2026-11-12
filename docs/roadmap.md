@@ -103,7 +103,7 @@ Two links join findings across targets, and they are not equally strong:
 
 OEM, pganalyze, and Query Store cannot write either sentence.
 
-### 5. A proposed read, answered by a person
+### 5. A proposed read, answered by a person *(landed)*
 
 Chat already refuses to touch the live database and tells the reader what to run. Make that a first-class step on a finding: the model proposes one read-only statement (an `EXPLAIN`, a wait slice, a stats query), the person runs it, and they paste the result back into the thread.
 
@@ -111,7 +111,7 @@ The pasted result is operator-supplied text entering the evidence. It goes throu
 
 That is the middle the pack misses. Either the assistant has production credentials, or it only has metrics and guesses the fix. A proposed read keeps credentials on the operator’s side and still deepens the evidence.
 
-### 6. The fix as a change proposal
+### 6. The fix as a change proposal *(landed)*
 
 Findings already require a fix and, when the fix changes the database, a rollback. Take the next step as an artifact the reader can copy: the statement (create index, gather stats, a rewrite), the snapshot ids that justify it, how to undo it, and who would run it in a change window. Attach it to the Jira or Plane ticket from bet 2.
 
@@ -138,7 +138,7 @@ Datadog exports charts. The model chat exports a transcript. The bundle is the r
 
 ## What to build first
 
-Status on 2026-11-11: the groundwork, bets 1, 2, 3 and 7 and the tool transcript have landed. Next is bet 4, the fleet note, which now has the deploy id to join findings across targets.
+Status on 2026-11-12: every bet on this list has landed, along with the groundwork, the tool transcript, the conditional ledger write and the diagnosis card. What remains is the coverage list: Query Store and Statspack.
 
 The groundwork (kind and subject on the model's finding, one matcher), then bets 1 and 2, then the settings diff from bet 3, then deploy feeds.
 

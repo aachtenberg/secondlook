@@ -24,6 +24,8 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
 - **Snapshot.** The review with its findings, wait-time and load charts, the top SQL (click a column header to
   sort by it), links to every stored file (opened in a side panel), the discussion panel, and a **Download bundle**
   link that exports the snapshot as one zip for a postmortem or an auditor (operations.md, "The record you can hand someone").
+  A finding with a change proposal shows it under the fix: the statement with a **Copy** button, its undo, who
+  runs it and when, and links to the snapshots that justify it. Nothing on the page applies a change.
 - **Compare.** Any two snapshots of a database side by side, with the parameters that changed between them in
   their own table (each one is also a low `setting_changed` finding, and its name is written into the evidence of
   any SQL regression, plan change or wait shift in the same window).
@@ -161,12 +163,26 @@ The model gets the review, the item you asked about, and the same read-only tool
 come from the stored evidence, and each one shows the model, tool calls, tokens and time taken. Each answer keeps
 to the reviewer's token budget (see [models](models.md#keeping-the-bill-down)). Two limits are deliberate:
 
-- **No live database.** There is no tool for it. When a question needs a live query, the model says what to run.
-- **No memory across reviews.** A thread is context for itself only; nothing said in it shapes the next review.
+- **No live database.** There is no tool for it. When a question needs a live query, the model proposes a read
+  (below) and a person runs it.
+- **No memory across reviews.** A thread is context for itself only; nothing said in it shapes the next review,
+  with one exception: a result a person pasted for a proposed read, which the next review can read.
 
 Threads are stored next to the snapshot, so they survive restarts and form part of the record. A thread holds up
 to 20 questions, and the last 8 exchanges are sent with each new one. `/s/<id>#chat-finding-2` links straight to
 one. From the shell: `dbtriage ask <snapshot> "question" --finding 2`.
+
+### Proposed reads
+
+When an answer needs something only the live database can say, the model proposes a read: one line saying what
+to look for, then one read-only statement (an `EXPLAIN`, a wait or lock query, a stats query). The panel shows it
+as a numbered block with **Copy** and **Paste the result**. Run it yourself, with your own credentials and tools,
+and paste what came back; **Save result** stores it in the thread under the avatar `P`, labelled *supplied by a
+person, not measured by Second Look*. Quoted values are masked before it is stored, as in every report, a line
+that is itself a SQL statement is masked as SQL, and a result is cut at 20 KB. The model cites it in later answers
+of that thread, and the next review of the database reads it through `get_operator_answers`, always as something
+a person supplied. Nothing in this flow runs against the database: the web view has no connection to it, and the
+statement is only ever text on the page. See [operations](operations.md#a-proposed-read-answered-by-a-person).
 
 ## Scheduling
 
