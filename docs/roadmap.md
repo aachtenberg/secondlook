@@ -138,7 +138,7 @@ Datadog exports charts. The model chat exports a transcript. The bundle is the r
 
 ## What to build first
 
-Status on 2026-11-11: the groundwork, bets 1, 2, 3 and 7 and the tool transcript have landed. Next is bet 4, the fleet note, which now has the deploy id to join findings across targets.
+Status on 2026-11-12: every bet on this list has landed, along with the groundwork, the tool transcript, the conditional ledger write and the diagnosis card. What remains is the coverage list: Query Store and Statspack.
 
 The groundwork (kind and subject on the model's finding, one matcher), then bets 1 and 2, then the settings diff from bet 3, then deploy feeds.
 
