@@ -84,21 +84,28 @@ def _fits(start: datetime, end: datetime, at: datetime, cur_len: timedelta) -> s
 
 def _restart_inside(summary: dict, start: datetime, end: datetime) -> str | None:
     """Why an interval snapshot's window cannot stand for its hour: a restart inside it. AWR clips the window to the
-    time since the restart and notes it; the startup time is checked as well, on the database's own clock (AWR's
-    begin, end and startup are naive timestamps from that clock), falling back to the UTC window given."""
+    time since the restart and notes it; the startup time is checked as well. AWR's begin, end and startup are naive
+    timestamps on the database's own clock, so they are compared with each other as they are and the reason names
+    that clock, never a UTC offset the value never had. Only without begin and end is the startup held against the
+    UTC window given, which is approximate when the startup is naive: the database's clock may be hours from UTC."""
     awr = summary.get("awr") or {}
     if awr.get("note"):
         return "the AWR window spans an instance restart"
     if not awr.get("startup"):
         return None
     try:
+        startup = datetime.fromisoformat(awr["startup"])
         t = _ts(awr["startup"], end)
+        approximate = ""
         if awr.get("begin") and awr.get("end"):
             start, end = _ts(awr["begin"], end), _ts(awr["end"], end)
+        elif startup.tzinfo is None:
+            approximate = " (approximate: no AWR begin and end, so the database's clock is compared with UTC)"
     except (TypeError, ValueError):
         return None
     if start < t <= end:
-        return f"instance startup at {t.isoformat()} inside the window"
+        when = f"{startup:%Y-%m-%d %H:%M} on the database's clock" if startup.tzinfo is None else startup.isoformat()
+        return f"instance startup at {when} inside the window{approximate}"
     return None
 
 

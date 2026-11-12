@@ -205,13 +205,32 @@ def test_awr_windows_are_placed_by_elapsed_s_not_the_database_clock(tmp_path):
     fill(st, engine="oracle", target="ora", kind="interval", db_offset=timedelta(hours=5), startup_inside={startup})
     band = usual_band(st, "oracle", "ora", sid_at("oracle", "ora", MONDAY))
     assert band["weeks_used"] == 5 and [s["week"] for s in band["skipped"]] == [3]
-    assert band["skipped"][0]["reason"].startswith("instance startup at ") and "inside the window" in band["skipped"][0]["reason"]
+    # 01:40 UTC is 06:40 on that clock: the reason names the clock, not a UTC offset the naive value never had
+    assert band["skipped"][0]["reason"] == "instance startup at 2026-10-19 06:40 on the database's clock inside the window"
     ends = [datetime.fromisoformat(w["end"]) for w in band["windows"]]
     assert ends == [mondays(6)[i] for i in (0, 1, 3, 4, 5)]
     assert all(datetime.fromisoformat(w["start"]) == e - timedelta(hours=1) for w, e in zip(band["windows"], ends))
     behind = LocalStorage(tmp_path / "behind")
     fill(behind, engine="oracle", target="ora", kind="interval", db_offset=timedelta(hours=-5))
     assert usual_band(behind, "oracle", "ora", sid_at("oracle", "ora", MONDAY))["weeks_used"] == 6
+
+
+def test_startup_without_an_awr_window_is_held_against_utc_and_says_so(tmp_path):
+    """Without AWR's begin and end the startup can only be compared with the UTC window the band keeps, which is
+    approximate when the startup is a naive database-clock value; an aware startup compares exactly and says nothing."""
+    week3 = sid_at("oracle", "ora", mondays(6)[2])
+    for name, offset, reason in (
+        ("naive", timedelta(0), "instance startup at 2026-10-19 01:40 on the database's clock inside the window "
+                                "(approximate: no AWR begin and end, so the database's clock is compared with UTC)"),
+        ("aware", None, "instance startup at 2026-10-19T01:40:00+00:00 inside the window"),
+    ):
+        st = LocalStorage(tmp_path / name)
+        fill(st, engine="oracle", target="ora", kind="interval", db_offset=offset, startup_inside={mondays(6)[2]})
+        summary = st.get_json(f"{week3}/summary.json")
+        del summary["awr"]["begin"], summary["awr"]["end"]
+        st.put_json(f"{week3}/summary.json", summary)
+        band = usual_band(st, "oracle", "ora", sid_at("oracle", "ora", MONDAY))
+        assert [s["week"] for s in band["skipped"]] == [3] and band["skipped"][0]["reason"] == reason
 
 
 # --------------------------------------------------------------------------- what it says

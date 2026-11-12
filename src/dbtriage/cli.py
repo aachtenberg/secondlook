@@ -323,7 +323,9 @@ def main(argv=None):
 
         key = chat.thread_key(args.finding)
         if args.question:
-            ans = chat.Chat(store, lambda: make_backend(cfg.agent)).ask(args.snapshot, args.finding, args.question)
+            # the target's band_weeks, as the web view and the MCP server pass it: a 0 or 12 holds in a CLI discussion too
+            ans = chat.Chat(store, lambda: make_backend(cfg.agent),
+                            band_weeks_for=lambda name: band.weeks_for(cfg, name)).ask(args.snapshot, args.finding, args.question)
             print(ans["text"])
             print(f"\n_{chat.footer(ans)}_", file=sys.stderr)
         else:
