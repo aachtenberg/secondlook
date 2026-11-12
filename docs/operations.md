@@ -308,7 +308,7 @@ src/dbtriage/
   config.py       targets.toml
   settings.py     the Settings page's overlay (file or Postgres)
   collectors/     base.py (the shared snapshot shape), postgres.py, oracle.py, mysql.py (MySQL and MariaDB), sqlserver.py
-  dbsnap.py       opt-in snapshots on the database (an AWR snapshot), and the entry point for more
+  dbsnap.py       opt-in snapshots on the database (an AWR or a Statspack snapshot), and the entry point for more
   storage.py      disk, S3, Azure Blob and Postgres stores, and the outage spool
   envfile.py      reading .env and noticing edits
   redact.py       masking values in SQL and report text
@@ -371,7 +371,5 @@ database inside the container, so a recreate starts it over too, AWR history inc
 
 ## What's next
 
-- Query Store for SQL Server: interval statistics for the window, instead of the plan cache, which forgets
-  statements when plans are evicted.
-- Statspack, for Oracle Standard Edition. Taking Statspack snapshots can already plug in through the
-  `dbtriage.db_snapshot` entry point ([configuration](configuration.md#letting-dbtriage-take-snapshots-on-the-database)); reading them is the missing part.
+Everything planned in [the roadmap](roadmap.md) has landed. New work starts there: a bet that makes the review more
+trustworthy or more useful over time, not a second dashboard.

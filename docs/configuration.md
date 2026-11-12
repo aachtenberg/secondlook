@@ -90,12 +90,13 @@ good starting point.
 **SQL Server** (2016 and later, on Windows or Linux, and Azure SQL Managed Instance; spills from 2016 SP2 and 2017
 CU3) uses Microsoft's
 `mssql-python` driver, an optional extra: `uv sync --extra sqlserver`. It needs no separate ODBC install. dbtriage
-reads the plan cache (`sys.dm_exec_query_stats` for the database it connects to, one row per query hash and plan, so
-a new plan shows as a plan change),
+reads top SQL for the database it connects to from Query Store when it is on, else from the plan cache
+(`sys.dm_exec_query_stats`), one row per query hash and plan either way, so a new plan shows as a plan change (see
+[Query Store or the plan cache](#sql-server-query-store-or-the-plan-cache)). It also reads
 wait statistics (idle and background waits left out), active and blocked requests, performance counters and the
 server configuration. These counters are cumulative, like Postgres and MySQL, so two snapshots are compared as an
-interval. A restart of the instance starts them over, and a statement's own counters start over when its plan leaves the
-cache and comes back, which the comparison sees too.
+interval. A restart of the instance starts them over, and a plan-cache statement's own counters start over when its
+plan leaves the cache and comes back, which the comparison sees too.
 
 - The login needs `VIEW SERVER PERFORMANCE STATE` on SQL Server 2022 (`VIEW SERVER STATE` on earlier versions) and,
   in the database it connects to, `VIEW DATABASE STATE` and `VIEW DEFINITION`. The last only lets it see table and
@@ -123,6 +124,48 @@ keep working, and a run for that database stops with a clear message until the v
 
 Relative paths in `targets.toml` (a `file://./data` store, `changes_file`, a change feed's `path`, `logo`,
 `custom_css`, `templates_dir`) are relative to `targets.toml` itself, not to the directory you start dbtriage from.
+
+## SQL Server: Query Store or the plan cache
+
+SQL Server keeps statement statistics in two places, and each database picks one for its top SQL:
+
+```toml
+[targets.prod-sql]
+engine = "sqlserver"
+top_sql_source = "auto"              # auto | query_store | plan_cache
+```
+
+- **Query Store** keeps runtime statistics per interval inside the database. It still has a statement after its plan
+  left the cache, and it outlives a restart. Its figures already are the window's, so the comparison takes them as
+  they are and subtracts nothing; the load profile and waits beside them stay cumulative and are compared as an
+  interval as before. From SQL Server 2017 each statement also carries its wait time by Query Store's wait category.
+- **The plan cache** (`sys.dm_exec_query_stats`) is cumulative since each plan was cached, and forgets a statement
+  when its plan is evicted.
+
+`auto`, the default, reads Query Store when its actual state is `READ_WRITE` or `READ_ONLY` and it holds runtime
+statistics for intervals overlapping the window; otherwise the plan cache. `query_store` reads only Query Store and
+fails the snapshot when it is off. `plan_cache` never looks at Query Store. Every snapshot records the source as
+`top_sql_source` in `summary.json`, and says which and why in its notes (`summary.json` and `manifest.json`). The
+statement names are the same from both sources (`sql_id` is the query hash, `plan_hash` the query plan hash), so a
+finding, its ledger entry and the fleet digest's statement link carry across a change of source. A snapshot whose
+baseline came from Query Store but which itself fell back to the plan cache counts the plan cache's figures whole,
+as after a restart, and claims no plan change. `top_sql_source` is on the database's edit page too, under
+"Where statements come from".
+
+**An interval is often longer than the window.** Query Store adds up by `INTERVAL_LENGTH_MINUTES` (60 by default)
+and an interval cannot be split, so a window that starts inside an interval reads all of it. The span the statements
+actually cover is stored as `top_sql_window`, the snapshot notes it when it differs from the window, and the
+comparison works out per-second statement rates over that span rather than the window. A shorter interval gives
+tighter windows; changing it is for the database's owner, not for dbtriage. Query Store's default capture mode
+(`AUTO`) also leaves out statements too cheap and rare to matter.
+
+**Permission.** Reading Query Store needs `VIEW DATABASE STATE` in the database, which the login already needs for
+the plan cache and index usage:
+
+```sql
+USE app;
+GRANT VIEW DATABASE STATE TO dbtriage;
+```
 
 ## The change feed
 
@@ -189,13 +232,77 @@ licence.
 **Oracle licensing.** With `diagnostics_pack = false`, dbtriage reads only the `V$` views and never queries
 `DBA_HIST*` or AWR. Set it to `true` only when the Diagnostics Pack is licensed. As a second guard, the database's
 own `control_management_pack_access` must include DIAGNOSTIC too; if it does not, dbtriage uses the `V$` views and
-notes why in the snapshot. `create_snapshot` only applies with the pack on.
+notes why in the snapshot. Without the pack, Statspack can stand in for AWR (next section).
+
+## Oracle without the Diagnostics Pack: Statspack
+
+Statspack is AWR's free predecessor. It ships with every edition, Standard Edition included, and needs no pack
+licence. With it, a database without the Diagnostics Pack gets the same review as one with AWR: top SQL with plan
+hashes, wait events and the load profile for the window, compared as intervals.
+
+**Installing it is the DBA's step.** As SYS, run `@?/rdbms/admin/spcreate.sql`, which creates the PERFSTAT schema.
+Snapshots then come from a job (`spauto.sql` takes one an hour) or from dbtriage itself (next section). dbtriage
+never installs Statspack. On Amazon RDS it is the `STATSPACK` option of an option group.
+
+**The level decides what is captured.** SQL statistics come from level 5 (Statspack's default), plan hashes from
+level 6, segment statistics from level 7. Below level 5 a snapshot's top SQL is left empty, and the snapshot says
+why. The DBA sets the job's level with `statspack.modify_statspack_parameter(i_snap_level => 7)`; the snapshots
+dbtriage takes use `statspack_level` (default 7).
+
+**Grants.** The monitoring user reads six PERFSTAT tables. Run these as PERFSTAT or SYS:
+
+```sql
+GRANT SELECT ON perfstat.stats$snapshot TO c##dbtriage;
+GRANT SELECT ON perfstat.stats$sql_summary TO c##dbtriage;
+GRANT SELECT ON perfstat.stats$sql_plan_usage TO c##dbtriage;
+GRANT SELECT ON perfstat.stats$system_event TO c##dbtriage;
+GRANT SELECT ON perfstat.stats$sysstat TO c##dbtriage;
+GRANT SELECT ON perfstat.stats$sys_time_model TO c##dbtriage;
+-- only if dbtriage takes Statspack snapshots (allow_db_writes and create_snapshot, next section)
+GRANT EXECUTE ON perfstat.statspack TO c##dbtriage;
+```
+
+Wait classes come from `V$EVENT_NAME` and time-model names from `V$SYS_TIME_MODEL`, which `SELECT_CATALOG_ROLE`
+already covers. Without `stats$sql_plan_usage`, top SQL has no plan hash, and the snapshot says so.
+
+**What `auto` picks.** `oracle_source` chooses the source per database:
+
+| `oracle_source` | Reads |
+|---|---|
+| `auto` (default) | AWR when `diagnostics_pack = true` and the database's `control_management_pack_access` includes DIAGNOSTIC; else Statspack, when `PERFSTAT.STATS$SNAPSHOT` can be read and has two snapshots from one startup around the window; else the `V$` views |
+| `awr` | AWR; the `V$` views when the pack is off |
+| `statspack` | Statspack; the run stops with a clear message when it cannot be read, or has fewer than two snapshots since the instance started |
+| `vdollar` | the `V$` views only |
+
+Each snapshot's notes say which source it read and why, and `summary.json` records it as `oracle_source`. With
+`diagnostics_pack = false`, `DBA_HIST*` is never queried, whatever `oracle_source` says. `oracle_source` and
+`statspack_level` are on the database's edit page too, under "Where statements come from".
+
+**When the source changes.** AWR and Statspack give a window's figures; the `V$` views give running totals. A review
+never subtracts one kind from the other: when the baseline was read from the other kind (the first runs after
+Statspack is installed, a snapshot job that stopped, the pack switched off), the review says "Not compared" and why,
+and an AWR or Statspack snapshot is still read on its own window. The usual band skips past weeks read the other
+way, naming why.
+
+**Which two snapshots.** Statspack snapshots are points in time. dbtriage reports from the newest one at or before
+the window's start to the oldest at or after its end, or the newest inside it for a window that ends now. Both must
+come from one instance startup, because the counters start over at a restart; a window that spans one is reported
+from the restart on. With `oracle_source = "statspack"` and no such pair, the newest two of the latest startup are
+used, and the snapshot says so.
+
+**A statement in only one snapshot.** Statspack keeps cumulative figures for the statements over its thresholds. A
+statement missing from the first snapshot is counted from when it was loaded. One missing from the second aged out
+of the shared pool, and its work in the window is lost. The snapshot's notes count both.
+
+**The report.** `spreport.sql` runs only in SQL*Plus, so dbtriage stores `statspack.txt` instead: a short summary
+built from the numbers it read (load profile, top waits, top SQL with its literals masked). The reviewer reads it
+the way it reads `awr.txt`, and `dbtriage show <snapshot> statspack.txt` prints it.
 
 ## Letting dbtriage take snapshots on the database
 
 dbtriage only reads, and that is the default. Some teams want it to take the database's own snapshot before it
-collects. On Oracle that is an AWR snapshot, so the review's window ends now rather than at the last hourly
-snapshot. Two switches turn this on, and both are needed:
+collects. On Oracle that is an AWR or Statspack snapshot, so the review's window ends now rather than at the last
+hourly snapshot. Two switches turn this on, and both are needed:
 
 ```toml
 [collect]
@@ -211,12 +318,15 @@ SQL Server limits (`call_timeout_ms`, `connect_timeout_s`, `min_snapshot_age_min
 `recipes/reference.toml`) under **Engine limits**. While writes are off, a database set to take snapshots takes none,
 and each of its snapshots says why.
 
-- **Oracle** (built in) needs `diagnostics_pack = true` and `EXECUTE` on `DBMS_WORKLOAD_REPOSITORY`, which reading
-  the AWR report already needs. It skips the snapshot when the newest one is younger than `min_snapshot_age_min`
-  (default 5). The snapshot is taken on a separate session, and collection itself only reads.
-- **Other engines**, or another method such as Statspack or pg_profile's `take_sample()`, plug in as a package
-  entry point in the `dbtriage.db_snapshot` group, named after the engine. A plugin replaces the built-in one for
-  that engine:
+- **Oracle** (built in) takes the kind of snapshot the database is read from. For AWR it needs
+  `diagnostics_pack = true` and `EXECUTE` on `DBMS_WORKLOAD_REPOSITORY`, which reading the AWR report already needs.
+  For Statspack (`oracle_source = "statspack"`, or `auto` without the pack) it runs `PERFSTAT.STATSPACK.SNAP` at
+  `statspack_level` (default 7), which needs `EXECUTE` on `PERFSTAT.STATSPACK`. Either way it skips the snapshot when
+  the newest one is younger than `min_snapshot_age_min` (default 5). The snapshot is taken on a separate session,
+  and collection itself only reads.
+- **Other engines**, or another method such as pg_profile's `take_sample()`, plug in as a package entry point in
+  the `dbtriage.db_snapshot` group, named after the engine. A plugin replaces the built-in one for that engine (one
+  named `oracle` replaces both AWR and Statspack):
 
   ```toml
   [project.entry-points."dbtriage.db_snapshot"]

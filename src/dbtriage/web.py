@@ -66,12 +66,13 @@ from dbtriage.ledger import describe_period
 from dbtriage.storage import StorageUnavailable
 from dbtriage.settings import AGENT_FIELDS, AGENT_PROVIDERS, CHANNEL_FIELDS, ENGINES, SCHEDULE_FIELDS, SEVERITIES, WEB_FIELDS, Settings, mask_dsn, probe
 from dbtriage.settings import CHANGES_FIELDS, CHANGES_NUMBERS, SettingsUnavailable, agent_value, changes_value
+from dbtriage.settings import ORACLE_SOURCES, STATSPACK_LEVELS, TOP_SQL_SOURCES
 from dbtriage.storage import Storage, StorageUnavailable, describe as describe_store, key_ok
 
 DEFAULTS = {
     "title": "dbtriage", "brand": "dbtriage", "logo": None, "accent": "#3dd68c", "theme": "auto",
     "refresh_seconds": 30, "page_size": 50, "footer": "", "custom_css": None, "templates_dir": None,
-    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "changes.json", "awr.txt", "addm.txt"],
+    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "changes.json", "awr.txt", "addm.txt", "statspack.txt"],
     "severity_colors": {"high": "#c42f2f", "medium": "#a8540a", "low": "#8a6a00", "info": "#17804a"},
 }
 
@@ -526,6 +527,12 @@ def proposal_html(p: dict | None, n: int, esc: Callable[[str], str]) -> str:
             + (f"<dl>{rows}</dl>" if rows else "") + f"<p class='mut'>{html.escape(NEVER_APPLIED)}</p></dd>")
 
 
+def _window_top_sql(summary: dict) -> bool:
+    """Does this snapshot's top SQL describe its own window? True for an interval engine (Oracle AWR) and for SQL
+    Server reading Query Store, whose load profile stays cumulative but whose statements are the window's figures."""
+    return summary.get("metrics_kind") == "interval" or summary.get("top_sql_kind") == "interval"
+
+
 def _fmt_ts(iso: str | None) -> str:
     return (iso or "")[:19].replace("T", " ")
 
@@ -789,13 +796,14 @@ class App:
         for sid in self.store.list_snapshots(t.engine, name)[-limit:]:
             c = self._compare(sid)
             if not c:
-                # no comparison (a target's first snapshot): an interval snapshot (Oracle AWR) still describes its own
-                # window, so its top SQL is comparable; cumulative counters (Postgres, MySQL) are not, so skip those
+                # no comparison (a target's first snapshot): an interval snapshot (Oracle AWR, SQL Server's Query Store)
+                # still describes its own window, so its top SQL is comparable; cumulative counters (Postgres, MySQL,
+                # the plan cache) are not, so skip those
                 try:
                     s = self.store.get_json(f"{sid}/summary.json")
                 except FileNotFoundError:
                     continue
-                if s.get("metrics_kind") != "interval":
+                if not _window_top_sql(s):
                     continue
                 top = s.get("top_sql") or []
                 total = sum(q.get("total_time_ms") or 0 for q in top) or 1
@@ -841,7 +849,7 @@ class App:
             top = sorted(s.get("top_sql") or [], key=lambda q: -(q.get("total_time_ms") or 0))[:10]
             total = sum(q.get("total_time_ms") or 0 for q in s.get("top_sql") or []) or 1
             detail["top_sql"] = [dict(q, share_of_time=q.get("share_of_time", (q.get("total_time_ms") or 0) / total)) for q in top]
-            detail["top_sql_basis"] = "window" if s.get("metrics_kind") == "interval" else "since statistics were last reset"
+            detail["top_sql_basis"] = "window" if _window_top_sql(s) else "since statistics were last reset"
         return detail
 
     def start_run(self, target: str, mode: str, reason: str, use_llm: bool, baseline_policy: str | None = None,
@@ -1632,10 +1640,24 @@ class App:
                          feed_result=feed_result, lookback_default=changes.DEFAULT_LOOKBACK_HOURS, correlate_default=changes.DEFAULT_CORRELATE_MINUTES,
                          call_timeout_ms=num("call_timeout_ms"), connect_timeout_s=num("connect_timeout_s"), min_snapshot_age_min=num("min_snapshot_age_min"),
                          band_weeks=num("band_weeks"),
+                         top_sql_source_opts=self._choice_opts(TOP_SQL_SOURCES, v.get("top_sql_source") or "auto",
+                                                               {"auto": "Auto: Query Store when it is on, else the plan cache",
+                                                                "query_store": "Query Store only", "plan_cache": "Plan cache only"}),
+                         oracle_source_opts=self._choice_opts(ORACLE_SOURCES, v.get("oracle_source") or "auto",
+                                                              {"auto": "Auto: AWR with the pack, else Statspack, else V$",
+                                                               "awr": "AWR only", "statspack": "Statspack only", "vdollar": "V$ views only"}),
+                         statspack_level_opts=self._choice_opts([str(n) for n in STATSPACK_LEVELS],  # 0 is a level, not a blank
+                                                                "7" if v.get("statspack_level") in (None, "") else str(v.get("statspack_level")),
+                                                                {"0": "0: basic statistics", "5": "5: and SQL", "6": "6: and SQL plans",
+                                                                 "7": "7: and segment statistics", "10": "10: and parent and child latches"}),
                          mask_report_literals="" if v.get("mask_report_literals") is False else "checked",
                          links=html.escape(links), notes=html.escape(v.get("notes") or ""), buttons=buttons,
                          baseline_opts="".join(f"<option value='{p}'{' selected' if (v.get('baseline_policy') or 'previous') == p else ''}>{LABELS[p]}</option>" for p in POLICIES),
                          baseline_snapshot_opts=self._baseline_snapshot_opts(v.get("engine"), name, v.get("baseline") or ""))
+
+    @staticmethod
+    def _choice_opts(values, current: str, labels: dict[str, str]) -> str:
+        return "".join(f"<option value='{html.escape(c)}'{' selected' if c == current else ''}>{html.escape(labels.get(c, c))}</option>" for c in values)
 
     def _baseline_snapshot_opts(self, engine: str | None, name: str | None, current: str, limit: int = 60) -> str:
         """The stored snapshots a pinned baseline can be chosen from, newest first, the current pin kept even when
@@ -1689,8 +1711,8 @@ class App:
                     "<b>Database writes are on</b> in targets.toml ([collect] allow_db_writes = true): databases set to take "
                     "snapshots on the database take one before collecting. The rest only read.")
         return ("No effect while targets.toml has dbtriage only read: set allow_db_writes = true under [collect] there." if short else
-                "dbtriage only reads your databases. To let it take snapshots on them (an AWR snapshot before each Oracle "
-                "collection), set <code>allow_db_writes = true</code> under <code>[collect]</code> in targets.toml, then pick "
+                "dbtriage only reads your databases. To let it take snapshots on them (an AWR or Statspack snapshot before "
+                "an Oracle collection), set <code>allow_db_writes = true</code> under <code>[collect]</code> in targets.toml, then pick "
                 "the databases on their edit pages. This page cannot turn it on.")
 
     def _mcp_note(self) -> str:
@@ -1726,7 +1748,8 @@ class App:
                            "changes_file": changes_file, "changes": feed, "links": links, "notes": g("notes"),
                            "baseline_policy": g("baseline_policy") if g("baseline_policy") != "previous" else "", "baseline": g("baseline"),
                            "call_timeout_ms": g("call_timeout_ms"), "connect_timeout_s": g("connect_timeout_s"), "min_snapshot_age_min": g("min_snapshot_age_min"),
-                           "band_weeks": g("band_weeks"), "mask_report_literals": "mask_report_literals" in form}
+                           "band_weeks": g("band_weeks"), "mask_report_literals": "mask_report_literals" in form,
+                           "top_sql_source": g("top_sql_source"), "oracle_source": g("oracle_source"), "statspack_level": g("statspack_level")}
 
     def save_target(self, name: str, fields: dict, keep_secrets: bool = True) -> list[str]:
         """Blank dsn/password on an edit means 'keep what is stored'."""

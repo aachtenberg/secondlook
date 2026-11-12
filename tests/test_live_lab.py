@@ -175,6 +175,26 @@ def test_opt_in_awr_snapshot_on_the_lab(lab_cfg):
     assert store.get_json(f"{again}/manifest.json")["db_snapshot"]["status"] == "not needed"
 
 
+def test_oracle_without_the_pack_falls_back_from_statspack_to_v_dollar(lab_cfg):
+    """The lab has no Statspack: auto without the pack says so and reads V$, never DBA_HIST; an explicit statspack
+    stops. Read only: no snapshot is taken."""
+    from datetime import timedelta
+
+    from dbtriage.collectors.base import Window
+    from dbtriage.collectors.oracle import OracleCollector
+
+    t = lab_cfg.targets.get("ora-lab")
+    if t is None or not reachable(t)[0]:
+        pytest.skip("ora-lab not reachable")
+    now = datetime.now(timezone.utc)
+    window = Window(start=now - timedelta(hours=1), end=now, mode="adhoc")
+    s = OracleCollector(replace(t, diagnostics_pack=False, extra={**t.extra, "oracle_source": "auto"})).collect(window).summary
+    assert s["oracle_source"] == "vdollar" and s["metrics_kind"] == "cumulative" and "awr" not in s, s.get("notes")
+    assert "Statspack cannot be read" in s["notes"][0] and "ORA-00942" in s["notes"][0], s["notes"]
+    with pytest.raises(SystemExit, match="oracle_source = statspack, but PERFSTAT.STATS\\$SNAPSHOT cannot be read"):
+        OracleCollector(replace(t, diagnostics_pack=False, extra={**t.extra, "oracle_source": "statspack"})).collect(window)
+
+
 @pytest.mark.parametrize("name", ["mysql-lab", "mariadb-lab"])
 def test_mysql_collection_session_is_read_only(lab_cfg, name):
     from dbtriage.collectors.mysql import connect

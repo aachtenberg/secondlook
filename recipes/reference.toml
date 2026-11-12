@@ -127,7 +127,7 @@ channels = ["stdout"]
 # footer = "Internal tool: questions to #dba"
 # custom_css = "branding/theme.css"    appended after the built-in styles
 # templates_dir = "branding/templates" replace any page template, file by file
-# files = ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "awr.txt", "addm.txt"]   files shown on a snapshot page; "*" exposes every stored file
+# files = ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "awr.txt", "addm.txt", "statspack.txt"]   files shown on a snapshot page; "*" exposes every stored file
 # settings_file = "dbtriage-settings.json"   where Settings-page changes go; or a postgres:// URL to share them (DBTRIAGE_SETTINGS overrides)
 # [web.severity_colors]
 # high = "#c42f2f"
@@ -138,7 +138,7 @@ channels = ["stdout"]
 # ------------------------------------------------------------------------------------------------ writing to databases
 # [collect]
 # allow_db_writes = false              dbtriage only reads. true lets the databases that set create_snapshot take a
-#                                      snapshot on the database before each collection (on Oracle, an AWR snapshot).
+#                                      snapshot on the database before each collection (on Oracle, AWR or Statspack).
 #                                      Only here: the web view and its API cannot change it. Plugins add other engines
 #                                      (entry point group "dbtriage.db_snapshot"; see docs/configuration.md)
 
@@ -194,6 +194,10 @@ dsn_env = "EXAMPLE_PG_DSN"             # preferred: the connection string lives 
 #                                      or a connection string: Server=tcp:host,1433;Database=db;Authentication=...;Encrypt=yes
 # connect_timeout_s = 10               longest the login may take
 # call_timeout_ms = 120000             longest any single query may take (also Oracle)
+# top_sql_source = "auto"              where top SQL comes from: auto | query_store | plan_cache. auto reads Query Store
+#                                      when it is READ_WRITE or READ_ONLY and holds runtime statistics for the window,
+#                                      else the plan cache, and the snapshot notes which and why. query_store fails the
+#                                      snapshot when Query Store is off. Needs VIEW DATABASE STATE (docs/configuration.md)
 
 # [targets.example-oracle]
 # engine = "oracle"
@@ -201,9 +205,17 @@ dsn_env = "EXAMPLE_PG_DSN"             # preferred: the connection string lives 
 # user = "C##DBTRIAGE"                 when the DSN has no user
 # password = "..."                     discouraged: put it in the DSN variable instead
 # diagnostics_pack = false             true only with the Diagnostics Pack licence: AWR, ASH and ADDM are read only then
-# create_snapshot = "off"              take an AWR snapshot before collecting: "off", "incident" (incident runs; true
-#                                      means this too) or "always". Does nothing unless [collect] allow_db_writes = true
+# oracle_source = "auto"               what is read: auto | awr | statspack | vdollar. auto reads AWR with the pack;
+#                                      else Statspack, when PERFSTAT.STATS$SNAPSHOT can be read and has two snapshots from
+#                                      one startup around the window; else the V$ views. Each snapshot notes which and why.
+#                                      statspack stops with a clear message when it cannot be read. Without the pack,
+#                                      DBA_HIST is never touched, whatever this says (docs/configuration.md, Statspack)
+# create_snapshot = "off"              take the database's own snapshot before collecting (AWR, or Statspack when that is
+#                                      the source): "off", "incident" (incident runs; true means this too) or "always".
+#                                      Does nothing unless [collect] allow_db_writes = true
 # min_snapshot_age_min = 5             ...but only when the newest one is older than this
+# statspack_level = 7                  the level of the Statspack snapshots dbtriage takes (0, 5, 6, 7 or 10): SQL needs 5,
+#                                      plan hashes 6. Snapshots the DBA's own job takes keep the job's level
 # call_timeout_ms = 120000             longest any single query to the database may take
-# mask_report_literals = true          mask quoted values in the stored AWR/ADDM text (what the reviewer reads);
+# mask_report_literals = true          mask quoted values in the stored AWR/ADDM/Statspack text (what the reviewer reads);
 #                                      false keeps the original text, for teams that do not send it to an outside model

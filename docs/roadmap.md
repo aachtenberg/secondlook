@@ -20,6 +20,8 @@ New work should make that review more trustworthy and more useful over time. It 
 - A SQL IDE, a trace product, or a live connection from the model. The reviewer-access picture is the enterprise pitch. Do not blur it.
 
 Coverage work still belongs on the list, and it is not the story. Query Store (SQL Server plan cache forgets statements) and Statspack (Oracle Standard Edition) make the same review possible on more databases. Ship them as coverage. Do not market them as the difference.
+*(Query Store landed: SQL Server's top SQL comes from it when it is on and holds the window, with the plan cache as the fallback; `top_sql_source` in [configuration](configuration.md#sql-server-query-store-or-the-plan-cache).)*
+*(Statspack done: an Oracle database without the Diagnostics Pack is read from Statspack when it is installed; `oracle_source` in `docs/configuration.md`.)*
 
 ## What the code already has
 
@@ -138,7 +140,7 @@ Datadog exports charts. The model chat exports a transcript. The bundle is the r
 
 ## What to build first
 
-Status on 2026-11-12: every bet on this list has landed, along with the groundwork, the tool transcript, the conditional ledger write and the diagnosis card. What remains is the coverage list: Query Store and Statspack.
+Status on 2026-11-12: every bet on this list has landed, along with the groundwork, the tool transcript, the conditional ledger write and the diagnosis card, and so has the coverage list: Query Store for SQL Server and Statspack for Oracle without the Diagnostics Pack.
 
 The groundwork (kind and subject on the model's finding, one matcher), then bets 1 and 2, then the settings diff from bet 3, then deploy feeds.
 
@@ -153,4 +155,4 @@ Both counts come from stored objects. Neither needs a new service.
 - **Repeat posts per target per week.** A delivered finding whose identity was already open in the previous run. Bet 2 should drive this toward zero for unchanged findings.
 - **Rules findings the model dropped.** Per run, the count of `heuristics` entries at medium or above with no matching model finding. Bet 1 makes this visible; a rising number is a prompt or model problem to look at, not something to hide.
 
-Query Store and Statspack stay on the coverage list. They widen who can use the review. They do not replace it.
+Query Store and Statspack were coverage, and have landed as coverage. They widen who can use the review. They do not replace it.

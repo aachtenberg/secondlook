@@ -88,9 +88,9 @@ def _restart_inside(summary: dict, start: datetime, end: datetime) -> str | None
     timestamps on the database's own clock, so they are compared with each other as they are and the reason names
     that clock, never a UTC offset the value never had. Only without begin and end is the startup held against the
     UTC window given, which is approximate when the startup is naive: the database's clock may be hours from UTC."""
-    awr = summary.get("awr") or {}
+    awr = summary.get("awr") or summary.get("statspack") or {}  # Statspack's window has the same keys and clock
     if awr.get("note"):
-        return "the AWR window spans an instance restart"
+        return f"the {'AWR' if summary.get('awr') else 'Statspack'} window spans an instance restart"
     if not awr.get("startup"):
         return None
     try:
@@ -121,8 +121,9 @@ def measures(iv: dict) -> dict[str, float]:
             out[k] = float(v)
         elif elapsed:
             out[k] = round(v / elapsed, 6)
-    if elapsed:
-        out["sql_time_ms"] = round(sum((s.get("total_time_ms") or 0) for s in (iv.get("sql") or {}).values()) / elapsed, 6)
+    sql_elapsed = iv.get("sql_elapsed_s") or elapsed  # Query Store's statements cover their own intervals
+    if sql_elapsed:
+        out["sql_time_ms"] = round(sum((s.get("total_time_ms") or 0) for s in (iv.get("sql") or {}).values()) / sql_elapsed, 6)
     for cls, c in ((iv.get("waits") or {}).get("classes") or {}).items():
         out[f"wait_share:{cls}"] = c.get("share", 0)
     return out
@@ -178,6 +179,8 @@ def usual_band(store, engine: str, target: str, current_sid: str, weeks: int = D
         try:
             if interval_engine:
                 s = summary(sid)
+                if (s.get("metrics_kind") or "cumulative") != "interval":  # read before Statspack or AWR was the source
+                    return None, None, f"it was read as running totals ({s.get('oracle_source') or 'cumulative'}), not as a window"
                 iv = interval_of(s)
                 end = times[sid]
                 if not iv.get("elapsed_s"):
@@ -191,6 +194,8 @@ def usual_band(store, engine: str, target: str, current_sid: str, weeks: int = D
                 if prev is None:
                     return None, None, "no snapshot before it to form an interval"
                 a, b = summary(prev), summary(sid)
+                if "interval" in (a.get("metrics_kind"), b.get("metrics_kind")):  # one end was a window, not running totals
+                    return None, None, "one end of its interval was read as a window (AWR or Statspack), not as running totals"
                 iv = interval_between(a, b)
                 start, end = _ts(iv["start"], now), _ts(iv["end"], now)
                 window = {"week": w, "snapshot": sid, "baseline": prev, "start": iv["start"], "end": iv["end"], "elapsed_s": iv["elapsed_s"]}

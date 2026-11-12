@@ -262,7 +262,7 @@ def test_degraded_store_exports_what_the_spool_holds(tmp_path):
     assert ("The store was degraded at export time (connection refused), so the listing may be partial: discussion threads "
             "and any other file not named in the manifest may be missing from this bundle.") in md
     assert "- Whatever only a full listing of the store would have named: the store was degraded at export time (connection refused)" in md
-    assert ("- Not checked: `addm.txt`, `awr.txt`, `changes.json`, `summary.json`, `tools.json`, `triage.md`: neither the listing "
+    assert ("- Not checked: `addm.txt`, `awr.txt`, `changes.json`, `statspack.txt`, `summary.json`, `tools.json`, `triage.md`: neither the listing "
             "nor the manifest names them, and the store was degraded at export time, so whether they exist could not be read") in md
     assert "No discussion threads were stored" not in md and "could not be listed" not in md
 

@@ -71,6 +71,7 @@ def collect(cfg: Config, store: Storage, req: TriageRequest) -> str:
         "changes_sources": ([str(spec["source"])] if spec else []) + (["webhook"] if any(i.get("source") == "webhook" for i in feed) else []),
         **({"correlate_minutes": changes.correlate_minutes(spec)} if "changes.json" in files else {}),
         **({"db_snapshot": db_snapshot} if db_snapshot else {}),
+        **({"notes": snap.summary["notes"]} if snap.summary.get("notes") else {}),  # e.g. where SQL Server's top SQL came from
     })
     return sid
 
@@ -99,12 +100,32 @@ def pick_baseline(cfg: Config, store: Storage, sid: str, policy: str | None = No
     return store.pick_baseline(engine, name, sid, policy or extra.get("baseline_policy"), extra.get("baseline"), explicit)
 
 
+class NotComparable(ValueError):
+    """The baseline was read from another kind of source than the snapshot (window figures against running totals),
+    so subtracting one from the other would give wrong rates. The message says which and why."""
+
+
+def _metrics_kind(summary: dict) -> str:
+    return summary.get("metrics_kind") or "cumulative"
+
+
+def _source_of(summary: dict) -> str:
+    return summary.get("oracle_source") or summary.get("top_sql_source") or _metrics_kind(summary)
+
+
 def compare_ids(store: Storage, engine: str, target: str, sid: str, baseline: str | None, how: tuple[str, str] | None = None,
                 band_weeks: int = band.DEFAULT_WEEKS) -> dict | None:
     """compare() for a snapshot id, resolving the baseline and the one before it. None if nothing to compare.
     `how` = (policy, reason) is recorded under reference so the review can say why this baseline.
-    `band_weeks` is the target's band_weeks: the usual band for this hour is passed in when the history allows (0: never)."""
+    `band_weeks` is the target's band_weeks: the usual band for this hour is passed in when the history allows (0: never).
+    NotComparable when the baseline's metrics are another kind than the snapshot's: an Oracle database whose source
+    moved between AWR or Statspack (window figures) and the V$ views (running totals), in either direction."""
     cur = summary_of(store, sid)
+    if baseline:
+        base = summary_of(store, baseline)
+        if _metrics_kind(base) != _metrics_kind(cur):
+            raise NotComparable(f"the baseline {baseline} was read from {_source_of(base)} ({_metrics_kind(base)} figures) and this "
+                                f"snapshot from {_source_of(cur)} ({_metrics_kind(cur)} figures), which cannot be compared")
     feed, margin = stored_changes(store, sid)
     # the band's hour is the interval scored below: baseline -> current on a cumulative engine
     usual = band.usual_band(store, engine, target, sid, weeks=band_weeks, baseline=baseline) if band_weeks else None
@@ -127,7 +148,13 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
     engine, target = manifest["engine"], manifest["target"]
     t = cfg.targets.get(target)
     weeks = band.weeks_for(cfg, target)
-    comparison = compare_ids(store, engine, target, sid, baseline, how, band_weeks=weeks)
+    not_comparable = None
+    try:
+        comparison = compare_ids(store, engine, target, sid, baseline, how, band_weeks=weeks)
+    except NotComparable as exc:  # the source changed under the baseline: review the snapshot on its own, and say why
+        not_comparable = f"Not compared: {exc}."
+        baseline, how = None, ("none", not_comparable)
+        comparison = compare_ids(store, engine, target, sid, None, how, band_weeks=weeks)  # an interval snapshot still has its window
     if how:
         manifest["baseline"] = {"snapshot": baseline, "policy": how[0], "reason": how[1]}
         store.put_json(f"{sid}/manifest.json", manifest)
@@ -153,7 +180,7 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
         if use_llm:
             result["agent_error"] = agent_error
         if comparison is None:
-            result["summary"] = "First snapshot for this target; nothing to compare against yet."
+            result["summary"] = not_comparable or "First snapshot for this target; nothing to compare against yet."
     result.update({"snapshot": sid, "baseline": baseline, "target": target, "engine": engine, "mode": mode,
                    "baseline_policy": how[0] if how else None, "baseline_reason": how[1] if how else None,
                    "ts": int(time.time()), "heuristics": (comparison or {}).get("findings", [])})
@@ -304,7 +331,10 @@ def main(argv=None):
         t = cfg.target(args.target)
         sid = args.snapshot or store.latest(t.engine, t.name) or sys.exit("no snapshots yet")
         base, policy, reason = pick_baseline(cfg, store, sid, args.baseline_policy, args.baseline)
-        result = compare_ids(store, t.engine, t.name, sid, base, (policy, reason), band_weeks=band.weeks_of(t.extra.get("band_weeks")))
+        try:
+            result = compare_ids(store, t.engine, t.name, sid, base, (policy, reason), band_weeks=band.weeks_of(t.extra.get("band_weeks")))
+        except NotComparable as exc:
+            result = {"error": f"not compared: {exc}"}
         print(json.dumps(result if result is not None else {"error": "no baseline: need two snapshots"}, indent=1, default=str))
     elif args.cmd == "triage":
         t = cfg.target(args.target)

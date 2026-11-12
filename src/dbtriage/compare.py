@@ -67,11 +67,13 @@ def _by_plan(rows: list[dict]) -> dict[tuple[str, Any], dict]:
     return out
 
 
-def _sql_interval(rows_a: list[dict], rows_b: list[dict], reset: bool) -> dict[str, dict]:
+def _sql_interval(rows_a: list[dict], rows_b: list[dict], reset: bool, subtract: bool = True) -> dict[str, dict]:
     """Each statement's activity between two snapshots. Each (statement, plan) is differenced on its own, then the
     plans are added up per statement: a plan that appears, or one that leaves the cache, then changes only its own
     share (merging first would subtract one plan's totals from another's). A plan the reference did not have is a
-    plan change, reported against the plan that used the most time there."""
+    plan change, reported against the plan that used the most time there.
+    subtract=False: rows_b already are the interval's (Query Store), so nothing is subtracted; rows_a only says which
+    plans the reference ran."""
     pa, pb = _by_plan(rows_a), _by_plan(rows_b)
     ref_plans: dict[str, dict[Any, float]] = {}
     for (sid, plan), r in pa.items():
@@ -80,7 +82,7 @@ def _sql_interval(rows_a: list[dict], rows_b: list[dict], reset: bool) -> dict[s
     top: dict[str, float] = {}
     spent_by_plan: dict[str, dict[Any, float]] = {}
     for (sid, plan), row in pb.items():
-        prev = None if reset else pa.get((sid, plan))
+        prev = None if reset or not subtract else pa.get((sid, plan))
         if prev is not None and prev.get("since") != row.get("since"):
             prev = None  # this plan's counters started over (sql server: it left the cache and came back)
         d = dict(row)
@@ -136,8 +138,19 @@ def interval_of(summary: dict) -> dict:
     }
 
 
+def _span_s(window: dict | None) -> float | None:
+    try:
+        return (_ts(window["end"]) - _ts(window["start"])).total_seconds() or None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def interval_between(a: dict, b: dict) -> dict:
-    """Delta of cumulative counters between snapshot a (earlier) and b (later)."""
+    """Delta of cumulative counters between snapshot a (earlier) and b (later).
+
+    top_sql_kind = "interval" on b (SQL Server's Query Store) means its top SQL already is its window's: it is taken as
+    it is, with a's top SQL only as the plans the reference ran, and the rates use the span the statements cover
+    (top_sql_window) rather than the time between the snapshots. The load profile and waits are still differenced."""
     elapsed = (_ts(b["captured_at"]) - _ts(a["captured_at"])).total_seconds()
     reset = a.get("counters_since") != b.get("counters_since")
     la, lb = a["load_profile"], b["load_profile"]
@@ -155,7 +168,12 @@ def interval_between(a: dict, b: dict) -> dict:
     if hits + reads:
         lp["cache_hit_ratio"] = round(hits / (hits + reads), 4)
 
-    sql = _sql_interval(a.get("top_sql", []), b.get("top_sql", []), reset)
+    sql_kind = {"sql_kind": "interval", "sql_window": b.get("top_sql_window"),
+                "sql_elapsed_s": _span_s(b.get("top_sql_window"))} if b.get("top_sql_kind") == "interval" else {}
+    if sql_kind:  # a restart does not reset them, so plan changes are still told against the reference's plans
+        sql = _sql_interval(a.get("top_sql", []), b.get("top_sql", []), False, subtract=False)
+    else:  # a's top SQL is window figures and b's cumulative (Query Store turned off): nothing to subtract, as after a reset
+        sql = _sql_interval(a.get("top_sql", []), b.get("top_sql", []), reset or a.get("top_sql_kind") == "interval")
 
     wa = {(w["class"], w["event"]): w for w in a.get("wait_events", [])}
     waits = []
@@ -180,7 +198,7 @@ def interval_between(a: dict, b: dict) -> dict:
     return {
         "snapshot": b.get("id"), "baseline": a.get("id"),
         "start": a["captured_at"], "end": b["captured_at"], "elapsed_s": elapsed, "counters_reset": reset,
-        "load_profile": lp, "sql": sql, "waits": _wait_shares(waits),
+        "load_profile": lp, "sql": sql, **sql_kind, "waits": _wait_shares(waits),
         "tables": tables, "sessions": b.get("sessions", []), "findings": b.get("findings", []),
         # both ends: a parameter changed inside this window is the change that sits beside its regression
         "settings": b.get("settings"), "settings_before": a.get("settings"),
@@ -231,8 +249,12 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
         "tables": [], "sessions": cur.get("sessions", []), "engine_findings": cur.get("findings", []),
         "settings_changed": [], "changes": [], "band": None, "findings": [],
     }
+    for side, iv in (("current", cur), ("reference", ref)):
+        if iv and iv.get("sql_window"):  # Query Store: the statements cover their intervals, not the snapshots' span
+            out[side]["sql_window"] = iv["sql_window"]
     findings: list[dict] = out["findings"]
     ec, er = cur["elapsed_s"], (ref or {}).get("elapsed_s")
+    ecs, ers = cur.get("sql_elapsed_s") or ec, (ref or {}).get("sql_elapsed_s") or er  # what statement rates are over
 
     # load profile: compare rates so unequal window lengths are fair
     for k, v in cur["load_profile"].items():
@@ -268,7 +290,7 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
                                       "mean_time_ms": r.get("mean_time_ms"), "cpu_time_ms": r.get("cpu_time_ms"), "plan_hash": r.get("plan_hash"),
                                       "share_of_time": round((r.get("total_time_ms") or 0) / total_ref, 3)})
             ch["mean_pct"] = _pct(r.get("mean_time_ms"), s.get("mean_time_ms"))
-            ch["calls_pct"] = _pct(_rate(r.get("calls"), er), _rate(s.get("calls"), ec))
+            ch["calls_pct"] = _pct(_rate(r.get("calls"), ers), _rate(s.get("calls"), ecs))
             ch["plan_changed"] = (r.get("plan_hash") is not None and s.get("plan_hash") is not None
                                   and r.get("plan_hash") != s.get("plan_hash")) or bool(s.get("plan_changed_from"))
             out["sql"]["changed"].append(ch)
@@ -281,8 +303,8 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
             elif share >= 0.10 and (ch["calls_pct"] or 0) >= 100:
                 findings.append(_f(30 + share * 40, "sql_volume",
                                    f"SQL {sid} runs {ch['calls_pct']:.0f}% more often, {share:.0%} of SQL time",
-                                   row["text"], {"sql_id": sid, "calls_per_s_before": _rate(r.get("calls"), er),
-                                                 "calls_per_s_after": _rate(s.get("calls"), ec)}))
+                                   row["text"], {"sql_id": sid, "calls_per_s_before": _rate(r.get("calls"), ers),
+                                                 "calls_per_s_after": _rate(s.get("calls"), ecs)}))
             elif ch["plan_changed"] and share >= 0.02:
                 findings.append(_f(30, "plan_change", f"SQL {sid} changed execution plan", row["text"],
                                    # before: the reference interval's plan; after: the new plan when one appeared

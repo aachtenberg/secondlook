@@ -74,7 +74,7 @@ class Finding(BaseModel):
     proposal: Proposal | None = Field(default=None, description="The fix as a concrete change when there is one; leave out when the fix is to investigate")
 
 
-SECTIONS = ("load_profile", "top_sql", "wait_events", "ash", "sessions", "tables", "settings", "findings", "notes", "awr", "all")
+SECTIONS = ("load_profile", "top_sql", "wait_events", "ash", "sessions", "tables", "settings", "findings", "notes", "awr", "statspack", "all")
 OPERATOR_ANSWERS_MAX = 12        # pasted results get_operator_answers returns at most, newest first
 OPERATOR_ANSWERS_CHARS = 60_000  # and at most this much result text in one call (the first result always fits)
 
@@ -127,7 +127,7 @@ class TriageAgent:
 
             Args:
                 snapshot_id: Snapshot id such as postgres/prod1/2026-11-05/20261105T101500Z.
-                section: One of load_profile, top_sql, wait_events, ash, sessions, tables, settings, findings, notes, awr, all.
+                section: One of load_profile, top_sql, wait_events, ash, sessions, tables, settings, findings, notes, awr, statspack, all.
             """
             s = agent._summary(snapshot_id)
             if section not in SECTIONS:
@@ -138,7 +138,7 @@ class TriageAgent:
         @beta_tool
         def get_raw_report(snapshot_id: str, name: str, offset: int = 0, length: int = 12000) -> str:
             """Read a slice of an engine-native text report stored with a snapshot (for example
-            the Oracle AWR report "awr.txt" or the ADDM report "addm.txt"). Use the manifest's
+            the Oracle AWR report "awr.txt", the ADDM report "addm.txt", or "statspack.txt"). Use the manifest's
             "reports" list to see what exists. Reports can be long: page through with offset.
 
             Args:
@@ -193,7 +193,9 @@ class TriageAgent:
                 s = agent._summary(sid)
                 for q in s.get("top_sql", []):
                     if str(q.get("sql_id")) == sql_id:
-                        rows.append({"snapshot": sid, "captured_at": s["captured_at"], "metrics_kind": s.get("metrics_kind", "cumulative"),
+                        # SQL Server's Query Store rows are the window's own even though the snapshot's counters are cumulative
+                        kind = s.get("top_sql_kind") or s.get("metrics_kind", "cumulative")
+                        rows.append({"snapshot": sid, "captured_at": s["captured_at"], "metrics_kind": kind,
                                      **{k: q.get(k) for k in ("calls", "total_time_ms", "mean_time_ms", "cpu_time_ms", "rows", "io_blocks_read", "plan_hash")}})
             return json.dumps(rows or f"sql_id {sql_id} not in the top SQL of the last {len(ids)} snapshots")
 

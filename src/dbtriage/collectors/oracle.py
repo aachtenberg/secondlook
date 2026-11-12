@@ -1,5 +1,7 @@
 """Oracle collector.
 
+oracle_source picks what it reads, per target: auto (the default), awr, statspack or vdollar.
+
 With the Diagnostics Pack (target.diagnostics_pack = true) it pulls, for the AWR
 snapshots that bracket the requested window:
   * the AWR text report (DBMS_WORKLOAD_REPOSITORY.AWR_REPORT_TEXT), stored as a report
@@ -9,13 +11,19 @@ snapshots that bracket the requested window:
   * ASH sample counts from DBA_HIST_ACTIVE_SESS_HISTORY
 Metrics in that mode are interval values ("metrics_kind": "interval").
 
-Without the pack (Standard Edition or unlicensed) it only reads cumulative V$ views
-(V$SQLSTATS, V$SYSTEM_EVENT, V$SYSSTAT, V$SESSION) and never touches DBA_HIST*,
-so a licence audit has nothing to find. Those metrics are "cumulative" and are
-diffed against the previous snapshot like Postgres/MySQL.
+Without the pack, Statspack (installed by the DBA with spcreate.sql) gives the same shape from the PERFSTAT.STATS$
+tables: two snapshots around the window from one startup, deltas of STATS$SQL_SUMMARY, STATS$SYSTEM_EVENT,
+STATS$SYSSTAT and STATS$SYS_TIME_MODEL, plan hashes from STATS$SQL_PLAN_USAGE, and a short statspack.txt built from
+those numbers (spreport.sql is SQL*Plus only). Also "interval". auto reads it when the pack is off and such a pair
+exists.
+
+Otherwise it only reads cumulative V$ views (V$SQLSTATS, V$SYSTEM_EVENT, V$SYSSTAT, V$SESSION). Without the pack it
+never touches DBA_HIST*, whatever the source, so a licence audit has nothing to find. V$ metrics are "cumulative" and
+are diffed against the previous snapshot like Postgres/MySQL.
 
 Read-only user: see compose/oracle/init.sql (CREATE SESSION, SELECT_CATALOG_ROLE,
-EXECUTE ON DBMS_WORKLOAD_REPOSITORY). Thin-mode python-oracledb, no Instant Client.
+EXECUTE ON DBMS_WORKLOAD_REPOSITORY), and for Statspack SELECT on the STATS$ tables it reads
+(docs/configuration.md). Thin-mode python-oracledb, no Instant Client.
 """
 from __future__ import annotations
 
@@ -38,6 +46,9 @@ SYSSTATS = (
     "redo size", "sorts (disk)", "table scans (long tables)", "logons cumulative",
 )
 TIME_MODEL = ("DB time", "DB CPU", "sql execute elapsed time", "parse time elapsed")
+SOURCES = ("auto", "awr", "statspack", "vdollar")
+STATSPACK_LEVELS = (0, 5, 6, 7, 10)  # what STATSPACK.SNAP takes: SQL from 5, plan usage from 6, segment statistics from 7
+SQL_STATS = ("executions", "elapsed_time", "cpu_time", "buffer_gets", "disk_reads", "rows_processed", "direct_writes")
 
 
 def _rows(cur, sql, **binds):
@@ -52,8 +63,29 @@ def _clob(v) -> str:
     return v.read() if hasattr(v, "read") else str(v)
 
 
+def _first_line(exc: Exception) -> str:
+    return (str(exc).splitlines() or [""])[0][:200]
+
+
+def source_of(target: Target) -> str:
+    """oracle_source as one of SOURCES, blank meaning auto. ValueError otherwise (a snapshot taker must not exit)."""
+    v = target.extra.get("oracle_source") or "auto"
+    if v not in SOURCES:
+        raise ValueError(f"oracle_source: one of {', '.join(SOURCES)}")
+    return v
+
+
+def statspack_level(target: Target) -> int:
+    """The level dbtriage's own Statspack snapshots are taken at: statspack_level, else 7."""
+    v = target.extra.get("statspack_level")
+    level = 7 if v in (None, "") else int(v)
+    if level not in STATSPACK_LEVELS:
+        raise ValueError(f"statspack_level: one of {', '.join(map(str, STATSPACK_LEVELS))}")
+    return level
+
+
 def connect(target: Target):
-    """A session for dbtriage: the collector reads on it, and only take_awr_snapshot (opt-in, dbtriage.dbsnap) writes."""
+    """A session for dbtriage: the collector reads on it, and only the snapshot takers (opt-in, dbtriage.dbsnap) write."""
     conn = oracledb.connect(dsn=target.dsn, user=target.extra.get("user") or None,  # blank: the DSN's own
                             password=target.extra.get("password") or None)
     conn.call_timeout = int(target.extra.get("call_timeout_ms", 120_000))
@@ -80,35 +112,105 @@ def take_awr_snapshot(target: Target, window: Window) -> str | None:
         return f"AWR snapshot {snap_id}"
 
 
+def take_statspack_snapshot(target: Target, window: Window) -> str | None:
+    """Take a Statspack snapshot now (PERFSTAT.STATSPACK.SNAP at statspack_level), unless the newest is younger than
+    min_snapshot_age_min (default 5). Only called through dbtriage.dbsnap, when targets.toml allows writes and this
+    target asks for snapshots. Needs EXECUTE on PERFSTAT.STATSPACK; installing Statspack is the DBA's step."""
+    level = statspack_level(target)
+    with connect(target) as conn:
+        cur = conn.cursor()
+        dbid = _rows(cur, "select dbid from v$database")[0]["dbid"]
+        inst = _rows(cur, "select instance_number from v$instance")[0]["instance_number"]
+        try:
+            age = _rows(cur, """select (sysdate - max(snap_time)) * 1440 as age_min from perfstat.stats$snapshot
+                                where dbid = :dbid and instance_number = :inst""", dbid=dbid, inst=inst)[0]["age_min"]
+        except oracledb.DatabaseError as exc:
+            raise RuntimeError(f"Statspack cannot be read here (PERFSTAT.STATS$SNAPSHOT: {_first_line(exc)}); "
+                               "the DBA installs it with spcreate.sql") from exc
+        if age is not None and float(age) < float(target.extra.get("min_snapshot_age_min", 5)):
+            return None
+        # the function form of SNAP returns the new snap_id, and commits on its own
+        snap_id = cur.callfunc("perfstat.statspack.snap", int, keyword_parameters={"i_snap_level": level})
+        return f"Statspack snapshot {snap_id} (level {level})"
+
+
+def takes_statspack(target: Target) -> bool:
+    """Whether this target's own snapshots are Statspack's: asked for, or auto without the pack (with it, AWR)."""
+    src = source_of(target)
+    if src == "vdollar":
+        raise RuntimeError("oracle_source = vdollar reads only V$ views, so there is no snapshot to take")
+    return src == "statspack" or (src == "auto" and not target.diagnostics_pack)
+
+
+def _db_clock(cur):
+    """UTC datetime -> the database server's own clock, naive, which is how AWR and Statspack store their times."""
+    # Compare two DATEs: subtracting sys_extract_utc() from systimestamp would convert through the *session* time zone,
+    # which the driver takes from the client machine, and shift the window by the client's UTC offset.
+    off_s = _rows(cur, "select round((sysdate - cast(sys_extract_utc(systimestamp) as date)) * 86400) as off from dual")[0]["off"]
+    offset = timedelta(seconds=float(off_s or 0))
+    return lambda dt: (dt.astimezone(timezone.utc) + offset).replace(tzinfo=None)
+
+
 def _same_startup(snaps: list[dict]) -> list[dict]:
     """The snapshots from the most recent instance startup among these, in order. AWR cannot report across a restart
-    (ORA-20019), so a window that spans one is reported from the restart on."""
+    (ORA-20019) and Statspack's counters start over at one, so a window that spans one is reported from the restart on."""
     return [s for s in snaps if s["startup_time"] == snaps[-1]["startup_time"]] if snaps else []
 
 
-def _pick_snaps(cur, dbid, inst_no, start, end) -> tuple[list[dict], bool]:
-    """The AWR snapshots to report on: those in the window, from one instance startup; else the two newest of the
-    latest startup, so the run still produces something. Returns them and whether the window spanned a restart."""
-    snaps = _rows(cur, """
+# Per source: the snapshots around the window, and the two newest of the latest startup. AWR snapshots are intervals,
+# picked by overlap; Statspack's are points in time, so the one at or before the window's start and the one at or
+# after its end bound it, with any inside it between.
+SNAP_QUERIES = {
+    "awr": ("""
         select snap_id, begin_interval_time, end_interval_time, startup_time
         from dba_hist_snapshot
         where dbid = :dbid and instance_number = :inst
           and end_interval_time >= :s and begin_interval_time <= :e
-        order by snap_id""", dbid=dbid, inst=inst_no, s=start, e=end)
-    spans_restart = len({s["startup_time"] for s in snaps}) > 1
-    snaps = _same_startup(snaps)
-    if len(snaps) < 2:
-        snaps = _rows(cur, """
+        order by snap_id""", """
             select * from (select snap_id, begin_interval_time, end_interval_time, startup_time from dba_hist_snapshot
                            where dbid = :dbid and instance_number = :inst
                              and startup_time = (select max(startup_time) from dba_hist_snapshot
                                                  where dbid = :dbid and instance_number = :inst)
                            order by snap_id desc)
-            where rownum <= 2""", dbid=dbid, inst=inst_no)[::-1]
-    if len(snaps) < 2:
-        raise SystemExit("AWR has fewer than two snapshots since the instance last started (AWR cannot report across "
-                         "a restart); nothing to report on yet")
+            where rownum <= 2"""),
+    "statspack": ("""
+        select snap_id, snap_time, startup_time, snap_level
+        from perfstat.stats$snapshot
+        where dbid = :dbid and instance_number = :inst
+          and snap_time >= nvl((select max(snap_time) from perfstat.stats$snapshot
+                                where dbid = :dbid and instance_number = :inst and snap_time <= :s), :s)
+          and snap_time <= nvl((select min(snap_time) from perfstat.stats$snapshot
+                                where dbid = :dbid and instance_number = :inst and snap_time >= :e), :e)
+        order by snap_id""", """
+            select * from (select snap_id, snap_time, startup_time, snap_level from perfstat.stats$snapshot
+                           where dbid = :dbid and instance_number = :inst
+                             and startup_time = (select max(startup_time) from perfstat.stats$snapshot
+                                                 where dbid = :dbid and instance_number = :inst)
+                           order by snap_id desc)
+            where rownum <= 2"""),
+}
+ONE_STARTUP = {"awr": "AWR cannot report across a restart", "statspack": "its counters start over at a restart"}
+
+
+def _pick_snaps(cur, dbid, inst_no, start, end, source: str = "awr", latest: bool = True) -> tuple[list[dict], bool]:
+    """The snapshots to report on: those around the window, from one instance startup; else, with `latest`, the two
+    newest of the latest startup, so the run still produces something. Returns them and whether the window spanned a
+    restart. Without `latest` (auto probing Statspack) fewer than two come back as they are, for the caller to judge."""
+    around, newest = SNAP_QUERIES[source]
+    snaps = _rows(cur, around, dbid=dbid, inst=inst_no, s=start, e=end)
+    spans_restart = len({s["startup_time"] for s in snaps}) > 1
+    snaps = _same_startup(snaps)
+    if len(snaps) < 2 and latest:
+        snaps = _rows(cur, newest, dbid=dbid, inst=inst_no)[::-1]
+        if len(snaps) < 2:
+            name = "AWR" if source == "awr" else "Statspack"
+            raise SystemExit(f"{name} has fewer than two snapshots since the instance last started ({ONE_STARTUP[source]}); "
+                             "nothing to report on yet")
     return snaps, spans_restart
+
+
+def _level(snap: dict) -> int:
+    return 5 if snap.get("snap_level") is None else int(snap["snap_level"])  # 5 is Statspack's own default
 
 
 class OracleCollector:
@@ -116,6 +218,10 @@ class OracleCollector:
         self.target = target
 
     def collect(self, window: Window) -> Snapshot:
+        try:
+            source_of(self.target)
+        except ValueError as exc:
+            raise SystemExit(f"target {self.target.name!r}: {exc}") from exc
         with connect(self.target) as conn:
             cur = conn.cursor()
             inst = _rows(cur, "select instance_number, instance_name, version_full, startup_time from v$instance")[0]
@@ -125,16 +231,19 @@ class OracleCollector:
             sessions = self._sessions(cur)
 
             pack_ok = "DIAGNOSTIC" in (params.get("control_management_pack_access") or "").upper()
-            if self.target.diagnostics_pack and pack_ok:
+            source, why, picked = self._choose(conn, window, dbr["dbid"], inst["instance_number"], pack_ok)
+            if source == "awr":
                 summary, raw, reports = self._awr(cur, window, dbr["dbid"], inst["instance_number"])
+                summary["notes"] = [f"Source: AWR snapshots {summary['awr']['begin_snap']}-{summary['awr']['end_snap']} ({why})."]
+            elif source == "statspack":
+                summary, raw, reports = self._statspack(cur, window, dbr, inst, why, *picked)
             else:
                 summary, raw, reports = self._vdollar(cur, inst)
-                summary["notes"] = [
-                    "Diagnostics Pack not enabled for this target; collected V$ views only (no AWR/ADDM/ASH)."
-                ]
+                summary["notes"] = [f"Source: V$ views only, cumulative since the instance started ({why}); no AWR, ADDM or ASH."]
 
         summary.update({
             "engine": "oracle",
+            "oracle_source": source,
             "target": self.target.name,
             "db": f"{dbr['name']}/{dbr['con']}",
             "instance": inst["instance_name"],
@@ -147,6 +256,39 @@ class OracleCollector:
         summary["load_profile"]["sessions_active"] = sum(1 for s in sessions if s["state"] == "ACTIVE")
         summary["load_profile"]["sessions_blocked"] = sum(1 for s in sessions if s.get("blocked_by"))
         return Snapshot(summary=summary, raw=raw, reports=reports)
+
+    def _choose(self, conn, window: Window, dbid, inst_no, pack_ok: bool):
+        """(source, why, picked) for this run. auto reads AWR when the pack is on and the database allows it, then
+        Statspack when two of its snapshots from one startup are around the window, then V$. picked is Statspack's
+        (snapshots, spans_restart, clock). DBA_HIST is never read unless diagnostics_pack is true."""
+        want, pack = source_of(self.target), self.target.diagnostics_pack
+        if want == "vdollar":
+            return "vdollar", "oracle_source = vdollar", None
+        if want != "statspack" and pack and pack_ok:
+            return "awr", "oracle_source = awr" if want == "awr" else "diagnostics_pack = true", None
+        no_pack = "no Diagnostics Pack for this target" if not pack else "control_management_pack_access does not include DIAGNOSTIC"
+        if want == "awr":
+            return "vdollar", f"oracle_source = awr, but {no_pack}", None
+        cur = conn.cursor()  # its own cursor: a probe that fails leaves nothing behind on the one collection reads with
+        local = _db_clock(cur)
+        # bind the bounds as TIMESTAMP: the driver's DATE would drop fractions of a second (see _awr)
+        cur.setinputsizes(s=oracledb.DB_TYPE_TIMESTAMP, e=oracledb.DB_TYPE_TIMESTAMP)
+        try:
+            snaps, spans = _pick_snaps(cur, dbid, inst_no, local(window.start), local(window.end), "statspack",
+                                       latest=want == "statspack")
+        except oracledb.DatabaseError as exc:  # ORA-00942: not installed, or no SELECT on it
+            if want == "statspack":
+                raise SystemExit(f"oracle_source = statspack, but PERFSTAT.STATS$SNAPSHOT cannot be read ({_first_line(exc)}): "
+                                 "the DBA installs Statspack with spcreate.sql and grants SELECT on its tables "
+                                 "(docs/configuration.md)") from exc
+            return "vdollar", f"{no_pack}, and Statspack cannot be read: PERFSTAT.STATS$SNAPSHOT gives {_first_line(exc)}", None
+        if len(snaps) < 2:  # auto only: with oracle_source = statspack, _pick_snaps took the newest pair or stopped
+            found = ("the Statspack snapshots around the window span an instance restart, with fewer than two after it"
+                     if spans else f"Statspack has {len(snaps) or 'no'} snapshot{'' if len(snaps) == 1 else 's'} "
+                                   "around the window, and needs two from one startup")
+            return "vdollar", f"{no_pack}, and {found}", None
+        why = "oracle_source = statspack" if want == "statspack" else f"{no_pack}; auto found two snapshots around the window"
+        return "statspack", why, (snaps, spans, local)
 
     # ------------------------------------------------------------------ V$ live
     def _sessions(self, cur) -> list[dict]:
@@ -184,8 +326,7 @@ class OracleCollector:
             "metrics_kind": "cumulative",
             "counters_since": inst["startup_time"].isoformat(),
             "load_profile": _load_profile(stats, tm, n_sess),
-            "top_sql": [_sql_row(r, "executions", "elapsed_time", "cpu_time", "buffer_gets", "disk_reads",
-                                 "rows_processed", "direct_writes") for r in sql],
+            "top_sql": [_sql_row(r, *SQL_STATS) for r in sql],
             "wait_events": [{"class": e["wait_class"], "event": e["event"], "count": num(e["total_waits"]),
                              "time_ms": round((num(e["time_waited_micro"]) or 0) / 1000, 1)} for e in events[:40]],
             "tables": self._stale_tables(cur),
@@ -208,12 +349,8 @@ class OracleCollector:
     # ------------------------------------------------------------------ AWR
     def _awr(self, cur, window: Window, dbid, inst_no):
         reports: dict[str, str] = {}
-        # AWR timestamps are naive, in the database server's clock; shift the UTC window to that clock. Compare two
-        # DATEs: subtracting sys_extract_utc() from systimestamp would convert through the *session* time zone, which
-        # the driver takes from the client machine, and shift the window by the client's UTC offset.
-        off_s = _rows(cur, "select round((sysdate - cast(sys_extract_utc(systimestamp) as date)) * 86400) as off from dual")[0]["off"]
-        offset = timedelta(seconds=float(off_s or 0))
-        local = lambda dt: (dt.astimezone(timezone.utc) + offset).replace(tzinfo=None)  # noqa: E731
+        # AWR timestamps are naive, in the database server's clock; shift the UTC window to that clock.
+        local = _db_clock(cur)
 
         # The driver binds a datetime as DATE, which has no fractions of a second: a window ending at :16.9 would be
         # compared as :16.0 and drop a snapshot that began at :16.6. Bind both bounds as TIMESTAMP.
@@ -297,8 +434,7 @@ class OracleCollector:
                                 "covers the time since the restart"} if spans_restart else {})},
             "counters_since": begin_t.isoformat(),
             "load_profile": _load_profile(stats, tm, n_sess, elapsed_s),
-            "top_sql": [_sql_row(r, "executions", "elapsed_time", "cpu_time", "buffer_gets", "disk_reads",
-                                 "rows_processed", "direct_writes") for r in sql],
+            "top_sql": [_sql_row(r, *SQL_STATS) for r in sql],
             "wait_events": [{"class": r["wait_class"], "event": r["event"], "count": num(r["total_waits"]),
                              "time_ms": round((num(r["time_waited_micro"]) or 0) / 1000, 1)} for r in events[:40]],
             "ash": [{"class": r["wait_class"], "event": r["event"], "sql_id": r["sql_id"], "samples": num(r["samples"])}
@@ -314,6 +450,139 @@ class OracleCollector:
         if self.target.extra.get("mask_report_literals", True):
             reports = {name: mask_report_literals(text) for name, text in reports.items()}
         return summary, raw, reports
+
+    # ------------------------------------------------------------------ Statspack
+    def _statspack(self, cur, window: Window, dbr, inst, why: str, snaps: list[dict], spans_restart: bool, local):
+        first, last = snaps[0], snaps[-1]
+        b, e = first["snap_id"], last["snap_id"]
+        begin_t, end_t = first["snap_time"], last["snap_time"]
+        elapsed_s = (end_t - begin_t).total_seconds()
+        level = min(_level(first), _level(last))  # a statement or plan is in both only if both snapshots captured it
+        binds = {"dbid": dbr["dbid"], "inst": inst["instance_number"], "b": b, "e": e}
+        notes = [f"Source: Statspack snapshots {b}-{e} at level {level} ({why})."]
+        if spans_restart:
+            notes.append("The window spans an instance restart; Statspack's counters start over at one, so this covers "
+                         "the time since the restart.")
+        if end_t < local(window.start) or begin_t > local(window.end):
+            notes.append(f"No two Statspack snapshots from one startup lie around the window, so this covers the newest "
+                         f"two, {begin_t:%Y-%m-%d %H:%M} to {end_t:%Y-%m-%d %H:%M} on the database's clock.")
+        sql, sql_notes = self._statspack_sql(cur, binds, level)
+        notes += sql_notes
+
+        events = _rows(cur, """
+            select nvl(n.wait_class, 'Other') as wait_class, e.event,
+                   e.total_waits - nvl(p.total_waits, 0) as total_waits,
+                   e.time_waited_micro - nvl(p.time_waited_micro, 0) as time_waited_micro
+            from perfstat.stats$system_event e
+            left join perfstat.stats$system_event p
+              on p.snap_id = :b and p.dbid = e.dbid and p.instance_number = e.instance_number and p.event = e.event
+            left join (select name, max(wait_class) as wait_class from v$event_name group by name) n on n.name = e.event
+            where e.snap_id = :e and e.dbid = :dbid and e.instance_number = :inst and nvl(n.wait_class, 'Other') <> 'Idle'
+            order by time_waited_micro desc""", **binds)
+        stats = {r["name"]: num(r["v"]) for r in _rows(cur, """
+            select e.name, e.value - nvl(p.value, 0) as v
+            from perfstat.stats$sysstat e left join perfstat.stats$sysstat p
+              on p.snap_id = :b and p.dbid = e.dbid and p.instance_number = e.instance_number and p.name = e.name
+            where e.snap_id = :e and e.dbid = :dbid and e.instance_number = :inst
+              and e.name in (%s)""" % ",".join(f"'{s}'" for s in SYSSTATS), **binds)}
+        # STATS$SYS_TIME_MODEL keeps only stat_id; the names come from the instance, where they are fixed
+        tm = {r["stat_name"]: num(r["v"]) for r in _rows(cur, """
+            select n.stat_name, e.value - nvl(p.value, 0) as v
+            from perfstat.stats$sys_time_model e left join perfstat.stats$sys_time_model p
+              on p.snap_id = :b and p.dbid = e.dbid and p.instance_number = e.instance_number and p.stat_id = e.stat_id
+            join (select distinct stat_id, stat_name from v$sys_time_model) n on n.stat_id = e.stat_id
+            where e.snap_id = :e and e.dbid = :dbid and e.instance_number = :inst
+              and n.stat_name in (%s)""" % ",".join(f"'{s}'" for s in TIME_MODEL), **binds)}
+        n_sess = _rows(cur, "select count(*) as n from v$session where type = 'USER'")[0]["n"]
+
+        info = {"begin_snap": b, "end_snap": e, "begin": begin_t.isoformat(), "end": end_t.isoformat(),
+                "elapsed_s": elapsed_s, "startup": last["startup_time"].isoformat(), "level": level,
+                **({"note": "the window spans an instance restart; Statspack's counters start over at one, so this "
+                            "covers the time since the restart"} if spans_restart else {})}
+        load = _load_profile(stats, tm, n_sess, elapsed_s)
+        top = [_sql_row(r, *SQL_STATS) for r in sql]
+        waits = [{"class": r["wait_class"], "event": r["event"], "count": num(r["total_waits"]),
+                  "time_ms": round((num(r["time_waited_micro"]) or 0) / 1000, 1)} for r in events[:40]]
+        summary = {
+            "metrics_kind": "interval",
+            "statspack": info,
+            "counters_since": begin_t.isoformat(),
+            "load_profile": load,
+            "top_sql": top,
+            "wait_events": waits,
+            "tables": self._stale_tables(cur),
+            "findings": [],
+            "notes": notes,
+        }
+        reports = {"statspack.txt": _statspack_text(f"{dbr['name']}/{dbr['con']}", inst, info, load, waits, top, notes)}
+        if self.target.extra.get("mask_report_literals", True):
+            reports = {name: mask_report_literals(text) for name, text in reports.items()}
+        raw = {"snapshots": snaps, "stats$sql_summary": [dict(r, sql_text=redact_sql(_clob(r.get("sql_text")))) for r in sql],
+               "stats$system_event": events, "stats$sysstat": stats, "stats$sys_time_model": tm}
+        return summary, raw, reports
+
+    def _statspack_sql(self, cur, binds: dict, level: int) -> tuple[list[dict], list[str]]:
+        """Top SQL for the interval: each cursor in STATS$SQL_SUMMARY at the end snapshot less the same cursor at the
+        begin one, summed per sql_id. Statspack keeps cumulative figures for the statements over its thresholds."""
+        if level < 5:
+            return [], [f"Statspack level {level}: SQL is captured only at level 5 and above, so top SQL is left empty "
+                        "rather than guessed."]
+        q = f"""select old_hash_value, text_subset, address, sql_id, {", ".join(SQL_STATS)}
+                from perfstat.stats$sql_summary
+                where snap_id = :snap and dbid = :dbid and instance_number = :inst
+                  and nvl(module, '-') not like 'dbtriage%' and lower(nvl(sql_text, '-')) not like '%statspack.snap%'"""
+        where = {"dbid": binds["dbid"], "inst": binds["inst"]}
+
+        def key(r):  # one cursor: a reload puts it at another address, and its counters start over
+            return r["old_hash_value"], r["text_subset"], r["address"]
+
+        try:
+            before = {key(r): r for r in _rows(cur, q, snap=binds["b"], **where)}
+            after = _rows(cur, q, snap=binds["e"], **where)
+        except oracledb.DatabaseError as exc:  # no SELECT on it: the waits and load profile still stand
+            return [], [f"No top SQL: PERFSTAT.STATS$SQL_SUMMARY gives {_first_line(exc)}."]
+        by_id: dict = {}
+        for r in after:
+            p = before.pop(key(r), None)
+            d = by_id.setdefault(r["sql_id"], {"sql_id": r["sql_id"], "in_begin_snapshot": False, **dict.fromkeys(SQL_STATS, 0)})
+            d["in_begin_snapshot"] = d["in_begin_snapshot"] or p is not None
+            for c in SQL_STATS:
+                now, then = num(r[c]) or 0, (num(p[c]) or 0) if p is not None else 0
+                d[c] += now - then if now >= then else now  # lower than before: reloaded in place, all of it is new
+        active = [d for d in by_id.values() if d["executions"] or d["elapsed_time"]]
+        sql = sorted(active, key=lambda d: -d["elapsed_time"])[:self.target.top_n]
+        notes = []
+        if new := sum(1 for d in active if not d["in_begin_snapshot"]):
+            notes.append(f"Statements not in the begin snapshot: {new} (new in the window, reloaded, or under Statspack's "
+                         "thresholds then); their figures count everything since they were loaded.")
+        if before:
+            notes.append(f"Statements in the begin snapshot but gone by the end: {len(before)} (aged out of the shared "
+                         "pool); their work in the window is not counted.")
+        if not sql:
+            return sql, notes
+        ids = {f"q{i}": d["sql_id"] for i, d in enumerate(sql)}
+        marks = ", ".join(f":{k}" for k in ids)
+        texts = {r["sql_id"]: r["sql_text"] for r in _rows(cur, f"""
+            select sql_id, max(sql_text) as sql_text from perfstat.stats$sql_summary
+            where snap_id = :e and dbid = :dbid and instance_number = :inst and sql_id in ({marks})
+            group by sql_id""", e=binds["e"], **where, **ids)}
+        plans: dict = {}
+        if level >= 6:
+            try:  # the newest plan recorded for each statement up to the end snapshot
+                plans = {r["sql_id"]: r["plan_hash_value"] for r in _rows(cur, f"""
+                    select sql_id, plan_hash_value from (
+                      select sql_id, plan_hash_value,
+                             row_number() over (partition by sql_id order by snap_id desc, last_active_time desc nulls last) as rn
+                      from perfstat.stats$sql_plan_usage
+                      where dbid = :dbid and instance_number = :inst and snap_id <= :e and sql_id in ({marks}))
+                    where rn = 1""", e=binds["e"], **where, **ids)}
+            except oracledb.DatabaseError as exc:  # no SELECT on it: top SQL still stands, without plans
+                notes.append(f"No plan hashes: PERFSTAT.STATS$SQL_PLAN_USAGE gives {_first_line(exc)}.")
+        else:
+            notes.append(f"Statspack level {level}: plans are captured from level 6, so top SQL has no plan hash.")
+        for d in sql:
+            d["sql_text"], d["plan_hash_value"] = texts.get(d["sql_id"]), plans.get(d["sql_id"])
+        return sql, notes
 
 
 def _sql_row(r, ex, el, cpu, gets, reads, rows, dw) -> dict:
@@ -354,3 +623,60 @@ def _load_profile(stats: dict, tm: dict, n_sess, elapsed_s: float | None = None)
         lp["elapsed_s"] = elapsed_s
         lp["avg_active_sessions"] = round(lp["db_time_ms"] / 1000 / elapsed_s, 2)
     return lp
+
+
+# (label, load_profile key, divisor) for statspack.txt
+LOAD_LINES = (
+    ("DB time (s)", "db_time_ms", 1000), ("DB CPU (s)", "db_cpu_ms", 1000), ("User calls", "user_calls", 1),
+    ("Executions", "executions", 1), ("Parses", "parses", 1), ("Hard parses", "hard_parses", 1),
+    ("Commits", "xact_commit", 1), ("Rollbacks", "xact_rollback", 1), ("Logical reads (blocks)", "blks_hit", 1),
+    ("Physical reads (blocks)", "blks_read", 1), ("Physical writes (blocks)", "blks_written", 1),
+    ("Redo size (bytes)", "redo_bytes", 1), ("Sorts to disk", "sorts_disk", 1),
+    ("Long table scans", "long_table_scans", 1), ("Logons", "logons", 1),
+)
+
+
+def _statspack_text(db: str, inst: dict, info: dict, lp: dict, waits: list[dict], top: list[dict], notes: list[str]) -> str:
+    """A short plain-text report from the numbers read, for the reviewer and the snapshot page: spreport.sql, Statspack's
+    own report, runs only in SQL*Plus. SQL text is the redacted text the summary keeps."""
+    el = info["elapsed_s"] or 0
+    L = [f"Statspack summary: {db}, instance {inst['instance_name']}, {inst['version_full']}",
+         "Built by Second Look from the PERFSTAT.STATS$ tables; spreport.sql gives Statspack's full report in SQL*Plus.",
+         "",
+         f"Snapshots   {info['begin_snap']} to {info['end_snap']}, level {info['level']}",
+         f"Interval    {info['begin']} to {info['end']} on the database's clock ({el / 60:.1f} min)",
+         f"Started     {info['startup']}",
+         "", "Load profile", f"{'':<26}{'Total':>18}{'Per second':>14}"]
+    for label, key, div in LOAD_LINES:
+        if lp.get(key) is None:
+            continue
+        v = lp[key] / div
+        L.append(f"{label:<26}{v:>18,.1f}{(v / el if el else 0):>14,.2f}")
+    if lp.get("avg_active_sessions") is not None:
+        L.append(f"{'Average active sessions':<26}{lp['avg_active_sessions']:>18,.2f}")
+    if lp.get("cache_hit_ratio") is not None:
+        L.append(f"{'Buffer cache hit ratio':<26}{lp['cache_hit_ratio'] * 100:>17,.2f}%")
+
+    db_time_s = (lp.get("db_time_ms") or 0) / 1000
+    L += ["", "Top wait events (idle left out)",
+          f"{'Event':<40}{'Class':<16}{'Waits':>12}{'Time (s)':>12}{'Avg (ms)':>10}{'% DB time':>11}"]
+    for w in waits[:10]:
+        n, t_ms = w["count"] or 0, w["time_ms"] or 0
+        L.append(f"{str(w['event'])[:39]:<40}{str(w['class'])[:15]:<16}{n:>12,}{t_ms / 1000:>12,.1f}"
+                 f"{(t_ms / n if n else 0):>10,.2f}{(100 * t_ms / 1000 / db_time_s if db_time_s else 0):>10,.1f}%")
+    if not waits:
+        L.append("(none)")
+
+    L += ["", "Top SQL by elapsed time",
+          f"{'SQL id':<15}{'Plan hash':>12}{'Execs':>10}{'Elapsed (s)':>13}{'Per exec (ms)':>15}{'CPU (s)':>10}"
+          f"{'Gets':>14}{'Reads':>12}{'Rows':>12}"]
+    for q in top[:10]:
+        L.append(f"{str(q['sql_id']):<15}{str(q['plan_hash'] or '-'):>12}{q['calls']:>10,}{q['total_time_ms'] / 1000:>13,.2f}"
+                 f"{(q['mean_time_ms'] or 0):>15,.2f}{q['cpu_time_ms'] / 1000:>10,.2f}"
+                 f"{(q['io_blocks_hit'] or 0):>14,}{(q['io_blocks_read'] or 0):>12,}{(q['rows'] or 0):>12,}")
+        L.append(f"    {' '.join((q['text'] or '').split())[:110]}")
+    if not top:
+        L.append("(none)")
+    if notes:
+        L += ["", "Notes", *(f"- {n}" for n in notes)]
+    return "\n".join(L) + "\n"
