@@ -34,7 +34,8 @@ def cursor_row(sql_id, old_hash, execs, elapsed_us, address=b"\x01", **more):
 class DB:
     """What the fake database holds, and every statement it was sent."""
 
-    def __init__(self, snaps=(), statspack=True, pack_access="NONE", summary=None, texts=None, plans=(), age=60.0, denied=()):
+    def __init__(self, snaps=(), statspack=True, pack_access="NONE", summary=None, texts=None, plans=(), age=60.0, denied=(), pieces=None):
+        self.pieces = pieces or {}  # STATS$SQLTEXT: sql_id -> [(old_hash_value, piece, text)]
         self.snaps, self.statspack, self.pack_access = list(snaps), statspack, pack_access
         self.summary, self.texts, self.plans, self.age, self.denied = summary or {}, texts or {}, list(plans), age, denied
         self.sql, self.called = [], []
@@ -52,6 +53,10 @@ class DB:
             lo = max((x["snap_time"] for x in self.snaps if x["snap_time"] <= s), default=s)
             hi = min((x["snap_time"] for x in self.snaps if x["snap_time"] >= e), default=e)
             return [x for x in self.snaps if lo <= x["snap_time"] <= hi]
+        if "stats$sqltext" in sql:
+            ids = {v for k, v in b.items() if k.startswith("q")}
+            return [{"sql_id": i, "old_hash_value": h, "piece": n, "sql_text": t}
+                    for i, rows in sorted(self.pieces.items()) if i in ids for h, n, t in sorted(rows)]
         if "max(sql_text)" in sql:
             ids = {v for k, v in b.items() if k.startswith("q")}
             return [{"sql_id": i, "sql_text": t} for i, t in self.texts.items() if i in ids]
@@ -406,3 +411,24 @@ def test_a_plugin_named_oracle_still_replaces_both(monkeypatch):
 
     monkeypatch.setattr(dbsnap, "entry_points", lambda group: [EP()] if group == dbsnap.GROUP else [])
     assert dbsnap.take(ON, tgt(create_snapshot="always"), win()) == {"status": "taken", "detail": "my own snapshot"}
+
+
+def test_full_text_comes_from_sqltext_in_pieces_then_summary_then_the_subset(monkeypatch):
+    """Recent releases leave STATS$SQL_SUMMARY.sql_text empty and keep the text in STATS$SQLTEXT, 64 characters a piece."""
+    pieces = {"a1": [(1, 1, " where id = 42"), (1, 0, "update app.orders set n = n + 1")]}  # out of order on purpose
+    s = collect(monkeypatch, DB(PAIR, summary=SUMMARY, texts={"b2": "select * from app.orders where note = 'x'"}, pieces=pieces)).summary
+    top = {q["sql_id"]: q for q in s["top_sql"]}
+    assert top["a1"]["text"] == "update app.orders set n = n + ? where id = ?"  # pieces joined in order, then redacted
+    assert top["b2"]["text"] == "select * from app.orders where note = '?'"     # not in SQLTEXT: STATS$SQL_SUMMARY's text
+    assert top["e5"]["text"] == "e5 …"                                           # neither: the 31-character subset
+    assert any(n.startswith("Statements shown by their first 31 characters only: 1") for n in s["notes"])
+    s = collect(monkeypatch, DB(PAIR, summary=SUMMARY, texts=TEXTS, denied=("stats$sqltext",))).summary
+    assert any(n.startswith("No full SQL text: PERFSTAT.STATS$SQLTEXT gives ORA-00942") for n in s["notes"])
+    assert {q["sql_id"] for q in s["top_sql"]} == {"b2", "a1", "e5"}  # without the grant the statements still stand
+
+
+def test_statspacks_own_snapshot_call_is_left_out_by_its_full_text(monkeypatch):
+    """A snapshot job's call can be longer than the 31-character subset the SQL filter sees."""
+    pieces = {"b2": [(1, 0, "begin :retval := perfstat.statspack.snap(i_snap_level => 7); end;")]}
+    s = collect(monkeypatch, DB(PAIR, summary=SUMMARY, texts=TEXTS, pieces=pieces)).summary
+    assert "b2" not in {q["sql_id"] for q in s["top_sql"]}

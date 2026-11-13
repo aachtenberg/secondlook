@@ -530,7 +530,8 @@ class OracleCollector:
         q = f"""select old_hash_value, text_subset, address, sql_id, {", ".join(SQL_STATS)}
                 from perfstat.stats$sql_summary
                 where snap_id = :snap and dbid = :dbid and instance_number = :inst
-                  and nvl(module, '-') not like 'dbtriage%' and lower(nvl(sql_text, '-')) not like '%statspack.snap%'"""
+                  and nvl(module, '-') not like 'dbtriage%'
+                  and lower(nvl(sql_text, text_subset)) not like '%statspack.snap%'"""  # sql_text is empty on recent releases
         where = {"dbid": binds["dbid"], "inst": binds["inst"]}
 
         def key(r):  # one cursor: a reload puts it at another address, and its counters start over
@@ -544,7 +545,8 @@ class OracleCollector:
         by_id: dict = {}
         for r in after:
             p = before.pop(key(r), None)
-            d = by_id.setdefault(r["sql_id"], {"sql_id": r["sql_id"], "in_begin_snapshot": False, **dict.fromkeys(SQL_STATS, 0)})
+            d = by_id.setdefault(r["sql_id"], {"sql_id": r["sql_id"], "in_begin_snapshot": False, "text_subset": r["text_subset"],
+                                               **dict.fromkeys(SQL_STATS, 0)})
             d["in_begin_snapshot"] = d["in_begin_snapshot"] or p is not None
             for c in SQL_STATS:
                 now, then = num(r[c]) or 0, (num(p[c]) or 0) if p is not None else 0
@@ -562,10 +564,18 @@ class OracleCollector:
             return sql, notes
         ids = {f"q{i}": d["sql_id"] for i, d in enumerate(sql)}
         marks = ", ".join(f":{k}" for k in ids)
-        texts = {r["sql_id"]: r["sql_text"] for r in _rows(cur, f"""
-            select sql_id, max(sql_text) as sql_text from perfstat.stats$sql_summary
-            where snap_id = :e and dbid = :dbid and instance_number = :inst and sql_id in ({marks})
-            group by sql_id""", e=binds["e"], **where, **ids)}
+        texts = self._statspack_texts(cur, marks, ids, notes)
+        if missing := {k: v for k, v in ids.items() if v not in texts}:  # older releases keep it in SQL_SUMMARY itself
+            more = ", ".join(f":{k}" for k in missing)
+            texts.update({r["sql_id"]: r["sql_text"] for r in _rows(cur, f"""
+                select sql_id, max(sql_text) as sql_text from perfstat.stats$sql_summary
+                where snap_id = :e and dbid = :dbid and instance_number = :inst and sql_id in ({more})
+                group by sql_id""", e=binds["e"], **where, **missing) if r["sql_text"]})
+        if short := [d for d in sql if d["sql_id"] not in texts]:  # the first 31 characters are all Statspack kept here
+            for d in short:
+                texts[d["sql_id"]] = (d.get("text_subset") or "") + " …"
+            notes.append(f"Statements shown by their first 31 characters only: {len(short)} (no full text in STATS$SQLTEXT "
+                         "or STATS$SQL_SUMMARY).")
         plans: dict = {}
         if level >= 6:
             try:  # the newest plan recorded for each statement up to the end snapshot
@@ -582,7 +592,25 @@ class OracleCollector:
             notes.append(f"Statspack level {level}: plans are captured from level 6, so top SQL has no plan hash.")
         for d in sql:
             d["sql_text"], d["plan_hash_value"] = texts.get(d["sql_id"]), plans.get(d["sql_id"])
+            d.pop("text_subset", None)
+        # Statspack's own snapshot call: the SQL filter above sees only 31 characters, which may stop before ".snap"
+        sql = [d for d in sql if "statspack.snap" not in (d["sql_text"] or "").lower()]
         return sql, notes
+
+    @staticmethod
+    def _statspack_texts(cur, marks: str, ids: dict, notes: list[str]) -> dict[str, str]:
+        """Full statement text from STATS$SQLTEXT, which keeps it once per statement in 64-character pieces (recent
+        releases leave STATS$SQL_SUMMARY.sql_text empty). Without SELECT on it, the caller falls back and says so."""
+        try:
+            rows = _rows(cur, f"""select sql_id, old_hash_value, piece, sql_text from perfstat.stats$sqltext
+                                  where sql_id in ({marks}) order by sql_id, old_hash_value, piece""", **ids)
+        except oracledb.DatabaseError as exc:
+            notes.append(f"No full SQL text: PERFSTAT.STATS$SQLTEXT gives {_first_line(exc)}.")
+            return {}
+        pieces: dict = {}
+        for r in rows:  # one statement can have several old_hash_values (versions); the first is enough for its text
+            pieces.setdefault(r["sql_id"], {}).setdefault(r["old_hash_value"], []).append(r["sql_text"] or "")
+        return {sql_id: "".join(next(iter(by_hash.values()))) for sql_id, by_hash in pieces.items()}
 
 
 def _sql_row(r, ex, el, cpu, gets, reads, rows, dw) -> dict:

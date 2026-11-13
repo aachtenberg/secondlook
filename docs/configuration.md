@@ -244,16 +244,21 @@ hashes, wait events and the load profile for the window, compared as intervals.
 Snapshots then come from a job (`spauto.sql` takes one an hour) or from dbtriage itself (next section). dbtriage
 never installs Statspack. On Amazon RDS it is the `STATSPACK` option of an option group.
 
+**In a multitenant database, Statspack goes in the PDB.** `spcreate.sql` creates a local PERFSTAT user, which the
+CDB root does not allow, so install it after `ALTER SESSION SET CONTAINER = <pdb>` and point the target's DSN at that
+PDB's service. A common user such as `C##DBTRIAGE` can log in there; the grants below are made in the PDB.
+
 **The level decides what is captured.** SQL statistics come from level 5 (Statspack's default), plan hashes from
 level 6, segment statistics from level 7. Below level 5 a snapshot's top SQL is left empty, and the snapshot says
 why. The DBA sets the job's level with `statspack.modify_statspack_parameter(i_snap_level => 7)`; the snapshots
 dbtriage takes use `statspack_level` (default 7).
 
-**Grants.** The monitoring user reads six PERFSTAT tables. Run these as PERFSTAT or SYS:
+**Grants.** The monitoring user reads seven PERFSTAT tables. Run these as PERFSTAT or SYS:
 
 ```sql
 GRANT SELECT ON perfstat.stats$snapshot TO c##dbtriage;
 GRANT SELECT ON perfstat.stats$sql_summary TO c##dbtriage;
+GRANT SELECT ON perfstat.stats$sqltext TO c##dbtriage;
 GRANT SELECT ON perfstat.stats$sql_plan_usage TO c##dbtriage;
 GRANT SELECT ON perfstat.stats$system_event TO c##dbtriage;
 GRANT SELECT ON perfstat.stats$sysstat TO c##dbtriage;
@@ -263,7 +268,10 @@ GRANT EXECUTE ON perfstat.statspack TO c##dbtriage;
 ```
 
 Wait classes come from `V$EVENT_NAME` and time-model names from `V$SYS_TIME_MODEL`, which `SELECT_CATALOG_ROLE`
-already covers. Without `stats$sql_plan_usage`, top SQL has no plan hash, and the snapshot says so.
+already covers. Without `stats$sql_plan_usage`, top SQL has no plan hash, and the snapshot says so. Recent releases
+(checked on 23ai) leave `stats$sql_summary.sql_text` empty and keep the text in `stats$sqltext`, 64 characters a
+piece; without SELECT on it, each statement shows only the 31 characters Statspack keeps in `text_subset`, and the
+snapshot says so.
 
 **What `auto` picks.** `oracle_source` chooses the source per database:
 

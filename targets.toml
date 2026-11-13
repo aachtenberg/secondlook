@@ -63,3 +63,8 @@ diagnostics_pack = true          # false on Standard Edition / unlicensed: V$ vi
 create_snapshot = "incident"     # take an AWR snapshot on incident runs, once [collect] at the top allows it
 # baseline_policy = "same-time-last-week"   # previous (default) | same-time-yesterday | same-time-last-week | pinned
 # baseline = "oracle/ora-lab/2026-11-05/20261105T152933Z"   # the pinned known-good snapshot for policy "pinned"
+
+[targets.ora-statspack]
+engine = "oracle"
+dsn_env = "ORACLE_PDB_DSN"       # C##DBTRIAGE/dbtriage@localhost:1521/FREEPDB1: the lab PDB, where Statspack is installed
+diagnostics_pack = false         # read without the pack, so auto takes Statspack (oracle_source in configuration.md)
