@@ -363,6 +363,35 @@ AWR snapshots, captures reuse the newest two, or stop with "AWR has fewer than t
 across an instance restart, so only snapshots since the latest startup count: a window that spans a restart covers the
 time since it (the snapshot notes that), and right after one, captures wait for two new AWR snapshots.
 
+**Statspack in the lab.** `ora-statspack` reads the PDB, `FREEPDB1`, without the pack, so `auto` takes Statspack
+there; `ora-lab` reads the CDB root with AWR. Statspack has to be installed into the PDB once, and again after the
+container is recreated. With `PERFSTAT_PASSWORD` set in `.env` (dbtriage reads `.env` itself, the shell does not,
+so the first line loads it for the heredoc):
+
+```sh
+set -a; . ./.env; set +a; test -n "$PERFSTAT_PASSWORD" || echo "set PERFSTAT_PASSWORD in .env first"
+docker exec -i -w /tmp db-triage-oracle-1 sqlplus -s / as sysdba <<EOF
+alter session set container = FREEPDB1;
+define perfstat_password = '$PERFSTAT_PASSWORD'
+define default_tablespace = 'SYSAUX'
+define temporary_tablespace = 'TEMP'
+@?/rdbms/admin/spcreate
+grant select on perfstat.stats\$snapshot to c##dbtriage;
+grant select on perfstat.stats\$sql_summary to c##dbtriage;
+grant select on perfstat.stats\$sqltext to c##dbtriage;
+grant select on perfstat.stats\$sql_plan_usage to c##dbtriage;
+grant select on perfstat.stats\$system_event to c##dbtriage;
+grant select on perfstat.stats\$sysstat to c##dbtriage;
+grant select on perfstat.stats\$sys_time_model to c##dbtriage;
+grant execute on perfstat.statspack to c##dbtriage;
+EOF
+```
+
+Then take a snapshot (`exec perfstat.statspack.snap(i_snap_level => 7)` in the PDB), run
+`scripts/load.py oracle --seconds 30`, and take another; or let incident runs take them, with `allow_db_writes` on and
+`create_snapshot = "incident"` on the target. `test_statspack_is_read_from_the_lab_pdb` checks the read once two
+snapshots exist, and skips until then.
+
 The lab containers restart with the machine (`restart: unless-stopped`); `docker compose stop` keeps them down until
 the next `up`. A reboot, `stop` and `start` keep every database's data. Postgres, MySQL and MariaDB keep theirs in the
 images' anonymous volumes, which an `up` that recreates the container (after a change to its service, say) carries

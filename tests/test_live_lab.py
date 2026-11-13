@@ -176,8 +176,8 @@ def test_opt_in_awr_snapshot_on_the_lab(lab_cfg):
 
 
 def test_oracle_without_the_pack_falls_back_from_statspack_to_v_dollar(lab_cfg):
-    """The lab has no Statspack: auto without the pack says so and reads V$, never DBA_HIST; an explicit statspack
-    stops. Read only: no snapshot is taken."""
+    """ora-lab reads the CDB root, where Statspack is not installed (it lives in the PDB, see ora-statspack): auto
+    without the pack says so and reads V$, never DBA_HIST; an explicit statspack stops. Read only: no snapshot is taken."""
     from datetime import timedelta
 
     from dbtriage.collectors.base import Window
@@ -193,6 +193,43 @@ def test_oracle_without_the_pack_falls_back_from_statspack_to_v_dollar(lab_cfg):
     assert "Statspack cannot be read" in s["notes"][0] and "ORA-00942" in s["notes"][0], s["notes"]
     with pytest.raises(SystemExit, match="oracle_source = statspack, but PERFSTAT.STATS\\$SNAPSHOT cannot be read"):
         OracleCollector(replace(t, diagnostics_pack=False, extra={**t.extra, "oracle_source": "statspack"})).collect(window)
+
+
+def test_statspack_is_read_from_the_lab_pdb(lab_cfg):
+    """The lab PDB with Statspack installed and at least two snapshots from one startup: auto without the pack reads
+    Statspack, with full statement text from STATS$SQLTEXT and plan hashes at level 6+. Read only: it reads the
+    snapshots that are there and takes none. Skips until Statspack is installed (docs/operations.md, The Oracle lab)."""
+    from datetime import timedelta
+
+    from dbtriage.collectors import oracle
+    from dbtriage.collectors.base import Window
+
+    t = lab_cfg.targets.get("ora-statspack")
+    if t is None or not reachable(t)[0]:
+        pytest.skip("ora-statspack not reachable (ORACLE_PDB_DSN in .env)")
+    conn = oracle.connect(t)
+    try:
+        cur = conn.cursor()
+        cur.execute("""select count(*), max(snap_level) from perfstat.stats$snapshot
+                       where startup_time = (select max(startup_time) from perfstat.stats$snapshot)""")
+        n, level = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 - not installed, or not granted: nothing to test yet
+        pytest.skip(f"Statspack not readable in the lab PDB: {str(exc).splitlines()[0]}")
+    finally:
+        conn.close()
+    if n < 2:
+        pytest.skip("fewer than two Statspack snapshots since the instance started")
+    now = datetime.now(timezone.utc)
+    snap = oracle.OracleCollector(t).collect(Window(start=now - timedelta(days=7), end=now, mode="adhoc"))
+    s = snap.summary
+    assert s["oracle_source"] == "statspack" and s["metrics_kind"] == "interval" and s["notes"][0].startswith("Source: Statspack"), s["notes"]
+    assert "statspack.txt" in snap.reports and "Load profile" in snap.reports["statspack.txt"]
+    if level >= 5 and s["top_sql"]:
+        assert not any(n_.startswith("No full SQL text") for n_ in s["notes"]), s["notes"]  # SELECT on STATS$SQLTEXT is granted
+        assert all(q["text"] and not q["text"].endswith(" …") for q in s["top_sql"])
+        assert not any("statspack.snap" in q["text"].lower() for q in s["top_sql"])
+    if level >= 6 and s["top_sql"]:
+        assert any(q.get("plan_hash") for q in s["top_sql"])
 
 
 @pytest.mark.parametrize("name", ["mysql-lab", "mariadb-lab"])
