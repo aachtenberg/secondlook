@@ -600,7 +600,10 @@ class OracleCollector:
     @staticmethod
     def _statspack_texts(cur, marks: str, ids: dict, notes: list[str]) -> dict[str, str]:
         """Full statement text from STATS$SQLTEXT, which keeps it once per statement in 64-character pieces (recent
-        releases leave STATS$SQL_SUMMARY.sql_text empty). Without SELECT on it, the caller falls back and says so."""
+        releases leave STATS$SQL_SUMMARY.sql_text empty). Without SELECT on it, the caller falls back and says so.
+        Unlike the other STATS$ tables it has no dbid or instance_number (a filter on them is ORA-00904): Statspack
+        keeps one text per statement for everything it records, and a sql_id is a hash of that text, so the sql_id
+        alone names the right text."""
         try:
             rows = _rows(cur, f"""select sql_id, old_hash_value, piece, sql_text from perfstat.stats$sqltext
                                   where sql_id in ({marks}) order by sql_id, old_hash_value, piece""", **ids)

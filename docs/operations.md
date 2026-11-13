@@ -365,9 +365,11 @@ time since it (the snapshot notes that), and right after one, captures wait for 
 
 **Statspack in the lab.** `ora-statspack` reads the PDB, `FREEPDB1`, without the pack, so `auto` takes Statspack
 there; `ora-lab` reads the CDB root with AWR. Statspack has to be installed into the PDB once, and again after the
-container is recreated. With `PERFSTAT_PASSWORD` set in `.env`:
+container is recreated. With `PERFSTAT_PASSWORD` set in `.env` (dbtriage reads `.env` itself, the shell does not,
+so the first line loads it for the heredoc):
 
 ```sh
+set -a; . ./.env; set +a; test -n "$PERFSTAT_PASSWORD" || echo "set PERFSTAT_PASSWORD in .env first"
 docker exec -i -w /tmp db-triage-oracle-1 sqlplus -s / as sysdba <<EOF
 alter session set container = FREEPDB1;
 define perfstat_password = '$PERFSTAT_PASSWORD'
