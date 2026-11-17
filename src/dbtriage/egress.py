@@ -105,8 +105,9 @@ def plain_provider_error(err: str) -> str:
     if not proxy_configured() and any(k in e for k in ("connecttimeout", "connect timeout", "connection timed out")):
         return "Could not reach the endpoint. This network may require HTTPS_PROXY."
     # A 401 means a key was sent and refused; a missing key fails in the SDK before any request.
-    rejected = any(k in e for k in ("authenticationerror", "authentication_error", "error code: 401", "invalid_api_key",
-                                     "invalid api key", "invalid x-api-key", "incorrect api key", "revoked"))
+    rejected = any(k in e for k in ("authenticationerror", "authentication_error", "error code: 401", "http error 401",
+                                     "401 unauthorized", "invalid_api_key", "invalid api key", "invalid x-api-key",
+                                     "incorrect api key", "api key not valid", "invalid subscription key", "revoked"))
     if rejected and "expired" in e:
         return "The model provider's API key has expired. Set a new one."
     if rejected:

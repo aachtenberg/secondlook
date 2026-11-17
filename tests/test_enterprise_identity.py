@@ -55,6 +55,9 @@ def test_agent_reason_keeps_the_old_sentences_and_names_the_new_ones(monkeypatch
     rejected = "The model provider rejected the API key. Check that it is current and correct."
     assert agent_reason("AuthenticationError: Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}") == rejected
     assert agent_reason("AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-abc***', 'code': 'invalid_api_key'}}") == rejected
+    assert agent_reason("BadRequestError: Error code: 400 - API key not valid. Please pass a valid API key.") == rejected  # Gemini
+    assert agent_reason("Access denied due to invalid subscription key or wrong API endpoint.") == rejected  # Azure OpenAI
+    assert agent_reason("HTTPError: HTTP Error 401: Unauthorized") == rejected
     assert agent_reason("SystemExit: [agent] OPENROUTER_API_KEY is not set for provider 'openrouter'") == "No credentials configured for the model provider."
     assert plain_provider_error("SSLCertVerificationError: certificate verify failed") == "TLS verification failed. Set AWS_CA_BUNDLE to the corporate bundle."
     assert plain_provider_error("ConnectTimeoutError: connection timed out") == "Could not reach the endpoint. This network may require HTTPS_PROXY."
