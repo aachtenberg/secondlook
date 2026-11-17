@@ -50,6 +50,12 @@ def test_agent_reason_keeps_the_old_sentences_and_names_the_new_ones(monkeypatch
     expired = "ExpiredTokenException: The security token included in the request is expired"
     assert agent_reason(expired) == "AWS session expired. Copy today's keys from the access portal into ~/.aws/credentials."
     assert plain_provider_error("NoCredentialsError: Unable to locate credentials") == "No AWS credentials found."
+    # a key that was sent and refused is not a missing setup
+    assert agent_reason("AuthenticationError: Error code: 401 - API key expired.") == "The model provider's API key has expired. Set a new one."
+    rejected = "The model provider rejected the API key. Check that it is current and correct."
+    assert agent_reason("AuthenticationError: Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}") == rejected
+    assert agent_reason("AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-abc***', 'code': 'invalid_api_key'}}") == rejected
+    assert agent_reason("SystemExit: [agent] OPENROUTER_API_KEY is not set for provider 'openrouter'") == "No credentials configured for the model provider."
     assert plain_provider_error("SSLCertVerificationError: certificate verify failed") == "TLS verification failed. Set AWS_CA_BUNDLE to the corporate bundle."
     assert plain_provider_error("ConnectTimeoutError: connection timed out") == "Could not reach the endpoint. This network may require HTTPS_PROXY."
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
