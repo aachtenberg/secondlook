@@ -68,3 +68,29 @@ create_snapshot = "incident"     # take an AWR snapshot on incident runs, once [
 engine = "oracle"
 dsn_env = "ORACLE_PDB_DSN"       # C##DBTRIAGE/dbtriage@localhost:1521/FREEPDB1: the lab PDB, where Statspack is installed
 diagnostics_pack = false         # read without the pack, so auto takes Statspack (oracle_source in configuration.md)
+
+# Production CloudNativePG clusters on k3s (HOMELAB-65). Each reads one database on the cluster's
+# primary as the read-only role dbtriage (pg_monitor only), through the cluster's dbtriage NodePort.
+[targets.sre-knowledge]
+engine = "postgres"
+dsn_env = "SRE_KNOWLEDGE_DSN"    # sre-pg (data), NodePort 30543: cfoperator's knowledge base, pgvector
+
+[targets.iot-sensors]
+engine = "postgres"
+dsn_env = "IOT_SENSORS_DSN"      # sre-pg (data), NodePort 30543: esp32-lora-api
+
+[targets.ts-sensors]
+engine = "postgres"
+dsn_env = "TS_SENSORS_DSN"       # timescale-pg (data), NodePort 30544: telegraf's TimescaleDB
+
+[targets.immich]
+engine = "postgres"
+dsn_env = "IMMICH_DSN"           # camera-pg (apps), NodePort 30545: Immich, VectorChord
+
+[targets.camera-db]
+engine = "postgres"
+dsn_env = "CAMERA_DB_DSN"        # camera-pg (apps), NodePort 30545: camera-api
+
+[targets.plane]
+engine = "postgres"
+dsn_env = "PLANE_DSN"            # plane-pg (plane), NodePort 30546: Plane

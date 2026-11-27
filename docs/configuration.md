@@ -5,6 +5,11 @@ on top of it, in a separate settings overlay, so the file can stay in version co
 what you changed: a setting you leave as the file has it keeps following the file, and one you change or clear
 wins over it.
 
+A running web view notices a saved edit to `targets.toml` within a second, as it does the `.env`: a target added
+to the file is on the next page you load, with no restart. A file that no longer loads (a typo, a half-saved
+edit) leaves the last good version running, and the log says why. `[storage]` and `[web] settings_file` are the
+exceptions: a different store or settings overlay needs a restart.
+
 Rather than starting from scratch, copy a [recipe](../recipes/README.md). Every option is explained in
 [recipes/reference.toml](../recipes/reference.toml), and every environment variable in
 [recipes/reference.env](../recipes/reference.env). How a laptop paste differs from a cloud role, and how the
