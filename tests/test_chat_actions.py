@@ -86,7 +86,7 @@ def test_tools_follow_the_person_s_permissions(make_app, monkeypatch):
     assert "run_now" in s.seen_tools and "set_schedule" not in s.seen_tools and "You cannot change its schedule here" in s.system
 
 
-def test_limits_the_agent_keeps(make_app):
+def test_limits_the_agent_keeps(make_app, monkeypatch):
     s = Script(("set_schedule", {"schedule": "*/5 * * * *"}))
     app = make_app(s)
     code, ans = app.chat_ask(SID, "target", "every 5 minutes please")
@@ -98,9 +98,26 @@ def test_limits_the_agent_keeps(make_app):
     assert s.results[0].startswith("not changed: a schedule has five fields")
     assert len(ans["actions"]) == 3 and s.results[4] == "not changed: at most 3 schedule changes per question"
     assert sched(app)["schedule"] == "0 * * * *" and not sched(app)["paused"]  # hourly, paused, resumed; daily refused
-    s = Script(("set_schedule", {"paused": False}))  # already so: no change recorded
+    s = Script(("set_schedule", {"paused": False}), ("set_schedule", {"schedule": "hourly"}))  # already so: no change
     app = make_app(s)
-    assert "actions" not in app.chat_ask(SID, "target", "resume it")[1] and '"changed": false' in s.results[0]
+    saves = []
+    real = app.save_schedule
+    monkeypatch.setattr(app, "save_schedule", lambda name, fields: (saves.append(fields), real(name, fields))[1])
+    assert "actions" not in app.chat_ask(SID, "target", "resume it, keep it hourly")[1]
+    assert '"changed": false' in s.results[0] and '"changed": false' in s.results[1] and saves == []  # not saved, not audited
+    s = Script(("set_schedule", {"window_minutes": "lots"}))  # the wrong type still reaches the Settings checks
+    app = make_app(s)
+    app.chat_ask(SID, "target", "a bigger window")
+    assert s.results == ["not changed: schedule_window must be a whole number"]
+
+
+def test_a_window_alone_on_an_unscheduled_database_is_a_change(make_app):
+    s = Script(("set_schedule", {"window_minutes": 30}), ("set_schedule", {"schedule": ""}))
+    app = make_app(s)
+    code, ans = app.chat_ask(SID, "target", "use a 30 minute window, then make sure it is not scheduled")
+    assert code == 200 and '"changed": true' in s.results[0] and '"changed": true' in s.results[1]
+    assert [a["text"] for a in ans["actions"]] == ["Schedule of demo: not scheduled → not scheduled, 30-minute window.",
+                                                    "Schedule of demo: not scheduled, 30-minute window → not scheduled."]
 
 
 def test_run_now_starts_one_run_as_the_person(make_app, monkeypatch):

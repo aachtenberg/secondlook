@@ -54,10 +54,18 @@ def view(row: dict | None) -> dict:
 
 
 def describe(row: dict | None) -> str:
-    """'hourly, 60-minute window', 'every 15 minutes, 30-minute window, paused', 'not scheduled'."""
+    """'hourly, 60-minute window', 'every 15 minutes, 30-minute window, paused', 'not scheduled', or 'not scheduled,
+    30-minute window' when an unscheduled database keeps a window of its own (Run now and run_now use it)."""
     if not row or not row.get("schedule"):
-        return "not scheduled"
+        w = (row or {}).get("window") or 60
+        return "not scheduled" + (f", {w}-minute window" if w != 60 else "")
     return f"{row['label']}, {row['window']}-minute window" + (", paused" if row.get("paused") else "")
+
+
+def state(row: dict | None) -> tuple[str, int, bool]:
+    """What a schedule change can change: (cron, window, paused)."""
+    r = row or {}
+    return (r.get("schedule") or "", int(r.get("window") or 60), bool(r.get("paused")))
 
 
 class ChatActions:
@@ -108,8 +116,8 @@ class ChatActions:
                                     "paused": {"type": "boolean", "description": "true pauses the schedule, false resumes it"}}},
                                 self.set_schedule))
         if self._run:
-            out.append(ToolSpec("run_now", f"Start a collection and review of {self.target} now, with its schedule's window "
-                                "(60 minutes when unscheduled), as the engineer asked. At most once per question.",
+            out.append(ToolSpec("run_now", f"Start a collection and review of {self.target} now, with its saved window "
+                                "(60 minutes unless one was set), as the engineer asked. At most once per question.",
                                 {"type": "object", "properties": {
                                     "reason": {"type": "string", "description": "why, in a few words, from the engineer's request"}}},
                                 self.run_now))
@@ -126,6 +134,8 @@ class ChatActions:
         if self.changes >= MAX_CHANGES:
             return f"not changed: at most {MAX_CHANGES} schedule changes per question"
         fields: dict = {}
+        before = self._row()
+        cron, window, paused = state(before)  # what it would be after the change, starting from what it is
         sched = args.get("schedule")
         if sched is not None:
             if not isinstance(sched, str):
@@ -139,19 +149,27 @@ class ChatActions:
                                 "is set on the Settings page")
                 except ValueError as exc:
                     return f"not changed: {exc}"
+            else:
+                cron, window, paused = "", 60, False  # unscheduling drops the window and the pause too
             fields["schedule"] = sched
-        if args.get("window_minutes") is not None:
-            fields["schedule_window"] = args["window_minutes"]
-        if args.get("paused") is not None:
-            fields["schedule_paused"] = args["paused"]
+        typed = True  # a value of the wrong type goes on to the Settings checks, which say what is wrong with it
+        if (w := args.get("window_minutes")) is not None:
+            fields["schedule_window"] = w
+            typed = isinstance(w, int) and not isinstance(w, bool)
+            window = w if typed else window
+        if (p := args.get("paused")) is not None:
+            fields["schedule_paused"] = p
+            typed = typed and isinstance(p, bool)
+            paused = p if isinstance(p, bool) else paused
         if not fields:
             return "not changed: give schedule, window_minutes or paused"
-        before = self._row()
+        if typed and (cron, window, paused) == state(before):
+            return json.dumps({"changed": False, "already": view(before)})  # already so: nothing to save or audit
         problems = self._save(fields)
         if problems:
             return "not changed: " + "; ".join(problems)
         after = self._row()
-        if describe(before) == describe(after):
+        if state(before) == state(after):
             return json.dumps({"changed": False, "already": view(after)})
         self.changes += 1
         self.done.append({"action": "set_schedule", "before": view(before), "after": view(after),
