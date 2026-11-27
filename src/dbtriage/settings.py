@@ -142,6 +142,8 @@ def _field_problems(t: dict) -> list[str]:
             out.append(f"{k} must be text")
     if t.get("mask_report_literals") not in (None, "", True, False):
         out.append("mask_report_literals must be true or false")
+    if t.get("schedule_paused") not in (None, True, False):  # "false" would be stored as true: refused, not coerced
+        out.append("schedule_paused must be true or false")
     links = t.get("links")
     if links is not None and not (isinstance(links, list) and all(
             isinstance(l, dict) and isinstance(l.get("url"), str) and isinstance(l.get("label"), str) for l in links)):

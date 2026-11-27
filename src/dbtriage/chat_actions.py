@@ -158,9 +158,10 @@ class ChatActions:
             typed = isinstance(w, int) and not isinstance(w, bool)
             window = w if typed else window
         if (p := args.get("paused")) is not None:
+            if not isinstance(p, bool):  # "false" is a non-empty string: coerced, it would pause the schedule
+                return "not changed: paused must be true or false"
             fields["schedule_paused"] = p
-            typed = typed and isinstance(p, bool)
-            paused = p if isinstance(p, bool) else paused
+            paused = p
         if not fields:
             return "not changed: give schedule, window_minutes or paused"
         if typed and (cron, window, paused) == state(before):
