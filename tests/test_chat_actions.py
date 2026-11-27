@@ -109,6 +109,11 @@ def test_limits_the_agent_keeps(make_app, monkeypatch):
     app = make_app(s)
     app.chat_ask(SID, "target", "a bigger window")
     assert s.results == ["not changed: schedule_window must be a whole number"]
+    s = Script(("set_schedule", {"paused": "false"}))  # a string, which bool() would make true
+    app = make_app(s)
+    app.chat_ask(SID, "target", "resume it")
+    assert s.results == ["not changed: paused must be true or false"] and not sched(app)["paused"]
+    assert app.save_schedule("demo", {"schedule_paused": "false"}) == ["schedule_paused must be true or false"]  # the API path too
 
 
 def test_a_window_alone_on_an_unscheduled_database_is_a_change(make_app):
