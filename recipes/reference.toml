@@ -150,6 +150,8 @@ channels = ["stdout"]
 #                                      reviewer's own tools (no live database access). Only here: the web view cannot
 # allow_run = false                    true adds run_review: collect and review a database now (spends model credit and
 #                                      posts to your channels, like the Run button)
+# allow_schedule = false               true adds set_schedule: set, change, pause or clear a database's schedule
+#                                      (saved in the settings overlay, at most every 15 minutes)
 # tools = ["list_targets", "get_review"]    offer only these (default: every read tool). See docs/mcp.md
 
 # ------------------------------------------------------------------------------------------------ databases

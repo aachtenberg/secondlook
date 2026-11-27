@@ -23,6 +23,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -202,6 +203,8 @@ class Settings:
         self.lock = threading.Lock()
         self.data: dict = {"targets": {}, "web": {}, "agent": {}, "delivery": {}}
         self.degraded: str | None = None
+        self._seen: tuple[int, int] | None = None  # the file as last read or written here (mtime, size)
+        self._checked = 0.0
         if is_pg_url(str(path)):
             self.db: _PgSettings | None = _PgSettings(str(path))
             self.path = Path(cache) if cache else Path("dbtriage-settings.cache.json")
@@ -239,7 +242,41 @@ class Settings:
                     raise
                 self.degraded = f"settings database {self.where} unreachable ({type(exc).__name__}); using the last good copy"
         if self.path.exists():
+            stamp = self._stamp()
             self.data = _shape(json.loads(self.path.read_text() or "{}"))
+            self._seen = stamp
+
+    RECHECK_FILE_S = 1.0   # a stat of the file
+    RECHECK_DB_S = 30.0    # a read of the settings database
+
+    def _stamp(self) -> tuple[int, int] | None:
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def refresh(self) -> bool:
+        """Re-read the overlay when another process changed it (dbtriage mcp, a second web view sharing it, an edit
+        by hand): the file when its mtime or size moved, a settings database at most every 30 seconds. True when what
+        it holds changed. A file that does not parse leaves what was read before, and says so."""
+        now = time.monotonic()
+        if now - self._checked < (self.RECHECK_DB_S if self.db is not None else self.RECHECK_FILE_S):
+            return False
+        self._checked = now
+        if self.db is None and self._stamp() == self._seen:
+            return False
+        with self.lock:
+            before = self.data
+            try:
+                self.load()
+            except Exception as exc:  # noqa: BLE001 - this runs before every request: a hand edit with a typo, or a
+                # database error that is not an outage, keeps the last good overlay rather than failing the page
+                self._seen = self._stamp()
+                print(f"settings: {self.where} changed but does not load ({exc}); still using the version read before",
+                      file=sys.stderr)
+                return False
+            return self.data != before
 
     def save(self):
         with self.lock:
@@ -256,6 +293,7 @@ class Settings:
                     raise SettingsUnavailable(f"{self.degraded}; the change was not saved") from exc
                 self.degraded = None
             _write_private(self.path, self.data)
+            self._seen = self._stamp()  # our own write is not another process's change
 
     # ---------------------------------------------------------------- targets
     def put_target(self, name: str, fields: dict, base: dict | None = None) -> list[str]:

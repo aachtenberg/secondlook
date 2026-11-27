@@ -659,9 +659,12 @@ class App:
             self._seed_lock.release()
 
     def refresh(self):
-        """Pick up edits to .env and targets.toml, on the next request or scheduler tick: neither needs a restart."""
+        """Pick up edits to .env, targets.toml and the settings overlay made outside this view, on the next request
+        or scheduler tick: none needs a restart."""
         env = envfile.refresh()  # first, so a target added with its dsn_env in the same edit finds its DSN
-        if self.reseed() or env:
+        seed = self.reseed()
+        overlay = self.settings.refresh()  # a schedule set over MCP, or by another web view sharing the overlay
+        if env or seed or overlay:
             self.reload()
 
     def allows(self, cap: str) -> bool:
@@ -1823,8 +1826,10 @@ class App:
             return ("<b>The MCP server is turned on in targets.toml but will not start:</b> "
                     + html.escape("; ".join(errs)) + ". Fix [mcp] there.")
         tools = mcp_server.offered(self.cfg)
+        acting = [d for t, d in ((mcp_server.RUN_TOOL, "run_review, which starts runs"),
+                                 (mcp_server.SCHEDULE_TOOL, "set_schedule, which changes schedules")) if t in tools]
         return (f"<b>The MCP server is on</b> in targets.toml ([mcp]): <code>dbtriage mcp</code> offers {len(tools)} tools"
-                + (", including run_review, which starts runs" if mcp_server.RUN_TOOL in tools else ", all read-only") + ".")
+                + (", including " + " and ".join(acting) if acting else ", all read-only") + ".")
 
     @staticmethod
     def parse_target_form(form: dict) -> tuple[str, dict]:
