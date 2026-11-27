@@ -121,6 +121,8 @@ class FakeLLM:
             sid = re.search(r"snapshot (\S+), captured", text)[1]
             return self._msg(calls=[("get_report", {"snapshot_id": sid, "section": "top_sql"})])
         q = re.findall(r"Answer this question now, using tools for any number you cite: (.*)", text)
+        if done_tools == 1 and q and "set the schedule" in q[-1].lower() and "set_schedule" in tools:  # asked to act: act, then answer
+            return self._msg(calls=[("set_schedule", {"schedule": "hourly", "window_minutes": 30})])
         ans = f"**Fake answer** to: {q[-1] if q else '?'}"
         if q and "explain" in q[-1].lower():  # a proposed read, as the real model writes one
             ans += "\n\nLook for a sequential scan on orders:\n\n```proposed-read\nEXPLAIN SELECT count(*) FROM orders WHERE status = 'open';\n```"
