@@ -302,6 +302,11 @@ def test_discuss_links_and_chat_api(tmp_path, monkeypatch):
     t = app.chat_thread(SID, "finding-1")
     assert [m["role"] for m in t["messages"]] == ["user", "assistant"] and t["messages"][1]["html"].startswith("<p><b>yes</b>")
     assert app.chat_ask(SID, "finding-5", "x")[0] == 400 and app.chat_ask(SID, "review", "")[0] == 400
+    # the target page's dock asks on key "target": its own thread, not the snapshot's review thread
+    review_before = app.chat_thread(SID, "review")["messages"]
+    assert app.chat_ask(SID, "target", "how is this database doing?")[0] == 200
+    assert [m["text"] for m in app.chat_thread(SID, "target")["messages"] if m["role"] == "user"] == ["how is this database doing?"]
+    assert app.chat_thread(SID, "review")["messages"] == review_before
     assert "no_such_key" not in page
 
 

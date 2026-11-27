@@ -293,6 +293,45 @@ def test_discuss_threads_per_finding_and_query(page, web_server):
 
 
 # --------------------------------------------------------------------------- settings page
+def test_target_dock_waits_out_the_refresh_and_keeps_its_thread(page, tmp_path, fake_llm, seeded):
+    """The target page reloads every refresh_seconds. A reload used to land while the model was still answering:
+    the question was dropped and the dock closed, and the answer went to the snapshot's review thread, so opening
+    the dock again showed nothing. Now the reload waits while the dock is open or a question is out, and the
+    dock's questions are kept in the target thread."""
+    import threading
+
+    from dbtriage.config import Config, Target
+    from dbtriage.web import make_server
+
+    cfg = Config(storage_url=f"file://{tmp_path / 'data'}", base_dir=str(tmp_path), web={"refresh_seconds": 1},
+                 targets={"demo": Target("demo", "postgres", "postgresql://u@127.0.0.1:1/x")},
+                 agent={"provider": "ollama", "model": "fake-model", "base_url": fake_llm.url})
+    srv = make_server(cfg, seeded, "127.0.0.1", free_port(), True, None, True, True, False)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}"
+    wait_for(url + "/health")
+    try:
+        fake_llm.delay = 1.5  # two completions per answer (a tool call, then the answer): three times the refresh
+        page.goto(url + "/t/demo")
+        page.evaluate("window.__same = 1")
+        page.locator("#discuss-open").click()
+        expect(page.locator("#discuss")).to_be_visible()
+        page.locator("#chat-q").fill("how is it doing?")
+        page.locator("#chat-q").press("Enter")
+        expect(page.locator("#chat-log .dmsg.assistant .dtext").last).to_contain_text("Fake answer to: how is it doing?")
+        assert page.evaluate("window.__same") == 1  # no reload while it waited
+        page.locator("#discuss-close").click()
+        with page.expect_event("load", timeout=8000):  # closed and idle: the refresh goes ahead
+            page.evaluate("document.activeElement && document.activeElement.blur()")
+        assert page.evaluate("window.__same") is None
+        page.locator("#discuss-open").click()
+        expect(page.locator("#chat-log .dmsg.user")).to_have_text("how is it doing?")  # read back from the target thread
+    finally:
+        fake_llm.delay = 0.0
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_settings_save_in_place_with_toasts(page, web_server):
     page.goto(web_server + "/settings")
     agent = page.locator("form[action='/settings/agent']")

@@ -128,7 +128,7 @@ $body
 
   // ---- discuss panel (snapshot page only)
   var box = document.getElementById('discuss'), DKEY = 'dbtriage.discuss';
-  var log, form, q, send, focus, intro, key = 'review', ready, dock = false;
+  var log, form, q, send, focus, intro, key = 'review', ready, dock = false, inflight = 0;  // inflight: questions and pastes not yet answered
   if (box) {
     key = box.getAttribute('data-key') || 'review'; dock = box.getAttribute('data-dock') === '1';
     log = document.getElementById('chat-log'); form = document.getElementById('chat-form'); q = document.getElementById('chat-q');
@@ -179,14 +179,14 @@ $body
       e.preventDefault();
       var text = q.value.trim(); if (!text || !ready) return;
       var s = log.querySelector('.sugg'); if (s) s.remove();
-      msg('user', text); q.value = ''; send.disabled = true;
+      msg('user', text); q.value = ''; send.disabled = true; inflight++;
       var wait = msg('assistant', '<p class=mut>thinking…</p>');
       fetch(box.getAttribute('data-base') + key, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
                        body: JSON.stringify({ question: text }) })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
         .then(function (x) { wait.remove(); if (x.ok) { msg('assistant', x.j.html, x.j.footer); } else { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = x.j.error || 'failed'; } })
         .catch(function (err) { wait.remove(); msg('assistant', '<p class=err></p>').querySelector('.err').textContent = err.message; })
-        .then(function () { send.disabled = !ready; q.focus(); });
+        .then(function () { inflight--; send.disabled = !ready; q.focus(); });
     });
     q.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
     document.getElementById('discuss-close').addEventListener('click', function () { showBox(false); });
@@ -208,7 +208,7 @@ $body
       var f = e.target.closest('form.panswer'); if (!f) return;
       e.preventDefault();
       var ta = f.querySelector('textarea'), btn = f.querySelector('button[type=submit]'), text = ta.value.trim(); if (!text) return;
-      btn.disabled = true;
+      btn.disabled = true; inflight++;
       fetch(box.getAttribute('data-base') + key + '/answer', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
                        body: JSON.stringify({ proposal: parseInt(f.getAttribute('data-proposal'), 10), result: text }) })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
@@ -217,7 +217,7 @@ $body
           else { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = x.j.error || 'failed'; }
         })
         .catch(function (err) { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = err.message; })
-        .then(function () { btn.disabled = false; });
+        .then(function () { inflight--; btn.disabled = false; });
     });
     var closed = null; try { closed = localStorage.getItem(DKEY) === 'closed'; } catch (e) {}
     var deep = /^#chat-(review|target|finding-\d+|sql-[A-Za-z0-9_]+)$/.exec(location.hash);
@@ -231,6 +231,18 @@ $body
     var c = e.target.closest('a[data-chat],button[data-chat]');
     if (c && box) { e.preventDefault(); openKey(c.getAttribute('data-chat')); }
   });
+
+  // ---- auto refresh (overview and target pages, [web] refresh_seconds). A reload drops a question still waiting on
+  // the model, closes the discussion, a dialog or the file drawer, and loses what is being typed or selected, so
+  // while any of that is going on (or the tab is in the background) it waits and looks again every two seconds.
+  var every = parseInt((document.querySelector('meta[name=dbtriage-refresh]') || {}).content, 10) || 0;
+  function inUse() {
+    var a = document.activeElement, sel = window.getSelection ? String(window.getSelection()) : '';
+    return inflight > 0 || (!!box && !box.hidden) || !panel.hidden || document.hidden || sel !== ''
+      || !!document.querySelector('[aria-busy=true], dialog[open]') || !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+  }
+  function due() { if (inUse()) setTimeout(due, 2000); else location.reload(); }
+  if (every > 0) setTimeout(due, every * 1000);
 })();
 (function () {
   // table.sortable: each named header becomes a button. Numbers sort largest first and text A to Z; a second click

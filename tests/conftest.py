@@ -57,6 +57,7 @@ class FakeLLM:
 
     def __init__(self):
         self.requests: list[dict] = []
+        self.delay = 0.0  # seconds each completion takes: a slow model, for what the page does while it waits
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -79,6 +80,7 @@ class FakeLLM:
             def do_POST(self):  # noqa: N802
                 req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fake.requests.append(req)
+                time.sleep(fake.delay)
                 self._send(fake.reply(req))
 
         self.server = ThreadingHTTPServer(("127.0.0.1", free_port()), H)
