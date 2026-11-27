@@ -68,6 +68,7 @@ class Config:
     mcp: dict = field(default_factory=dict)       # [mcp]: enabled, allow_run, tools (dbtriage.mcp_server); targets.toml only
     base_dir: str = "."                           # directory of the config file; relative paths resolve against it
     file_only: "Config | None" = field(default=None, repr=False, compare=False)  # targets.toml alone, before the UI overlay
+    path: str | None = None                       # the config file itself, so a long-running process can re-read it
 
     def target(self, name: str) -> Target:
         try:
@@ -76,7 +77,8 @@ class Config:
             raise SystemExit(f"unknown target {name!r}; known: {', '.join(sorted(self.targets)) or '(none)'}")
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
+def load_config(path: str | os.PathLike | None = None, overlay: bool = True) -> Config:
+    """targets.toml, with the web UI's settings overlay on top unless overlay is False (the file alone)."""
     path = Path(path or os.environ.get("DBTRIAGE_CONFIG", "targets.toml"))
     if not path.exists():
         raise SystemExit(f"config file not found: {path}")
@@ -125,8 +127,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         raise SystemExit(f"targets {clash[0]!r} and {clash[1]!r} differ only in case: on Windows and macOS they would "
                          "share one folder of snapshots; rename one")
     cfg = Config(storage_url=storage_url, targets=targets, agent=data.get("agent", {}), delivery=data.get("delivery", {}),
-                 web=data.get("web", {}), collect=data.get("collect", {}), mcp=data.get("mcp", {}), base_dir=str(path.resolve().parent))
-    if os.environ.get("DBTRIAGE_NO_OVERLAY"):
+                 web=data.get("web", {}), collect=data.get("collect", {}), mcp=data.get("mcp", {}), base_dir=str(path.resolve().parent),
+                 path=str(path.resolve()))
+    if not overlay or os.environ.get("DBTRIAGE_NO_OVERLAY"):
         return cfg
     # Targets, agent, delivery and branding edited in the web UI live in a JSON overlay next to this file;
     # apply it here too so cron / webhook / CLI runs see the same configuration as the UI.

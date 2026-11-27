@@ -433,3 +433,45 @@ def test_a_ticket_channels_global_choice_means_the_global_gate(conf, monkeypatch
     page = app_for(conf).settings_page().decode()
     jira = page.split("<legend>jira</legend>")[1].split("</fieldset>")[0]
     assert "<option value='high' selected>" in jira
+
+
+def _edit(conf, text):
+    """Rewrite targets.toml and move its mtime on, as a save a second later would."""
+    import os
+
+    before = conf.stat().st_mtime_ns
+    conf.write_text(text)
+    os.utime(conf, ns=(before + 1_000_000_000, before + 1_000_000_000))
+
+
+def test_web_picks_up_targets_toml_edits_without_a_restart(conf, monkeypatch):
+    monkeypatch.setattr(App, "SEED_CHECK_EVERY_S", 0)
+    monkeypatch.setenv("NEW_PG_DSN", "postgresql://u:p@h/db")
+    app = app_for(conf)
+    assert form_save(app, "ora", notes="from the UI") == []  # an overlay edit, which must survive the re-read
+    _edit(conf, TOML + '[targets.new-pg]\nengine = "postgres"\ndsn_env = "NEW_PG_DSN"\n')
+    app.refresh()
+    assert app.cfg.targets["new-pg"].dsn == "postgresql://u:p@h/db" and "new-pg" in app.seed.targets
+    assert app.cfg.targets["ora"].extra["notes"] == "from the UI"  # still file + overlay, not the file alone
+    assert "href='/t/new-pg'" in app.index().decode()
+    assert {r["target"] for r in app.schedule_rows()} >= {"ora", "new-pg"}  # the scheduler reads the same cfg
+
+    _edit(conf, TOML)  # and taking a target out of the file takes it out of the view
+    app.refresh()
+    assert "new-pg" not in app.cfg.targets
+
+
+def test_a_targets_toml_that_no_longer_loads_keeps_the_last_good_one(conf, monkeypatch, capsys):
+    monkeypatch.setattr(App, "SEED_CHECK_EVERY_S", 0)
+    app = app_for(conf)
+    _edit(conf, TOML + "[targets.half-saved\n")
+    app.refresh()
+    assert set(app.cfg.targets) == {"ora"} and "does not load" in capsys.readouterr().err
+    _edit(conf, TOML + '[targets.bad]\nengine = "db2"\ndsn = "x"\n')  # load_config's own refusal (SystemExit)
+    app.refresh()
+    assert set(app.cfg.targets) == {"ora"} and "engine must be one of" in capsys.readouterr().err
+    store_url = app.seed.storage_url
+    _edit(conf, TOML.replace('url = "file://./data"', 'url = "file://./elsewhere"') + '[targets.ok]\ndsn = "x"\n')
+    app.refresh()  # the rest of the edit applies; the open store stays the one it was
+    assert "ok" in app.cfg.targets and app.seed.storage_url == app.cfg.storage_url == store_url
+    assert "until it is restarted" in capsys.readouterr().err

@@ -199,7 +199,8 @@ schedule_window = 60        # minutes collected per run
 ```
 
 Something has to keep time. Either the web server does it (`--schedule`), or `dbtriage scheduler` runs on its
-own on a server that can reach the databases. Both pick up changes without a restart. Only one run per database
+own on a server that can reach the databases. Both pick up changes without a restart, whether made on the
+Settings page or in `targets.toml` and `.env`. Only one run per database
 runs at a time; a slot that comes up while the last run is still going is skipped and shown as such. Slots
 missed while nothing was running are not caught up. Cron and the cloud timers in `examples/` still work too.
 
