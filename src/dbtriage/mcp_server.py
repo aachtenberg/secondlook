@@ -48,7 +48,7 @@ def _section(cfg: Config) -> dict:
 
 
 def settings(cfg: Config) -> dict:
-    """[mcp] as it applies: enabled and allow_run only when they are real booleans true; tools checked."""
+    """[mcp] as it applies: enabled, allow_run and allow_schedule only when they are real booleans true; tools checked."""
     m = _section(cfg)
     tools = m.get("tools")
     return {"enabled": m.get("enabled") is True, "allow_run": m.get("allow_run") is True,

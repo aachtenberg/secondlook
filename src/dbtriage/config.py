@@ -65,7 +65,7 @@ class Config:
     delivery: dict = field(default_factory=dict)  # see dbtriage.deliver
     web: dict = field(default_factory=dict)       # see dbtriage.web
     collect: dict = field(default_factory=dict)   # [collect]: allow_db_writes (dbtriage.dbsnap); targets.toml only
-    mcp: dict = field(default_factory=dict)       # [mcp]: enabled, allow_run, tools (dbtriage.mcp_server); targets.toml only
+    mcp: dict = field(default_factory=dict)       # [mcp]: enabled, allow_run, allow_schedule, tools (dbtriage.mcp_server); targets.toml only
     base_dir: str = "."                           # directory of the config file; relative paths resolve against it
     file_only: "Config | None" = field(default=None, repr=False, compare=False)  # targets.toml alone, before the UI overlay
     path: str | None = None                       # the config file itself, so a long-running process can re-read it

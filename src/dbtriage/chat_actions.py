@@ -3,8 +3,9 @@
 The model in a discussion reads stored evidence (dbtriage.chat). These tools let it also do what that person could do
 on the page for the database being discussed: read and change its schedule, and start a run. The web view builds
 them for each question with that person's permissions: set_schedule only when the view allows editing and their group
-may edit, run_now only when it allows runs and their group may run, get_schedule always. The CLI's `dbtriage ask`, the
-MCP server and every review, scheduled or not, never get them.
+may edit, run_now only when it allows runs and their group may run, get_schedule always. The MCP server builds one for
+a single set_schedule call when targets.toml's [mcp] allow_schedule is on (dbtriage.mcp_server). The CLI's `dbtriage
+ask` and every review, scheduled or not, never get them.
 
 A change goes through the same code and checks as the Settings page, is audited as the person, and is kept in the
 thread as an "action" message that says what changed from what; the page shows it as a card. Two limits are the
