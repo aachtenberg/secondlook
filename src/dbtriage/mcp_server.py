@@ -214,38 +214,50 @@ class Tools:
         st = Settings.for_config(seed)
         return seed, st, (st.apply(seed) if st.exists() else seed)
 
-    def _schedule_row(self, target: str) -> dict | None:
+    @staticmethod
+    def _rows(cfg: Config) -> dict[str, dict]:
         from dbtriage import scheduler
 
-        _, _, cfg = self._schedules()
-        rows = scheduler.rows_without_scheduler({n: t.extra for n, t in cfg.targets.items()})
-        return next((r for r in rows if r["target"] == target), None)
+        return {r["target"]: r for r in scheduler.rows_without_scheduler({n: t.extra for n, t in cfg.targets.items()})}
+
+    @staticmethod
+    def _known(target: str, cfg: Config) -> None:
+        """Checked against the targets as they are now, not as at start: one added since can be scheduled, and one
+        removed since cannot (an overlay entry for it would bring back a target with no connection)."""
+        if target not in cfg.targets:
+            raise LookupError(f"no target {target!r}; choose from {', '.join(sorted(cfg.targets))}")
 
     def get_schedule(self, target: str = "") -> str:
         from dbtriage.chat_actions import view
 
+        _, _, cfg = self._schedules()
         if target:
-            self._target(target)  # an unknown name is an error the model can act on
-        names = [target] if target else sorted(self.cfg.targets)
-        return json.dumps([{"target": n, **view(self._schedule_row(n))} for n in names], default=str)
+            self._known(target, cfg)
+        rows = self._rows(cfg)
+        return json.dumps([{"target": n, **view(rows.get(n))} for n in ([target] if target else sorted(cfg.targets))], default=str)
 
     def set_schedule(self, target: str, schedule: str | None = None, window_minutes: int | None = None,
                      paused: bool | None = None) -> str:
         """Through the same checks as the Settings page and Ask AI (dbtriage.chat_actions), saved to the settings
-        overlay, where the scheduler reads it: the web view with --schedule within seconds, dbtriage scheduler on its
-        next tick."""
+        overlay, where the scheduler reads it: the web view with --schedule on its next request or tick, dbtriage
+        scheduler on its next tick."""
         from dbtriage.chat_actions import ChatActions
 
-        self._target(target)
-        seed, st, _ = self._schedules()
+        seed, st, cfg = self._schedules()
+        self._known(target, cfg)
         if st is None:
             raise LookupError("the settings overlay is off (DBTRIAGE_NO_OVERLAY), so a schedule is changed in targets.toml only")
 
+        def row() -> dict | None:
+            return self._rows(self._schedules()[2]).get(target)
+
         def save(fields: dict) -> list[str]:
-            seed, st, _ = self._schedules()  # read again just before writing, so a change made meanwhile is kept
+            seed, st, cfg = self._schedules()  # read again just before writing, so a change made meanwhile is kept
+            if target not in cfg.targets:
+                return [f"target {target!r} was removed meanwhile"]
             return st.put_schedule(target, seed, fields)
 
-        acts = ChatActions(target, row=lambda: self._schedule_row(target), scheduler_running=None, save=save)
+        acts = ChatActions(target, row=row, scheduler_running=None, save=save)
         args = {k: v for k, v in (("schedule", schedule), ("window_minutes", window_minutes), ("paused", paused)) if v is not None}
         out = acts.set_schedule(args)
         for a in acts.done:  # stdout is the MCP wire: the record goes to stderr, which the client keeps in its log

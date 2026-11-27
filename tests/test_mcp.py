@@ -527,6 +527,18 @@ def test_set_schedule_sets_pauses_and_clears(sched_cfg, capsys):
     assert [r["target"] for r in json.loads(call(server, "get_schedule"))] == ["demo", "quiet"]  # every database
 
 
+def test_schedules_follow_targets_toml_as_it_is_now(sched_cfg):
+    cfg, st, p = sched_cfg()
+    tools = mcp_server.Tools(cfg, st)  # the server started with demo and quiet
+    p.write_text(p.read_text().replace("[targets.quiet]", "[targets.later]\nengine = \"postgres\"\ndsn = \"x\"\n[targets.quiet]"))
+    assert json.loads(tools.set_schedule("later", schedule="hourly"))["changed"] is True  # added since: schedulable
+    assert [r["target"] for r in json.loads(tools.get_schedule())] == ["demo", "later", "quiet"]
+    p.write_text(p.read_text().replace('[targets.quiet]\nengine = "postgres"\ndsn = "postgresql://u:p@127.0.0.1:1/y"\n', ""))
+    out = mcp_server._guard(tools.set_schedule)("quiet", schedule="hourly")  # removed since: refused, nothing stored
+    assert out.startswith("error: no target 'quiet'") and "quiet" not in json.loads((p.parent / "dbtriage-settings.json").read_text())["targets"]
+    assert mcp_server._guard(tools.get_schedule)("quiet").startswith("error: no target 'quiet'")
+
+
 def test_set_schedule_refuses_when_the_overlay_is_off(sched_cfg, monkeypatch):
     cfg, st, _ = sched_cfg()
     monkeypatch.setenv("DBTRIAGE_NO_OVERLAY", "1")

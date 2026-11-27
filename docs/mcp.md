@@ -69,8 +69,8 @@ Give it a cron line in the server's local time (`0 * * * *`), `every 30m`, `hour
 minutes, or disable the schedule: `paused = true` stops it and keeps it to resume, `schedule = ""` clears it. It
 cannot schedule a database more often than every 15 minutes; the Settings page can. It returns the schedule before
 and after, and writes one line to stderr, which the client keeps in its MCP log. The change is saved in the
-settings overlay. The web view with `--schedule` picks it up within a second, and `dbtriage scheduler` on its next
-tick, with no restart. With `DBTRIAGE_NO_OVERLAY` set there is no overlay to save to, and it says so.
+settings overlay. The web view with `--schedule` picks it up on its next request or scheduler tick (every 20
+seconds), and `dbtriage scheduler` on its next tick, with no restart. With `DBTRIAGE_NO_OVERLAY` set there is no overlay to save to, and it says so.
 
 ## What the client's model sees
 
