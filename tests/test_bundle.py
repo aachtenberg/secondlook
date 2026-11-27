@@ -89,6 +89,13 @@ def unzip(data: bytes) -> dict[str, bytes]:
         return {i.filename: z.read(i) for i in z.infolist()}
 
 
+def test_readme_names_the_target_thread(tmp_path):
+    st = store(tmp_path)  # the target page's Ask AI thread, stored on the latest snapshot
+    st.put_json(f"{SID}/chat/target.json", {"snapshot": SID, "key": "target", "messages": [{"role": "user", "text": "how is it?", "at": "2026-11-05T10:07:00+00:00"}]})
+    md = unzip(bundle.build(st, SID))["README.md"].decode()
+    assert "`chat/target.json`: 1 question about the database as a whole" in md and "SQL id arget" not in md
+
+
 def test_members_readme_and_checksums(tmp_path):
     st = store(tmp_path)
     data = bundle.build(st, SID)

@@ -757,11 +757,17 @@ class App:
         logo = w.get("logo")
         logo_src = logo if logo and re.match(r"^https?://", logo) else ("/brand/logo" if self.logo_path else None)
         body = (name if isinstance(name, string.Template) else self.template(name)).safe_substitute(**fields)
-        out = self.template("base.html").safe_substitute(
+        base = self.template("base.html")
+        n = int(w["refresh_seconds"]) if refresh else 0
+        # The page's script reloads it, waiting while someone is using it (base.html); without script, or with a
+        # templates_dir base.html older than that script, the plain browser refresh.
+        scripted = "dbtriage-refresh" in base.template
+        out = base.safe_substitute(
             title=html.escape(f"{title} · {w['title']}"), brand=html.escape(w["brand"]), theme=html.escape(w["theme"]), q=html.escape(fields.get("q", "")),
             logo_html=f"<img src='{html.escape(logo_src)}' alt=''>" if logo_src else f"<span class='badge'>{ICON['db']}</span>",
             icon_link=f"<link rel='icon' href='{html.escape(logo_src)}'>" if logo_src else self._default_icon(w["accent"]),
-            refresh_meta=f"<meta http-equiv='refresh' content='{int(w['refresh_seconds'])}'>" if refresh and int(w["refresh_seconds"]) > 0 else "",
+            refresh_meta=("" if n <= 0 else f"<meta http-equiv='refresh' content='{n}'>" if not scripted
+                          else f"<meta name='dbtriage-refresh' content='{n}'><noscript><meta http-equiv='refresh' content='{n}'></noscript>"),
             css=string.Template(CSS).safe_substitute(accent=w["accent"], c_high=colors["high"], c_medium=colors["medium"],
                                                      c_low=colors["low"], c_info=colors["info"]),
             custom_css=self.custom_css, sidenav=self.sidenav(active, sid), body=self.degraded_banner() + body, footer=html.escape(w.get("footer") or ""),
@@ -1523,7 +1529,10 @@ class App:
     def chat_ask(self, sid: str, key: str, question: str) -> tuple[int, dict]:
         if gate := self._chat_gate(sid):
             return gate
-        finding = key if key.startswith("sql-") else (int(key.split("-", 1)[1]) if key.startswith("finding-") else None)
+        # "review" is the whole review; finding-<n> its nth finding; sql-<id> and target (the database as a whole, the
+        # target page's dock) are thread keys chat.ask takes as they are. Mapping target to None put the dock's
+        # questions in the snapshot's review thread, with the review's context, where the dock never reads them back.
+        finding = None if key == "review" else int(key.split("-", 1)[1]) if key.startswith("finding-") else key
         try:
             answer = self._chat().ask(sid, finding, question)
         except ValueError as exc:

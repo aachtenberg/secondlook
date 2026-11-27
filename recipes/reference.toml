@@ -122,7 +122,8 @@ channels = ["stdout"]
 # logo = "branding/logo.svg"           a file (relative to this file) or an https:// URL
 # accent = "#3dd68c"                   buttons, links, the badge
 # theme = "auto"                       auto | dark | light (people can still flip it in the header)
-# refresh_seconds = 30                 overview and target pages reload this often; 0 turns it off
+# refresh_seconds = 30                 overview and target pages reload this often, waiting while the page is in use
+#                                      (a discussion open or answering, a dialog, typing); 0 turns it off
 # page_size = 50                       snapshots per page
 # footer = "Internal tool: questions to #dba"
 # custom_css = "branding/theme.css"    appended after the built-in styles

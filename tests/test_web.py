@@ -39,6 +39,16 @@ def config(tmp_path, **web):
     return Config(storage_url="x", targets={"demo": t}, web=web, base_dir=str(tmp_path))
 
 
+def test_refresh_is_scripted_unless_a_replacement_base_html_lacks_the_script(tmp_path):
+    page = App(config(tmp_path), store(tmp_path), False, None).index().decode()
+    assert "<meta name='dbtriage-refresh' content='30'><noscript><meta http-equiv='refresh' content='30'></noscript>" in page
+    (tmp_path / "tpl").mkdir()
+    (tmp_path / "tpl" / "base.html").write_text("<html><head>$refresh_meta</head><body>$body</body></html>")  # a pre-script copy
+    old = App(config(tmp_path, templates_dir="tpl"), store(tmp_path), False, None).index().decode()
+    assert old.startswith("<html><head><meta http-equiv='refresh' content='30'></head>")
+    assert "http-equiv" not in App(config(tmp_path, refresh_seconds=0), store(tmp_path), False, None).index().decode()
+
+
 def test_md_to_html():
     h = md_to_html("**[HIGH] x** - t\n\n**Evidence**\n- a `b`\n- c\n\n1. one\n2. two\n\n_snapshot x_").replace("\n", "")
     assert "<b>[HIGH] x</b>" in h and "<ul><li>a <code>b</code></li>" in h and "<ol><li>one</li><li>two</li></ol>" in h and "<i>snapshot x</i>" in h
@@ -302,6 +312,11 @@ def test_discuss_links_and_chat_api(tmp_path, monkeypatch):
     t = app.chat_thread(SID, "finding-1")
     assert [m["role"] for m in t["messages"]] == ["user", "assistant"] and t["messages"][1]["html"].startswith("<p><b>yes</b>")
     assert app.chat_ask(SID, "finding-5", "x")[0] == 400 and app.chat_ask(SID, "review", "")[0] == 400
+    # the target page's dock asks on key "target": its own thread, not the snapshot's review thread
+    review_before = app.chat_thread(SID, "review")["messages"]
+    assert app.chat_ask(SID, "target", "how is this database doing?")[0] == 200
+    assert [m["text"] for m in app.chat_thread(SID, "target")["messages"] if m["role"] == "user"] == ["how is this database doing?"]
+    assert app.chat_thread(SID, "review")["messages"] == review_before
     assert "no_such_key" not in page
 
 

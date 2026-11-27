@@ -74,7 +74,8 @@ light or auto, with a toggle in the header), `footer`, `refresh_seconds`, `page_
 a snapshot page links to (`*` for every one). Only in `[web]`:
 `severity_colors`, `custom_css`, which adds your own styles, and `templates_dir`, which replaces page templates
 file by file. Start a replacement from a copy of the built-in one in `src/dbtriage/templates/`; `base.html` in
-particular carries the page scripts. `examples/branding/` has a logo and a theme. Per-database `links` (say, a Grafana dashboard) show up next to each database.
+particular carries the page scripts, the auto-refresh among them. A replacement `base.html` without that script
+gets the plain browser refresh instead, which also reloads under an open discussion. `examples/branding/` has a logo and a theme. Per-database `links` (say, a Grafana dashboard) show up next to each database.
 
 ## What the Settings page can change
 
@@ -223,7 +224,7 @@ the password, but then only says whether things are reachable.
 | `GET /api/snapshots/<id>` | a snapshot with its review, findings and top SQL |
 | `GET /api/snapshots/<id>/files/<name>` | a stored file, such as `awr.txt` |
 | `POST /api/run` | start a run (needs `--allow-run`): `{"target", "mode", "reason", "no_llm", "baseline_policy", "baseline"}`; the window is 60 minutes |
-| `GET` or `POST /api/snapshots/<id>/chat/<key>` | a discussion thread (posting needs `--allow-chat`); `key` is `review`, `finding-<n>` or `sql-<sql id>`; post `{"question"}` |
+| `GET` or `POST /api/snapshots/<id>/chat/<key>` | a discussion thread (posting needs `--allow-chat`); `key` is `review`, `finding-<n>`, `sql-<sql id>` or `target` (the database as a whole, the target page's Ask AI); post `{"question"}` |
 | `GET /api/schedule`, `POST /api/schedule/<name>` | read or change schedules (changing needs `--allow-edit`) |
 | `POST /api/schedule/<name>/run` | run now with the scheduled window (needs `--allow-run`) |
 | `POST /api/targets/<name>/probe` | test the connection to a configured database (read-only; no flag needed) |

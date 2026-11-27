@@ -339,7 +339,8 @@ def readme(sid: str, rec: Record, include_raw: bool) -> str:
         msgs = threads[key].get("messages") or []
         qs = [x for x in msgs if x.get("role") == "user"]
         last = max((x.get("at") or "" for x in msgs), default="")
-        about = "the whole review" if key == "review" else f"finding {key[8:]}" if key.startswith("finding-") else f"SQL id {key[4:]}"
+        about = ("the whole review" if key == "review" else "the database as a whole" if key == "target"
+                 else f"finding {key[8:]}" if key.startswith("finding-") else f"SQL id {key[4:]}")
         L.append(f"- `chat/{key}.json`: {len(qs)} question{'s' if len(qs) != 1 else ''} about {about}" + (f", last at {last}" if last else ""))
     if rec.listing_failed:  # threads are found only by listing, so without one their absence means nothing
         L.append("The store could not be listed at export time, so discussion threads" + (" beyond those above" if threads else "")
