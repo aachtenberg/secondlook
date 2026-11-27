@@ -470,8 +470,19 @@ def test_a_targets_toml_that_no_longer_loads_keeps_the_last_good_one(conf, monke
     _edit(conf, TOML + '[targets.bad]\nengine = "db2"\ndsn = "x"\n')  # load_config's own refusal (SystemExit)
     app.refresh()
     assert set(app.cfg.targets) == {"ora"} and "engine must be one of" in capsys.readouterr().err
+    _edit(conf, TOML.replace("[targets.ora]", "[targets]\nscalar = 'x'\n[targets.ora]"))  # a target that is not a table
+    app.refresh()
+    assert set(app.cfg.targets) == {"ora"} and "must be a table" in capsys.readouterr().err
+    _edit(conf, TOML + '[targets.num]\ndsn = "x"\nchanges_file = 5\n')  # a TypeError inside load_config, not a refusal
+    app.refresh()
+    assert set(app.cfg.targets) == {"ora"} and "TypeError" in capsys.readouterr().err
+    assert app.index()  # and the view still renders
     store_url = app.seed.storage_url
     _edit(conf, TOML.replace('url = "file://./data"', 'url = "file://./elsewhere"') + '[targets.ok]\ndsn = "x"\n')
     app.refresh()  # the rest of the edit applies; the open store stays the one it was
     assert "ok" in app.cfg.targets and app.seed.storage_url == app.cfg.storage_url == store_url
     assert "until it is restarted" in capsys.readouterr().err
+    where = app.settings.where
+    _edit(conf, TOML + '[web]\nsettings_file = "other-settings.json"\n')
+    app.refresh()  # the overlay the view started with stays, and the log says a restart is needed
+    assert app.settings.where == where and "settings_file changed" in capsys.readouterr().err

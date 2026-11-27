@@ -617,8 +617,9 @@ class App:
 
     def reseed(self) -> bool:
         """Re-read targets.toml if it changed since it was read (one stat per second at most); True if the seed
-        changed. A file that no longer loads (a typo, a half-saved edit) keeps the last good version and says why.
-        [storage] is the one section that still needs a restart: the open store stays the one it was."""
+        changed. A file that no longer loads (a typo, a half-saved edit, a value of the wrong type) keeps the last good
+        version and says why. [storage] and [web] settings_file still need a restart: the open store and the
+        settings overlay stay the ones the view started with."""
         import time
         from dataclasses import replace
 
@@ -635,14 +636,18 @@ class App:
             self._seed_stamp = stamp
             try:
                 new = load_config(self.seed.path, overlay=False)
-            except (SystemExit, ValueError, OSError) as exc:  # load_config's own refusals, and TOML syntax errors
-                print(f"config: {self.seed.path} changed but does not load ({exc}); still using the version read before",
-                      file=sys.stderr)
+            except (SystemExit, Exception) as exc:  # noqa: BLE001 - load_config's refusals, TOML errors, a value of the
+                # wrong type: this runs before every request, so nothing a file holds may take the view down
+                print(f"config: {self.seed.path} changed but does not load ({type(exc).__name__}: {exc}); "
+                      "still using the version read before", file=sys.stderr)
                 return False
             if new.storage_url != self.seed.storage_url:
                 print(f"config: [storage] changed in {self.seed.path}; the web view keeps using "
                       f"{describe_store(self.store)} until it is restarted", file=sys.stderr)
                 new = replace(new, storage_url=self.seed.storage_url)
+            if new.web.get("settings_file") != self.seed.web.get("settings_file") and not os.environ.get("DBTRIAGE_SETTINGS"):
+                print(f"config: [web] settings_file changed in {self.seed.path}; the web view keeps using the settings in "
+                      f"{self.settings.where} until it is restarted", file=sys.stderr)
             self.seed = new
             print(f"config: picked up {self.seed.path}")
             return True

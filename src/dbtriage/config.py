@@ -100,6 +100,8 @@ def load_config(path: str | os.PathLike | None = None, overlay: bool = True) -> 
     for name, t in data.get("targets", {}).items():
         if not target_name_ok(name):
             raise SystemExit(f"target {name!r}: {NAME_RULE}")
+        if not isinstance(t, dict):  # `targets.demo = "x"` instead of a [targets.demo] table
+            raise SystemExit(f"{path}: target {name!r} must be a table ([targets.{name}] with settings under it), not {t!r}")
         if t.get("engine", "postgres") not in ENGINES:
             raise SystemExit(f"target {name!r}: engine must be one of {', '.join(ENGINES)}")
         dsn = t.get("dsn")
