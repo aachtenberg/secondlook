@@ -12,6 +12,7 @@ change it, and its settings API refuses to.
 [mcp]
 enabled = true                 # without this, dbtriage mcp refuses to start
 allow_run = false              # true adds run_review (below)
+allow_schedule = false         # true adds set_schedule (below)
 # tools = ["list_targets", "list_snapshots", "get_review"]    # offer only these; default: every read tool
 ```
 
@@ -50,7 +51,9 @@ Add `--config /path/to/targets.toml` after `dbtriage` if the file is not in that
 | `get_raw_report` | a page of an engine-native report stored with a snapshot, such as Oracle's AWR text |
 | `get_recent_changes` | deploys, parameter changes, jobs and failovers in the hours before a snapshot, from the change feed stored with it (GitHub or GitLab deployments, or a changes file) |
 | `get_operator_answers` | results a person pasted into a discussion after running a read the model proposed, for a snapshot and the previous one of the same target; each marked as supplied by a person, not measured |
+| `get_schedule` | a database's schedule, or every database's: the cron line and what it means, the window, paused, the next run |
 | `run_review` | collect and review a database now, only with `allow_run = true` |
+| `set_schedule` | set, change, pause, resume or clear a database's schedule, only with `allow_schedule = true` |
 
 The read tools are the reviewer's own, so they share its limits: SQL literals are masked before anything is
 stored, raw reports are served only when the snapshot lists them, and none of them reaches a live database or
@@ -60,6 +63,14 @@ comes back as text the model can act on.
 `run_review` does what the web view's Run button does: it connects to the database as collection does
 (read-only, unless that database is opted into taking snapshots on the database), reviews the snapshot with your configured model unless `use_model` is false, and posts the review
 to your delivery channels. That spends model credit, so it is a separate switch.
+
+`set_schedule` changes when dbtriage reviews a database, with the same checks as the Settings page and Ask AI.
+Give it a cron line in the server's local time (`0 * * * *`), `every 30m`, `hourly` or `daily`, a window in
+minutes, or disable the schedule: `paused = true` stops it and keeps it to resume, `schedule = ""` clears it. It
+cannot schedule a database more often than every 15 minutes; the Settings page can. It returns the schedule before
+and after, and writes one line to stderr, which the client keeps in its MCP log. The change is saved in the
+settings overlay. The web view with `--schedule` picks it up on its next request or scheduler tick (every 20
+seconds), and `dbtriage scheduler` on its next tick, with no restart. With `DBTRIAGE_NO_OVERLAY` set there is no overlay to save to, and it says so.
 
 ## What the client's model sees
 

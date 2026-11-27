@@ -480,3 +480,104 @@ def test_snapshot_ids_follow_configs_engines_and_name_rule():
     for bad in ("db2/x/2026-11-06/20261106T201500Z", "postgres/../2026-11-06/20261106T201500Z",
                 "postgres/demo./2026-11-06/20261106T201500Z", f"postgres/{'x' * 65}/2026-11-06/20261106T201500Z"):
         assert not SNAPSHOT_ID.fullmatch(bad), bad
+
+
+# --------------------------------------------------------------------------- schedules
+@pytest.fixture
+def sched_cfg(tmp_path, monkeypatch):
+    """Schedules live in the settings overlay, so these keep it on (cfg_store turns it off)."""
+    monkeypatch.delenv("DBTRIAGE_NO_OVERLAY", raising=False)
+    monkeypatch.delenv("DBTRIAGE_SETTINGS", raising=False)
+
+    def make(mcp="[mcp]\nenabled = true\nallow_schedule = true\n"):
+        p = conf(tmp_path, mcp)
+        return load_config(p), LocalStorage(tmp_path / "data"), p
+
+    return make
+
+
+def test_set_schedule_is_offered_only_with_allow_schedule(sched_cfg):
+    cfg, st, _ = sched_cfg("[mcp]\nenabled = true\n")
+    names = call(mcp_server.build(cfg, st), None)
+    assert "get_schedule" in names and "set_schedule" not in names  # reading the schedule is a read tool
+    cfg, st, _ = sched_cfg("[mcp]\nenabled = true\nallow_schedule = true\nallow_run = true\n")
+    assert call(mcp_server.build(cfg, st), None)[-2:] == ["run_review", "set_schedule"]
+    cfg, st, _ = sched_cfg('[mcp]\nenabled = true\nallow_schedule = true\ntools = ["get_schedule"]\n')
+    assert call(mcp_server.build(cfg, st), None) == ["get_schedule"]  # listed: set_schedule not among them
+    cfg, st, _ = sched_cfg('[mcp]\nenabled = true\ntools = ["set_schedule"]\n')
+    assert call(mcp_server.build(cfg, st), None) == []  # listed, but allow_schedule is off
+    assert "set_schedule changes when dbtriage reviews" in mcp_server.instructions(sched_cfg()[0])
+
+
+def test_set_schedule_sets_pauses_and_clears(sched_cfg, capsys):
+    cfg, st, p = sched_cfg()
+    server = mcp_server.build(cfg, st)
+    got = lambda: json.loads(call(server, "get_schedule", {"target": "demo"}))[0]  # noqa: E731
+    assert got()["described"] == "not scheduled"
+    out = json.loads(call(server, "set_schedule", {"target": "demo", "schedule": "hourly", "window_minutes": 30}))
+    assert out["changed"] and out["after"]["schedule"] == "0 * * * *" and out["after"]["window_minutes"] == 30
+    assert json.loads((p.parent / "dbtriage-settings.json").read_text())["targets"]["demo"]["schedule"] == "0 * * * *"
+    assert "mcp: set_schedule Schedule of demo: not scheduled → hourly, 30-minute window." in capsys.readouterr().err
+    assert json.loads(call(server, "set_schedule", {"target": "demo", "paused": True}))["after"]["paused"] is True
+    assert got()["paused"] is True and got()["next_run"] is None
+    assert json.loads(call(server, "set_schedule", {"target": "demo", "paused": True}))["changed"] is False  # already so
+    assert json.loads(call(server, "set_schedule", {"target": "demo", "schedule": ""}))["after"]["described"] == "not scheduled"
+    assert "at most every 15 minutes" in call(server, "set_schedule", {"target": "demo", "schedule": "*/5 * * * *"})
+    assert call(server, "set_schedule", {"target": "nope", "schedule": "hourly"}).startswith("error: no target 'nope'")
+    assert [r["target"] for r in json.loads(call(server, "get_schedule"))] == ["demo", "quiet"]  # every database
+
+
+def test_schedules_follow_targets_toml_as_it_is_now(sched_cfg):
+    cfg, st, p = sched_cfg()
+    tools = mcp_server.Tools(cfg, st)  # the server started with demo and quiet
+    p.write_text(p.read_text().replace("[targets.quiet]", "[targets.later]\nengine = \"postgres\"\ndsn = \"x\"\n[targets.quiet]"))
+    assert json.loads(tools.set_schedule("later", schedule="hourly"))["changed"] is True  # added since: schedulable
+    assert [r["target"] for r in json.loads(tools.get_schedule())] == ["demo", "later", "quiet"]
+    p.write_text(p.read_text().replace('[targets.quiet]\nengine = "postgres"\ndsn = "postgresql://u:p@127.0.0.1:1/y"\n', ""))
+    out = mcp_server._guard(tools.set_schedule)("quiet", schedule="hourly")  # removed since: refused, nothing stored
+    assert out.startswith("error: no target 'quiet'") and "quiet" not in json.loads((p.parent / "dbtriage-settings.json").read_text())["targets"]
+    assert mcp_server._guard(tools.get_schedule)("quiet").startswith("error: no target 'quiet'")
+
+
+def test_set_schedule_refuses_when_the_overlay_is_off(sched_cfg, monkeypatch):
+    cfg, st, _ = sched_cfg()
+    monkeypatch.setenv("DBTRIAGE_NO_OVERLAY", "1")
+    out = mcp_server._guard(mcp_server.Tools(cfg, st).set_schedule)("demo", schedule="hourly")
+    assert out.startswith("error: the settings overlay is off")
+
+
+def test_the_web_view_picks_up_a_schedule_set_over_mcp(sched_cfg, monkeypatch):
+    from dbtriage.settings import Settings
+    from dbtriage.web import App
+
+    cfg, st, p = sched_cfg()
+    monkeypatch.setattr(App, "SEED_CHECK_EVERY_S", 0)
+    monkeypatch.setattr(Settings, "RECHECK_FILE_S", 0)
+    app = App(load_config(p), st, True, None, allow_edit=True)
+    mcp_server.Tools(cfg, st).set_schedule("demo", schedule="hourly")  # another process, as far as the view knows
+    app.refresh()
+    assert next(r for r in app.schedule_rows() if r["target"] == "demo")["schedule"] == "0 * * * *"
+    assert app.save_schedule("quiet", {"schedule": "daily"}) == []  # the view's own next save keeps the MCP change
+    on_disk = json.loads((p.parent / "dbtriage-settings.json").read_text())["targets"]
+    assert on_disk["demo"]["schedule"] == "0 * * * *" and on_disk["quiet"]["schedule"] == "0 3 * * *"
+    assert "including set_schedule, which changes schedules" in app.settings_page().decode()
+
+
+def test_settings_refresh_skips_its_own_writes_and_keeps_a_good_copy(tmp_path, monkeypatch, capsys):
+    import os
+
+    from dbtriage.settings import Settings
+
+    monkeypatch.setattr(Settings, "RECHECK_FILE_S", 0)
+    f = tmp_path / "dbtriage-settings.json"
+    s = Settings(f)
+    s.data["web"]["brand"] = "Mine"
+    s.save()
+    assert s.refresh() is False  # its own write
+    before = f.stat().st_mtime_ns
+    f.write_text("{ not json")
+    os.utime(f, ns=(before + 10**9, before + 10**9))
+    assert s.refresh() is False and s.data["web"]["brand"] == "Mine" and "does not load" in capsys.readouterr().err
+    f.write_text(json.dumps({"web": {"brand": "Theirs"}}))
+    os.utime(f, ns=(before + 2 * 10**9, before + 2 * 10**9))
+    assert s.refresh() is True and s.data["web"]["brand"] == "Theirs"

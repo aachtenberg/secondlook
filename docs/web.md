@@ -114,7 +114,7 @@ of an environment variable, and the value is read from the process at run time.
 | `[web]` | `settings_file` | targets.toml only (or `DBTRIAGE_SETTINGS`): where the page's own changes are kept |
 | `[web]` | port, host | neither: `dbtriage web --port --host` on the command line |
 | `[collect]` | `allow_db_writes` | targets.toml only: the file's owner decides whether dbtriage may write to databases; the API refuses it |
-| `[mcp]` | `enabled`, `allow_run`, `tools` | targets.toml only: whether another process may read the store and start runs; the API refuses it |
+| `[mcp]` | `enabled`, `allow_run`, `allow_schedule`, `tools` | targets.toml only: whether another process may read the store, start runs and change schedules; the API refuses it |
 | `[targets.X]` | `engine`, `dsn`, `dsn_env`, `user`, `password` | Settings › Targets › edit: Engine, DSN (masked afterwards), DSN from env var, Oracle user, Oracle password |
 | `[targets.X]` | `top_n`, `diagnostics_pack`, `create_snapshot` | edit: Top N SQL, Diagnostics Pack, Snapshot on the database before collecting |
 | `[targets.X]` | `baseline_policy`, `baseline` | edit: Baseline policy, Pinned baseline snapshot (picked from the stored snapshots) |
@@ -220,7 +220,8 @@ schedule_window = 60        # minutes collected per run
 
 Something has to keep time. Either the web server does it (`--schedule`), or `dbtriage scheduler` runs on its
 own on a server that can reach the databases. Both pick up changes without a restart, whether made on the
-Settings page or in `targets.toml` and `.env`. Only one run per database
+Settings page, by Ask AI, over MCP (`set_schedule`), or in `targets.toml`, `.env` or the settings overlay
+by another process. Only one run per database
 runs at a time; a slot that comes up while the last run is still going is skipped and shown as such. Slots
 missed while nothing was running are not caught up. Cron and the cloud timers in `examples/` still work too.
 
