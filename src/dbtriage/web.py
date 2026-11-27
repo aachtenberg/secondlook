@@ -757,14 +757,17 @@ class App:
         logo = w.get("logo")
         logo_src = logo if logo and re.match(r"^https?://", logo) else ("/brand/logo" if self.logo_path else None)
         body = (name if isinstance(name, string.Template) else self.template(name)).safe_substitute(**fields)
-        out = self.template("base.html").safe_substitute(
+        base = self.template("base.html")
+        n = int(w["refresh_seconds"]) if refresh else 0
+        # The page's script reloads it, waiting while someone is using it (base.html); without script, or with a
+        # templates_dir base.html older than that script, the plain browser refresh.
+        scripted = "dbtriage-refresh" in base.template
+        out = base.safe_substitute(
             title=html.escape(f"{title} · {w['title']}"), brand=html.escape(w["brand"]), theme=html.escape(w["theme"]), q=html.escape(fields.get("q", "")),
             logo_html=f"<img src='{html.escape(logo_src)}' alt=''>" if logo_src else f"<span class='badge'>{ICON['db']}</span>",
             icon_link=f"<link rel='icon' href='{html.escape(logo_src)}'>" if logo_src else self._default_icon(w["accent"]),
-            # the page's script reloads it, waiting while someone is using it (base.html); without script, the plain meta refresh
-            refresh_meta=(f"<meta name='dbtriage-refresh' content='{int(w['refresh_seconds'])}'>"
-                          f"<noscript><meta http-equiv='refresh' content='{int(w['refresh_seconds'])}'></noscript>")
-                         if refresh and int(w["refresh_seconds"]) > 0 else "",
+            refresh_meta=("" if n <= 0 else f"<meta http-equiv='refresh' content='{n}'>" if not scripted
+                          else f"<meta name='dbtriage-refresh' content='{n}'><noscript><meta http-equiv='refresh' content='{n}'></noscript>"),
             css=string.Template(CSS).safe_substitute(accent=w["accent"], c_high=colors["high"], c_medium=colors["medium"],
                                                      c_low=colors["low"], c_info=colors["info"]),
             custom_css=self.custom_css, sidenav=self.sidenav(active, sid), body=self.degraded_banner() + body, footer=html.escape(w.get("footer") or ""),

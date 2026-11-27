@@ -39,6 +39,16 @@ def config(tmp_path, **web):
     return Config(storage_url="x", targets={"demo": t}, web=web, base_dir=str(tmp_path))
 
 
+def test_refresh_is_scripted_unless_a_replacement_base_html_lacks_the_script(tmp_path):
+    page = App(config(tmp_path), store(tmp_path), False, None).index().decode()
+    assert "<meta name='dbtriage-refresh' content='30'><noscript><meta http-equiv='refresh' content='30'></noscript>" in page
+    (tmp_path / "tpl").mkdir()
+    (tmp_path / "tpl" / "base.html").write_text("<html><head>$refresh_meta</head><body>$body</body></html>")  # a pre-script copy
+    old = App(config(tmp_path, templates_dir="tpl"), store(tmp_path), False, None).index().decode()
+    assert old.startswith("<html><head><meta http-equiv='refresh' content='30'></head>")
+    assert "http-equiv" not in App(config(tmp_path, refresh_seconds=0), store(tmp_path), False, None).index().decode()
+
+
 def test_md_to_html():
     h = md_to_html("**[HIGH] x** - t\n\n**Evidence**\n- a `b`\n- c\n\n1. one\n2. two\n\n_snapshot x_").replace("\n", "")
     assert "<b>[HIGH] x</b>" in h and "<ul><li>a <code>b</code></li>" in h and "<ol><li>one</li><li>two</li></ol>" in h and "<i>snapshot x</i>" in h
