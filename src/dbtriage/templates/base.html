@@ -145,8 +145,9 @@ $body
     var d = document.createElement('div'); d.className = 'dmsg ' + role;
     if (role === 'user') { d.textContent = html; }
     else {
-      var a = document.createElement('span'), person = role === 'operator';  // a result a person pasted for a proposed read
-      a.className = person ? 'avatar person' : 'avatar'; a.textContent = person ? 'P' : 'AI'; if (person) a.title = 'supplied by a person'; d.appendChild(a);
+      var a = document.createElement('span'), person = role === 'operator', act = role === 'action';  // operator: a result a person pasted; action: a change the model made
+      a.className = person ? 'avatar person' : act ? 'avatar act' : 'avatar'; a.textContent = person ? 'P' : act ? '✓' : 'AI';
+      if (person) a.title = 'supplied by a person'; if (act) a.title = 'a change the model made, as you asked'; d.appendChild(a);
       var t = document.createElement('div'); t.className = 'dtext'; t.innerHTML = html; d.appendChild(t);
       if (footer) { var f = document.createElement('div'); f.className = 'foot'; f.textContent = footer; t.appendChild(f); }
     }
@@ -184,7 +185,7 @@ $body
       fetch(box.getAttribute('data-base') + key, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
                        body: JSON.stringify({ question: text }) })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-        .then(function (x) { wait.remove(); if (x.ok) { msg('assistant', x.j.html, x.j.footer); } else { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = x.j.error || 'failed'; } })
+        .then(function (x) { wait.remove(); if (x.ok) { (x.j.actions || []).forEach(function (a) { msg('action', a.html); }); msg('assistant', x.j.html, x.j.footer); } else { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = x.j.error || 'failed'; } })
         .catch(function (err) { wait.remove(); msg('assistant', '<p class=err></p>').querySelector('.err').textContent = err.message; })
         .then(function () { inflight--; send.disabled = !ready; q.focus(); });
     });

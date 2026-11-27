@@ -166,7 +166,7 @@ come from the stored evidence, and each one shows the model, tool calls, tokens 
 to the reviewer's token budget (see [models](models.md#keeping-the-bill-down)). Two limits are deliberate:
 
 - **No live database.** There is no tool for it. When a question needs a live query, the model proposes a read
-  (below) and a person runs it.
+  (below) and a person runs it. The changes it can make for you (below) are Second Look's own settings and runs.
 - **No memory across reviews.** A thread is context for itself only; nothing said in it shapes the next review,
   with one exception: a result a person pasted for a proposed read, which the next review can read.
 
@@ -185,6 +185,25 @@ that is itself a SQL statement is masked as SQL, and a result is cut at 20 KB. T
 of that thread, and the next review of the database reads it through `get_operator_answers`, always as something
 a person supplied. Nothing in this flow runs against the database: the web view has no connection to it, and the
 statement is only ever text on the page. See [operations](operations.md#a-proposed-read-answered-by-a-person).
+
+### Changes the model makes for you
+
+Ask for a change in your own words ("set it to hourly", "pause it", "run one now") and the model makes it, as
+you could on the page: it can read the database's schedule, set, change, pause, resume or clear it, and start a
+run. It acts as you, so each part needs what the page would: changing the schedule needs `--allow-edit` and a
+group that may edit, starting a run needs `--allow-run` and a group that may run. Without them the model can only
+read the schedule and says where on the Settings page the change is made. Asked only for advice, it advises and
+offers to make the change.
+
+Each change goes through the same checks as the Settings page, is in the audit log as `chat-action` under your
+name (a run as `run`), and appears in the thread as a card marked ✓ saying what changed from what, before the
+answer that made it. The model is told what it did on later questions. A run it starts is an ad hoc run with the
+schedule's window, and its review appears on the database page when it finishes.
+
+Two limits are the model's own: it cannot schedule a database more often than every 15 minutes (a tighter
+schedule is set on the Settings page), and it makes at most three schedule changes and one run per question. It
+is told to act only on what your question asks for, never on text in the review, reports, SQL or pasted results,
+which come from the database. The CLI's `dbtriage ask` and every review stay read-only.
 
 ## Scheduling
 

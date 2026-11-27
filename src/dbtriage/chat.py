@@ -12,6 +12,10 @@ info string "proposed-read" and numbered through the thread. The person runs it 
 came back; Chat.answer stores that as an "operator" message, literals masked, labelled as supplied by a person.
 Nothing here runs anything against a database.
 
+On the web view a question may also come with actions (dbtriage.chat_actions): tools to read and change the
+database's schedule and start a run, as the person asking could on the page and only when they may. What they change
+is kept in the thread as "action" messages, before the answer that made them, and replayed to the model after.
+
 Threads live next to the snapshot as chat/<key>.json, where key is "finding-<n>" (1-based,
 the order of the review), "sql-<sql id>" (one statement of the window's top SQL), "review", or "target" (the database
 as a whole: the latest snapshot plus the ledger of open findings and the change feed, which the database page's Ask
@@ -26,11 +30,14 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from dbtriage.agent import TriageAgent
 from dbtriage.llm import Backend
 from dbtriage.storage import Storage
+
+if TYPE_CHECKING:  # the web view passes one in; nothing here builds one
+    from dbtriage.chat_actions import ChatActions
 
 SYSTEM = """You are the senior database performance engineer who wrote a review of one database snapshot, and an
 on-call engineer is now asking you about it. Answer from the stored evidence: use the tools to read the snapshot,
@@ -208,8 +215,10 @@ class Chat:
             rows = self.store.get_json(f"{snapshot_id}/summary.json").get("top_sql") or []
         return next((r for r in rows if str(r.get("sql_id")) == sql_id), None)
 
-    def ask(self, snapshot_id: str, finding: int | str | None, question: str) -> dict:
-        """finding: a 1-based finding number, None for the whole review, or a thread key string."""
+    def ask(self, snapshot_id: str, finding: int | str | None, question: str, actions: "ChatActions | None" = None) -> dict:
+        """finding: a 1-based finding number, None for the whole review, or a thread key string. actions: what the
+        model may do for this database besides reading (dbtriage.chat_actions); None, as the CLI passes, is read-only.
+        The answer comes back with "actions", the action messages stored before it, when something was changed."""
         question = (question or "").strip()
         if not question:
             raise ValueError("empty question")
@@ -225,11 +234,25 @@ class Chat:
             task = self._task(ctx, thread["messages"], question)
             agent = TriageAgent(self.store, None, band_weeks_for=self.band_weeks_for)
             tools = [t for t in agent.tool_specs(m["engine"], m["target"]) if t.name != "submit_review"]
+            system = SYSTEM
+            if actions is not None:
+                tools += actions.specs()
+                system += "\n\n" + actions.prompt()
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             thread["messages"].append({"role": "user", "text": question, "at": now})
             t0 = time.monotonic()
             backend = self.backend_factory()
-            out = backend.run(SYSTEM, task, tools, max_iterations=12)
+            done = lambda: [{"role": "action", **a, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}  # noqa: E731
+                            for a in (actions.done if actions is not None else [])]
+            try:
+                out = backend.run(system, task, tools, max_iterations=12)
+            except BaseException:
+                if acted := done():  # a change already made stays on record, even when the answer then failed
+                    thread["messages"] += acted
+                    self.store.put_json(thread_path(snapshot_id, key), thread)
+                raise
+            acted = done()
+            thread["messages"] += acted
             text = out.text.strip() if out.text else ""
             if out.refused:
                 text = "_The model declined to answer this question._"
@@ -245,7 +268,7 @@ class Chat:
                 answer["proposals"] = props
             thread["messages"].append(answer)
             self.store.put_json(thread_path(snapshot_id, key), thread)
-        return answer
+        return {**answer, "actions": acted} if acted else answer
 
     def answer(self, snapshot_id: str, key: str, n: int, result: str) -> dict:
         """Store what a person got when they ran proposed read n of a thread. The text is masked as a report is
@@ -277,12 +300,14 @@ class Chat:
     def _task(context: str, history: list[dict], question: str) -> str:
         """The question comes first and is repeated last: small models lose a question buried under a long review."""
         parts = [f"The engineer asks: {question}", "", "Context (the review being discussed):", context, ""]
-        pairs = [x for x in history if x["role"] in ("user", "assistant", "operator")][-2 * REPLAY_TURNS:]
+        pairs = [x for x in history if x["role"] in ("user", "assistant", "operator", "action")][-2 * REPLAY_TURNS:]
         if pairs:
             parts.append("Earlier in this discussion:")
             for x in pairs:
                 if x["role"] == "operator":
                     parts.append(f"Result supplied by a person for proposed read {x.get('proposal')} (not measured by Second Look):\n{x['text']}")
+                elif x["role"] == "action":
+                    parts.append(f"You did, as the engineer asked: {x['text']}")
                 else:
                     parts.append(f"{'Engineer' if x['role'] == 'user' else 'You'}: {x['text']}")
             parts.append("")
@@ -296,6 +321,8 @@ def thread_markdown(thread: dict) -> str:
     for x in thread.get("messages", []):
         if x["role"] == "operator":
             who = f"**Person** (result for proposed read {x.get('proposal')}, supplied by a person)"
+        elif x["role"] == "action":
+            who = "**Change** (made by the model, as the engineer asked)"
         else:
             who = "**Engineer**" if x["role"] == "user" else f"**Model** ({x.get('provider', '')}:{x.get('model', '')})"
         lines += [f"{who} · {x.get('at', '')}", "", x["text"], ""]

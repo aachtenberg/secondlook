@@ -57,7 +57,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from datetime import datetime, timedelta, timezone
 
-from dbtriage import access, changes, charts, chat, dbsnap, envfile, llm, mcp_server, scheduler
+from dbtriage import access, changes, charts, chat, chat_actions, dbsnap, envfile, llm, mcp_server, scheduler
 from dbtriage.baseline import LABELS, POLICIES
 from dbtriage.config import Config, Target, load_config, top_n_of
 from dbtriage.findings import SEVERITY_RANK, dropped, rules_dropped
@@ -269,6 +269,7 @@ aside.discuss[hidden]{display:none}
 .dwarn{display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--medium)}.dwarn svg{flex:none;margin-top:1px}
 .drow{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px}.drow button{height:32px}
 .dmsg.operator{display:flex;gap:10px;font-size:13px}.avatar.person{background:var(--card2);color:var(--fg2);border:1px solid var(--line2)}
+.dmsg.action{display:flex;gap:10px;font-size:13px}.dmsg.action .dtext{border:1px solid var(--line2);border-left:3px solid var(--accent);border-radius:8px;background:var(--card2);padding:6px 10px}.dmsg.action .dtext p{margin:2px 0 0}.avatar.act{background:var(--card2);color:var(--accent);border:1px solid var(--line2)}
 .pread{border:1px solid var(--line2);border-radius:8px;background:var(--card2);padding:8px 10px;display:flex;flex-direction:column;gap:6px}
 .plbl{font-size:11px;color:var(--mut);font-weight:500}.pread pre,.presult{margin:0;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow-y:auto}
 .prow{display:flex;gap:6px}.prow button{height:26px;font-size:12px;padding:0 10px}
@@ -331,6 +332,9 @@ def chat_html(msg: dict) -> str:
     """One discussion message as HTML. An answer's proposed reads (fenced proposed-read blocks) become blocks of
     their own, each with the statement to copy and a place to paste what it returned; an operator message is the
     pasted result under a label that says a person supplied it."""
+    if msg.get("role") == "action":  # a change the model made, as the person asked (dbtriage.chat_actions)
+        return (f"<div class='plbl'>Done for you · {'schedule' if msg.get('action') == 'set_schedule' else 'run'} · "
+                f"<a href='/settings#schedule'>schedules</a></div><p>{html.escape(msg.get('text') or '')}</p>")
     if msg.get("role") == "operator":
         lbl = f"Result for proposed read {int(msg.get('proposal') or 0)} · supplied by a person, not measured by Second Look"
         lbl += " · cut at 20 KB" if msg.get("truncated") else ""
@@ -1480,7 +1484,7 @@ class App:
         for x in t["messages"]:
             if x["role"] == "assistant":
                 x["html"], x["footer"] = chat_html(x), chat.footer(x)
-            elif x["role"] == "operator":
+            elif x["role"] in ("operator", "action"):
                 x["html"] = chat_html(x)
         return t
 
@@ -1501,6 +1505,33 @@ class App:
         except Exception as exc:  # noqa: BLE001 - any other store error is an answer, never a dropped request
             return 502, {"error": f"could not read the snapshot: {type(exc).__name__}: {str(exc)[:200]}"}
         return None
+
+    def _chat_actions(self, sid: str) -> "chat_actions.ChatActions | None":
+        """What the model may do for the snapshot's database in this question, as the person asking: read its
+        schedule always; change it with --allow-edit and an edit group; start a run with --allow-run and a run group.
+        Checked here, on the request's thread, so access.current() is the person."""
+        try:
+            target = self.store.get_json(f"{sid}/manifest.json")["target"]
+        except Exception:  # noqa: BLE001 - no target, no actions; the gate already answered for the snapshot
+            return None
+        if target not in self.cfg.targets:
+            return None
+
+        def row():
+            return next((r for r in self.schedule_rows() if r["target"] == target), None)
+
+        save = run = None
+        if self.allow_edit and self.allows("edit"):
+            def save(fields: dict) -> list[str]:
+                problems = self.save_schedule(target, fields)
+                if not problems:
+                    access.audit("chat-action", f"{sid} schedule {target} {json.dumps(fields, default=str)}")
+                return problems
+        if self.allow_run and self.allows("run"):
+            def run(reason: str) -> tuple[int, dict]:
+                why = "asked in a discussion" + (f": {reason}" if reason else "")
+                return self.start_run(target, "adhoc", why, True, window_minutes=(row() or {}).get("window") or 60, source="chat")
+        return chat_actions.ChatActions(target, row=row, scheduler_running=self.scheduler is not None, save=save, run=run)
 
     def _chat(self) -> "chat.Chat":
         from dbtriage.band import weeks_for
@@ -1534,7 +1565,7 @@ class App:
         # questions in the snapshot's review thread, with the review's context, where the dock never reads them back.
         finding = None if key == "review" else int(key.split("-", 1)[1]) if key.startswith("finding-") else key
         try:
-            answer = self._chat().ask(sid, finding, question)
+            answer = self._chat().ask(sid, finding, question, actions=self._chat_actions(sid))
         except ValueError as exc:
             return 400, {"error": str(exc)}
         except StorageUnavailable as exc:  # the store went away during the discussion: the same 503 as before it
@@ -1545,6 +1576,8 @@ class App:
             print(f"web: chat for {sid}/{key} failed:\n{traceback.format_exc()}", file=sys.stderr)
             return 502, {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
         answer["html"], answer["footer"] = chat_html(answer), chat.footer(answer)
+        for a in answer.get("actions") or []:
+            a["html"] = chat_html(a)
         access.audit("chat", f"{sid} {key}")
         return 200, answer
 

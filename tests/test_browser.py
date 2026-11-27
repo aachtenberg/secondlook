@@ -332,6 +332,23 @@ def test_target_dock_waits_out_the_refresh_and_keeps_its_thread(page, tmp_path, 
         srv.server_close()
 
 
+def test_ask_ai_changes_the_schedule_and_shows_what_it_did(page, web_server):
+    page.goto(web_server + "/t/demo")
+    page.locator("#discuss-open").click()
+    page.locator("#chat-q").fill("Set the schedule to hourly")
+    page.locator("#chat-q").press("Enter")
+    card = page.locator("#chat-log .dmsg.action")
+    expect(card).to_contain_text("Schedule of demo: not scheduled → hourly, 30-minute window.")
+    expect(card.locator(".avatar.act")).to_have_text("✓")
+    expect(page.locator("#chat-log .dmsg.assistant .dtext").last).to_contain_text("Fake answer to: Set the schedule to hourly")
+    page.reload()  # kept with the thread, before the answer that made it
+    page.locator("#discuss-open").click()
+    expect(page.locator("#chat-log .dmsg").nth(1)).to_have_class(re.compile(r"\baction\b"))
+    page.locator("#chat-log .dmsg.action a", has_text="schedules").click()
+    expect(page).to_have_url(web_server + "/settings#schedule")
+    expect(page.locator("select[name=schedule][aria-label='schedule for demo']")).to_have_value("0 * * * *")
+
+
 def test_settings_save_in_place_with_toasts(page, web_server):
     page.goto(web_server + "/settings")
     agent = page.locator("form[action='/settings/agent']")
