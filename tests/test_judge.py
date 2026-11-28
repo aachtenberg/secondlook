@@ -259,3 +259,20 @@ def test_a_review_and_its_judge_over_http(tmp_path, fake_llm):
     assert result["source"] == "agent" and f["disputed"] is True and f["judges"][0]["reason"] == "Fake judge: the evidence does not hold."
     assert result["severity"] == "info" and result["judges"]["judges"][0]["judge"] == "ollama:fake-large"
     assert result["life"][0]["state"] == "disputed" and deliver._fires(result, 0) == []
+
+
+def test_saving_the_card_keeps_what_a_judge_line_cannot_show(tmp_path):
+    """A judge set in targets.toml with its own region and budget: saving any field of the card posts the judges as
+    lines, and the file's list keeps feeding through; removing one judge keeps the other's hidden fields."""
+    from dbtriage.settings import Settings, judges_text
+    from tests.test_settings_charts import seed
+
+    file = [{"provider": "bedrock-converse", "model": "us.amazon.nova-pro-v1:0", "region": "us-east-1", "token_budget": 50000},
+            {"provider": "openrouter", "model": "z-ai/glm-5.3"}]
+    cfg = seed(tmp_path)
+    cfg.agent = {"provider": "ollama", "model": "gemma", "judges": file}
+    st = Settings.for_config(cfg)
+    assert st.put_agent({"max_iterations": "30", "judges": judges_text(file)}, base=cfg.agent) == []
+    assert "judges" not in st.data["agent"]  # unchanged: the file's list, region and budget included, still applies
+    assert st.put_agent({"judges": judges_text(file[:1])}, base=cfg.agent) == []
+    assert st.data["agent"]["judges"] == [file[0]]  # the region and the budget survive the edit

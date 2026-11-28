@@ -52,7 +52,7 @@ model = "claude-opus-5-5"
 #           { provider = "openrouter", model = "z-ai/glm-5.3" }]
 #                                      other models that check every review against the same data (off when unset).
 #                                      Each takes provider, model, base_url, api_key_env; nothing of the main one
-#                                      carries over but token_budget and max_iterations
+#                                      carries over but token_budget, max_iterations and max_tokens
 # quorum = 0                           judges that must agree for a finding to stand; 0 = a majority. One short of
 #                                      it is kept, marked disputed, and does not alert
 # [agent.extra]                        OpenAI-style providers: extra request fields, passed through unchanged

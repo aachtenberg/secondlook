@@ -454,6 +454,9 @@ class Settings:
                 v, bad = judges_value(v)
                 if bad:
                     problems.append(bad); continue
+                v = judges_kept(v, agent.get("judges", file.get("judges")))  # what the card cannot show survives a save
+                if judge_rows(v) == judge_rows(file.get("judges")):
+                    v = file.get("judges")  # the file's list, unchanged: it keeps feeding through
             if k == "fallback_models":
                 if not isinstance(v, (str, list)):
                     problems.append("fallback_models: model ids separated by commas"); continue
@@ -760,6 +763,9 @@ def agent_value(key: str, v):
     return v
 
 
+JUDGE_SHOWN = ("provider", "model", "base_url", "api_key_env")  # what a judge's line on the card holds
+
+
 def judges_value(v) -> tuple[list[dict], str]:
     """[agent] judges as stored, and a problem when there is one. The card posts one judge per line, `provider model`,
     optionally followed by a base URL and the name of its key variable (`openrouter z-ai/glm-5.3`, `ollama gpt-oss:20b
@@ -776,7 +782,7 @@ def judges_value(v) -> tuple[list[dict], str]:
                 row["base_url" if "://" in extra else "api_key_env"] = extra
             rows.append(row)
     elif isinstance(v, list):
-        rows = [{k: str(j[k]) for k in ("provider", "model", "base_url", "api_key_env") if isinstance(j, dict) and j.get(k)} for j in v]
+        rows = [{k: str(j[k]) for k in JUDGE_SHOWN if isinstance(j, dict) and j.get(k)} for j in v]
     else:
         return [], "judges: one judge per line, provider then model"
     for n, j in enumerate(rows, 1):
@@ -789,9 +795,32 @@ def judges_value(v) -> tuple[list[dict], str]:
     return rows, ""
 
 
+
+
+def judge_rows(js) -> list[dict]:
+    """Judges as dbtriage.judge reads them: dicts with only the fields a judge may carry (never api_key_cmd)."""
+    from dbtriage.judge import JUDGE_KEYS
+
+    return [{k: j[k] for k in JUDGE_KEYS if j.get(k) not in (None, "")} for j in js or [] if isinstance(j, dict)]
+
+
+def judges_kept(rows: list[dict], current) -> list[dict]:
+    """The posted judges, each with the fields of the current judge it matches on what the card shows (a region, its
+    own token_budget, set in targets.toml), so saving the card does not strip them."""
+    shown = lambda j: tuple(str(j.get(k) or "") for k in JUDGE_SHOWN)  # noqa: E731
+    pool = judge_rows(current)
+    out = []
+    for r in rows:
+        match = next((c for c in pool if shown(c) == shown(r)), None)
+        if match is not None:
+            pool.remove(match)  # two identical lines keep one stored row each
+        out.append(match if match is not None else r)
+    return out
+
+
 def judges_text(v) -> str:
     """[agent] judges as the card shows them: one line per judge."""
-    return "\n".join(" ".join(str(j[k]) for k in ("provider", "model", "base_url", "api_key_env") if j.get(k))
+    return "\n".join(" ".join(str(j[k]) for k in JUDGE_SHOWN if j.get(k))
                      for j in v or [] if isinstance(j, dict))
 
 

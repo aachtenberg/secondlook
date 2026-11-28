@@ -324,7 +324,7 @@ quorum = 2   # judges that must agree for a finding to stand; unset or 0: a majo
 ```
 
 Each judge names its own provider, model and, if needed, `base_url` and `api_key_env`. Nothing of the main provider
-carries over except `token_budget` and `max_iterations`, and `DBTRIAGE_PROVIDER` / `DBTRIAGE_MODEL` never apply
+carries over except `token_budget`, `max_iterations` and `max_tokens`, and `DBTRIAGE_PROVIDER` / `DBTRIAGE_MODEL` never apply
 to a judge. The judges run at the same time, each with the reviewer's read-only tools. Each gets the review, what
 Second Look measured for each finding, how busy the database was, and the rules' findings. Each returns `agree` or
 `dispute` per finding with a severity and a reason, plus up to three things the review missed (`judge.py`).
