@@ -1170,8 +1170,12 @@ class App:
                         disc = (f"<a class='chat-link' data-chat='finding-{i}' href='/api/snapshots/{html.escape(sid)}/chat/finding-{i}'>"
                                 f"{ICON['chat']}Discuss{self._thread_count(sid, f'finding-{i}')}</a>")
                     ev = "".join(f"<li>{link_ids(e)}</li>" for e in (f.get("evidence") or [])[:4])
+                    ms = "".join(f"<li>{link_ids(str(m))}</li>" for m in (f.get("measured") or [])[:3])
                     dl = ((f"<dt>Impact</dt><dd>{link_ids(f['impact'])}</dd>" if f.get("impact") else "")
                           + (f"<dt>Evidence</dt><dd><ul>{ev}</ul></dd>" if ev else "")
+                          + (f"<dt title='Computed by Second Look from the snapshots, not written by the model'>Measured</dt><dd><ul>{ms}</ul></dd>" if ms else "")
+                          + (f"<dt title='Numbers in the evidence that no tool result showed'>Not in the data</dt><dd>{html.escape(', '.join(map(str, f['not_in_data'])))}</dd>"
+                             if f.get("not_in_data") else "")
                           + (f"<dt>Fix</dt><dd>{link_ids(f['fix'])}</dd>" if f.get("fix") else "")
                           + proposal_html(f.get("proposal"), i, link_ids))
                     items.append(f"<li><div class='fh'><span class='n'>{i}</span>{sev(f.get('severity'))}{marks.get(i - 1, '')}"

@@ -13,7 +13,7 @@ from typing import Any, Callable
 from anthropic import beta_tool  # used only to derive JSON schemas from the docstrings below
 from pydantic import BaseModel, Field
 
-from dbtriage import band, changes
+from dbtriage import band, changes, grounding
 from dbtriage import compare as cmp
 from dbtriage.findings import KINDS, SUBJECT_KEYS, known_kind, subject_of
 from dbtriage.llm import Backend, ToolSpec
@@ -28,8 +28,17 @@ get_sql_history and get_recent_changes as the evidence requires. Correlate with 
 only when the data supports it.
 
 The write-up is a review, not an essay: the reader is the on-call engineer and wants what is wrong, where, and the
-fix. Report only problems the data supports; say when it is inconclusive. Severity: high = user-visible impact or
-imminent risk; medium = degraded but coping; low = a real but minor problem. At most 5 findings, most severe
+fix. Report only problems the data supports; say when it is inconclusive.
+Keep two kinds of number apart. compare_snapshots gives what happened inside the window; get_report on a cumulative
+engine gives running totals since the statistics were last reset, and a total is not a change. Write "from X to Y"
+only when a tool gave both numbers for the same subject and window. Each evidence line gives the amount and its rate
+(per second or per call), not only a percentage.
+Weigh every finding against how busy the database is (compare_snapshots' load: SQL time per second, commits per
+second). It is impacting when callers are affected now: a per-call time a request would notice, a large share of a
+busy database's time, a resource near its limit. A change that costs this database almost nothing, such as a query
+doubling on an idle database, is an efficiency issue: worth a low finding when it is real waste, otherwise none.
+Impact says which it is. Severity: high = callers affected now or imminent risk; medium = degraded but coping;
+low = a real but minor problem or an efficiency issue. At most 5 findings, most severe
 first. Each finding names one thing (a SQL id, a table, a wait class, a parameter), states the problem in at most
 about 15 words, then Impact in one sentence, Evidence as specific numbers, and a Fix of one or two sentences that
 is safe and says how to roll back if it changes the database. Give each finding a kind from the fixed list in the
@@ -43,7 +52,8 @@ rollback is refused), who would run it as a role (DBA in a change window, the ap
 justified_by the snapshot ids whose numbers justify it, the current snapshot and the baseline at least; the before
 and after Second Look measured belong in the evidence. Keep fix as the one-sentence advice. Leave proposal out when
 the fix is to look at something or to confirm it with the owner. Nothing is ever applied by Second Look.
-Finish by calling submit_review exactly once.
+Finish by calling submit_review. The first call with findings comes back with what Second Look measured for each
+finding's subject: correct the review against it and call submit_review once more.
 
 Call get_operator_answers once before you submit. A person may have run a read the model proposed in an earlier
 discussion of this database (an EXPLAIN, a wait or lock slice, a stats query) and pasted the result back; it is
@@ -80,10 +90,16 @@ OPERATOR_ANSWERS_CHARS = 60_000  # and at most this much result text in one call
 
 
 class TriageAgent:
-    def __init__(self, storage: Storage, backend: Backend, band_weeks_for: Callable[[str], int] | None = None):
+    def __init__(self, storage: Storage, backend: Backend, band_weeks_for: Callable[[str], int] | None = None, recheck: bool = True):
         self.storage = storage
         self.backend = backend
         self.result: dict | None = None
+        self.recheck = recheck  # hand the model what was measured once, before the review is final (dbtriage.grounding)
+        self.final = False  # the review is in and checked (or the check was not needed): the run can stop
+        self.sheet_sent = False
+        self._seen: list[str] | None = None  # every tool result of the current run, for the numbers check; None outside run()
+        self._run_compare: dict | None = None  # the run's comparison, given by the caller or computed on first need
+        self._engine = self._target = self._baseline_id = None
         self.tool_log: list[dict] = []  # every tool call of the current run, in order; stored as tools.json
         self.snapshot_id: str | None = None  # the run's current snapshot, set by run(): a proposal must cite it
         self.band_weeks = band.DEFAULT_WEEKS  # the target's band_weeks, set by run(); 0 leaves the usual band out of compare_snapshots
@@ -117,13 +133,47 @@ class TriageAgent:
             items = changes.read_file(manifest["changes_file"])
         return changes.within(items, end - timedelta(hours=hours), end)
 
+    def _compare(self, engine: str, target: str, snapshot_id: str, baseline_id: str | None) -> dict:
+        """compare_snapshots' result: the snapshot against the baseline, with the change feed and the usual band."""
+        cur = self._summary(snapshot_id)
+        base = self._summary(baseline_id) if baseline_id else None
+        before = self.storage.previous(engine, target, baseline_id) if baseline_id else None
+        margin = self.storage.get_json(f"{snapshot_id}/manifest.json").get("correlate_minutes")
+        margin = cmp.CORRELATE_MINUTES if margin in (None, "") else int(margin)  # an explicit 0 is a choice, not a blank
+        weeks = self.band_weeks_for(target)
+        usual = band.usual_band(self.storage, engine, target, snapshot_id, weeks=weeks, baseline=baseline_id) if weeks else None
+        return cmp.compare(cur, base, self._summary(before) if before else None,
+                           changes=self._stored_changes(snapshot_id), correlate_minutes=margin, band=usual)
+
+    def _measured(self, findings: list[dict]) -> list[list[str]]:
+        """What Second Look measured for each finding's subject (dbtriage.grounding), from the run's comparison. The
+        check is advice: when it fails, the review is recorded without it rather than lost."""
+        if not self.snapshot_id:
+            return [[] for _ in findings]
+        try:
+            if self._run_compare is None:
+                try:
+                    self._run_compare = self._compare(self._engine, self._target, self.snapshot_id, self._baseline_id)
+                except ValueError:  # a cumulative engine's first snapshot: no window to compare
+                    self._run_compare = {}
+            cur = self._summary(self.snapshot_id)
+            base = self._summary(self._baseline_id) if self._baseline_id else None
+            return [grounding.measured(f, self._run_compare or None, cur, base) for f in findings]
+        except Exception as exc:  # noqa: BLE001
+            import sys
+
+            print(f"could not measure the findings of {self.snapshot_id} ({type(exc).__name__}: {str(exc)[:200]})", file=sys.stderr)
+            return [[] for _ in findings]
+
     # ----------------------------------------------------------------- tools
     def _tools(self, engine: str, target: str):
         agent = self
 
         @beta_tool
         def get_report(snapshot_id: str, section: str = "all") -> str:
-            """Read one section of a stored snapshot's normalized summary.
+            """Read one section of a stored snapshot's normalized summary. On a cumulative engine (Postgres,
+            MySQL; metrics_kind not "interval") its counts are running totals since the statistics were last reset,
+            not the window's: compare_snapshots gives what happened in the window.
 
             Args:
                 snapshot_id: Snapshot id such as postgres/prod1/2026-11-05/20261105T101500Z.
@@ -159,23 +209,19 @@ class TriageAgent:
         def compare_snapshots(snapshot_id: str, baseline_id: str) -> str:
             """Compare a snapshot against a baseline: load-profile deltas (per second),
             new/changed/gone SQL with plan changes, wait-class shifts, table scan and
-            bloat changes, current sessions, and ranked heuristic findings. "band" is the
-            usual band for this clock hour over the past weeks (median and high per metric,
-            the current value's position) when the target has enough history; findings
-            about a banded metric carry one sentence about it in their evidence.
+            bloat changes, current sessions, and ranked heuristic findings. Every count is
+            what happened inside the window, not a running total. "load" says how busy the
+            database was (SQL time per second, commits per second); "ms_per_s" on a statement
+            is the database time it cost per second, "added_ms_per_s" what its change added.
+            "band" is the usual band for this clock hour over the past weeks (median and high
+            per metric, the current value's position) when the target has enough history;
+            findings about a banded metric carry one sentence about it in their evidence.
 
             Args:
                 snapshot_id: The later / current snapshot id.
                 baseline_id: The earlier snapshot to compare against.
             """
-            cur, base = agent._summary(snapshot_id), agent._summary(baseline_id)
-            before = agent.storage.previous(engine, target, baseline_id)
-            margin = agent.storage.get_json(f"{snapshot_id}/manifest.json").get("correlate_minutes")
-            margin = cmp.CORRELATE_MINUTES if margin in (None, "") else int(margin)  # an explicit 0 is a choice, not a blank
-            weeks = agent.band_weeks_for(target)
-            usual = band.usual_band(agent.storage, engine, target, snapshot_id, weeks=weeks, baseline=baseline_id) if weeks else None
-            return json.dumps(cmp.compare(cur, base, agent._summary(before) if before else None,
-                                          changes=agent._stored_changes(snapshot_id), correlate_minutes=margin, band=usual), default=str)
+            return json.dumps(agent._compare(engine, target, snapshot_id, baseline_id), default=str)
 
         @beta_tool
         def get_sql_history(sql_id: str, limit: int = 12) -> str:
@@ -245,7 +291,9 @@ class TriageAgent:
 
         @beta_tool
         def submit_review(findings: list[Finding], summary: str, checked: str, confidence: str) -> str:
-            """Record the final review. Call exactly once, at the end.
+            """Record the review, at the end. The first call with findings returns what Second Look measured
+            for each finding's subject and how busy the database was: correct the review against it and call
+            submit_review once more, which records it.
 
             Args:
                 findings: Problems found, most severe first, at most 5. Empty when nothing is wrong.
@@ -263,12 +311,30 @@ class TriageAgent:
                 return bad
             rank = {"high": 0, "medium": 1, "low": 2}
             fs = sorted(findings[:5], key=lambda f: rank[f.severity])
+            dumped = [f.model_dump(exclude_none=True) for f in fs]  # a finding without a proposal keeps its old shape
+            facts = agent._measured(dumped)
+            seen = grounding.pool((agent._seen or []) + [line for lines in facts for line in lines])
+            missing = [grounding.unseen(f.get("evidence") or [], seen) if agent._seen is not None else [] for f in dumped]
+            for f, lines, nums in zip(dumped, facts, missing):
+                if lines:  # beside the model's evidence, for the reader; the model cannot write these fields
+                    f["measured"] = lines
+                if nums:
+                    f["not_in_data"] = nums
             agent.result = {
                 "severity": fs[0].severity if fs else "info",
                 "title": fs[0].summary if fs else "no significant change",
                 "summary": summary, "checked": checked, "confidence": confidence,
-                "findings": [f.model_dump(exclude_none=True) for f in fs],  # a finding without a proposal keeps its old shape
+                "findings": dumped,
             }
+            if agent.recheck and agent.snapshot_id and dumped and not agent.sheet_sent:
+                # held, not final: kept as the review if the run ends before the model submits again
+                agent.sheet_sent = True
+                agent.result["rechecked"] = False
+                load = (agent._run_compare or {}).get("load") or {}
+                return grounding.sheet(dumped, facts, missing, load.get("sentence") or "")
+            if agent.sheet_sent:
+                agent.result["rechecked"] = True
+            agent.final = True
             return "recorded"
 
         return [get_report, get_raw_report, compare_snapshots, get_sql_history, get_recent_changes, get_operator_answers, submit_review]
@@ -296,6 +362,8 @@ class TriageAgent:
                 finally:
                     entry["ms"] = round((time.monotonic() - t0) * 1000)
                 text = str(result)
+                if self._seen is not None and name != "submit_review":  # what the model read; the sheet repeats its own evidence
+                    self._seen.append(text)
                 entry["result"] = text if len(text) <= keep else f"{text[:keep]}... ({len(text)} chars)"
                 return result
             return fn
@@ -309,10 +377,15 @@ class TriageAgent:
 
     # ----------------------------------------------------------------- run
     def run(self, engine: str, target: str, snapshot_id: str, baseline_id: str | None, mode: str,
-            max_iterations: int = 25, notes: str | None = None, band_weeks: int = band.DEFAULT_WEEKS) -> dict:
-        self.result = None
+            max_iterations: int = 25, notes: str | None = None, band_weeks: int = band.DEFAULT_WEEKS,
+            comparison: dict | None = None) -> dict:
+        """comparison: the caller's compare of this snapshot against the baseline (cli.triage has one), used for what
+        Second Look measured about each finding; computed here when not given."""
+        self.result, self.final, self.sheet_sent = None, False, False
         self.band_weeks = band_weeks
         self.snapshot_id = snapshot_id
+        self._engine, self._target, self._baseline_id = engine, target, baseline_id
+        self._run_compare = comparison
         manifest = self.storage.get_json(f"{snapshot_id}/manifest.json")
         task = (
             f"Review database target {target!r} (engine {engine}), run mode {mode!r}.\n"
@@ -328,11 +401,15 @@ class TriageAgent:
 
         t0 = time.monotonic()
         self.tool_log = []
+        self._seen = [task]  # the team's notes are something the model read too
         out = None
         try:
+            # a review held for the check is not the end: stop once it is final. A run that ends before the model
+            # submits again (budget, iterations, a text turn) keeps the held review.
             out = self.backend.run(SYSTEM, task, self.tool_specs(engine, target), max_iterations=max_iterations,
-                                   require_tool="submit_review", stop_when=lambda: self.result is not None)
+                                   require_tool="submit_review", stop_when=lambda: self.final)
         finally:
+            self._seen = None
             # Stored whether or not a review came back: when the model fails, which reports it read is exactly what
             # explains the failure. The arguments are the model's own text about already-redacted reports, so nothing
             # here needs further redaction. A store failure must not replace the review or hide why the model failed.
@@ -404,7 +481,7 @@ def rule_based_triage(comparison: dict, engine: str | None = None) -> dict:
         d = {
             "severity": f["severity"] if f["severity"] in ("high", "medium", "low") else "low",
             "kind": f["kind"], "subject": subject_of(f), "where": _where(f), "summary": f["title"][:120],
-            "impact": _impact(f["kind"]),
+            "impact": EFFICIENCY_IMPACT if (f.get("evidence") or {}).get("efficiency") else _impact(f["kind"]),
             "evidence": ([f["detail"]] if f.get("detail") else []) + _evidence_lines(f.get("evidence") or {}, window_start=window_start),
             "fix": _advice(f),
         }
@@ -428,11 +505,12 @@ def _evidence_lines(evidence: dict, limit: int = 3, window_start: str | None = N
     items = [(k, v) for k, v in evidence.items() if k not in ("sql_id", "changes")]
     keep = [kv for kv in items if kv[0] in KEPT_EVIDENCE]
     rest = [kv for kv in items if kv[0] not in KEPT_EVIDENCE][:max(limit - len(keep), 0)]
-    return [v if k == "band" else f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in rest + keep] \
+    return [v if k in SENTENCE_EVIDENCE else f"{k}: {json.dumps(v, default=str)[:160]}" for k, v in rest + keep] \
         + _change_lines(evidence.get("changes"), window_start)
 
 
-KEPT_EVIDENCE = ("settings_changed", "band")  # a sentence already; the band line is printed as it is
+KEPT_EVIDENCE = ("settings_changed", "band", "efficiency")  # always make the cut
+SENTENCE_EVIDENCE = ("band", "efficiency")  # a sentence already: printed as it is
 
 
 def _change_lines(found: list[dict] | None, window_start: str | None, limit: int = 3) -> list[str]:
@@ -460,6 +538,9 @@ def _where(f: dict) -> str:
         if e.get(k):
             return f"{k} {e[k]}"
     return f["kind"].replace("_", " ")
+
+
+EFFICIENCY_IMPACT = "An efficiency issue, not an impact: the database spends almost no time on this statement and no caller would notice."
 
 
 def _impact(kind: str) -> str:

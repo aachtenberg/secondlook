@@ -225,6 +225,11 @@ def _rate(v, elapsed):
     return round(v / elapsed, 3) if v is not None and elapsed else None
 
 
+def _ms_per_s(ms, elapsed):
+    """Database time per second, kept fine enough that a statement costing microseconds is not shown as zero."""
+    return round(ms / elapsed, 6) if ms is not None and elapsed else None
+
+
 def _pct(before, after):
     if before in (None, 0) or after is None:
         return None
@@ -248,6 +253,7 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
         "waits": {"current": cur["waits"]["classes"], "reference": ref["waits"]["classes"] if ref else None, "shifts": []},
         "tables": [], "sessions": cur.get("sessions", []), "engine_findings": cur.get("findings", []),
         "settings_changed": [], "changes": [], "band": None, "findings": [],
+        "counts": COUNTS_NOTE, "load": None,
     }
     for side, iv in (("current", cur), ("reference", ref)):
         if iv and iv.get("sql_window"):  # Query Store: the statements cover their intervals, not the snapshots' span
@@ -266,11 +272,13 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
                                       "reference": rv, "current": v, "pct": _pct(_rate(rv, er), _rate(v, ec))}
 
     # sql
-    total_cur = sum((s.get("total_time_ms") or 0) for s in cur["sql"].values()) or 1
-    total_ref = sum((s.get("total_time_ms") or 0) for s in (ref or {}).get("sql", {}).values()) or 1
+    sql_ms = sum((s.get("total_time_ms") or 0) for s in cur["sql"].values())
+    ref_sql_ms = sum((s.get("total_time_ms") or 0) for s in ref["sql"].values()) if ref else None
+    total_cur, total_ref = sql_ms or 1, ref_sql_ms or 1
+    out["load"] = load_of(sql_ms, ecs, ref_sql_ms, ers, out["load_profile"])
     for sid, s in sorted(cur["sql"].items(), key=lambda kv: -(kv[1].get("total_time_ms") or 0)):
         share = (s.get("total_time_ms") or 0) / total_cur
-        row = {"sql_id": sid, "text": s.get("text"), "share_of_time": round(share, 3),
+        row = {"sql_id": sid, "text": s.get("text"), "share_of_time": round(share, 3), "ms_per_s": _ms_per_s(s.get("total_time_ms"), ecs),
                "calls": s.get("calls"), "total_time_ms": s.get("total_time_ms"), "mean_time_ms": s.get("mean_time_ms"),
                "cpu_time_ms": s.get("cpu_time_ms"), "rows": s.get("rows"), "io_blocks_read": s.get("io_blocks_read"), "temp_blocks": s.get("temp_blocks"),
                "plan_hash": s.get("plan_hash"), "plans": s.get("plans")}
@@ -288,7 +296,10 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
         if r is not None:
             ch = dict(row, reference={"calls": r.get("calls"), "total_time_ms": r.get("total_time_ms"),
                                       "mean_time_ms": r.get("mean_time_ms"), "cpu_time_ms": r.get("cpu_time_ms"), "plan_hash": r.get("plan_hash"),
-                                      "share_of_time": round((r.get("total_time_ms") or 0) / total_ref, 3)})
+                                      "share_of_time": round((r.get("total_time_ms") or 0) / total_ref, 3),
+                                      "ms_per_s": _ms_per_s(r.get("total_time_ms"), ers)})
+            if row["ms_per_s"] is not None and ch["reference"]["ms_per_s"] is not None:  # what the change costs the database
+                ch["added_ms_per_s"] = round(row["ms_per_s"] - ch["reference"]["ms_per_s"], 6)
             ch["mean_pct"] = _pct(r.get("mean_time_ms"), s.get("mean_time_ms"))
             ch["calls_pct"] = _pct(_rate(r.get("calls"), ers), _rate(s.get("calls"), ecs))
             ch["plan_changed"] = (r.get("plan_hash") is not None and s.get("plan_hash") is not None
@@ -429,9 +440,64 @@ def diff(ref: dict | None, cur: dict, changes: list[dict] | None = None, correla
     if band:
         out["band"] = attach_band(band, cur, findings)
 
+    efficiency_cap(findings, out["sql"]["top"])
     findings.sort(key=lambda f: -f["score"])
     out["severity"] = findings[0]["severity"] if findings else "info"
     return out
+
+
+COUNTS_NOTE = ("Every count here (sql, tables, waits, load_profile current and reference) is what happened inside its "
+               "window, not a running total. On a cumulative engine get_report shows running totals since the statistics "
+               "were last reset: a total is not a change. load says how busy the database was.")
+
+
+def load_of(sql_ms: float, elapsed: float | None, ref_sql_ms: float | None, ref_elapsed: float | None, lp: dict) -> dict:
+    """How busy the database was in the window, so a change can be weighed against it: the top SQL's time per second
+    (1000 ms/s is one session busy for the whole window), commits per second and active sessions, plus one sentence."""
+    out = {"sql_time_ms": round(sql_ms, 3), "sql_ms_per_s": _ms_per_s(sql_ms, elapsed),
+           "reference_sql_ms_per_s": _ms_per_s(ref_sql_ms, ref_elapsed),
+           "commits_per_s": (lp.get("xact_commit") or {}).get("current_per_s"),
+           "sessions_active": (lp.get("sessions_active") or lp.get("avg_active_sessions") or {}).get("current")}
+    out["sentence"] = load_sentence(out, elapsed)
+    return out
+
+
+def load_sentence(load: dict, elapsed: float | None) -> str:
+    """"In this 1.0 h window the top SQL ran 4.9 s in all: 1.3 ms of SQL per second, about 0.13% of one session's time;
+    2.1 commits/s." Empty when the window has no length."""
+    per_s = load.get("sql_ms_per_s")
+    if not elapsed or per_s is None:
+        return ""
+    span = f"{elapsed / 3600:.1f} h" if elapsed >= 3600 else f"{elapsed / 60:.0f} min" if elapsed >= 60 else f"{elapsed:.0f} s"
+    ms = load.get("sql_time_ms") or 0
+    ran = f"{ms / 60000:.1f} min" if ms >= 60000 else f"{ms / 1000:.1f} s" if ms >= 1000 else f"{ms:.0f} ms"
+    busy = (f"about {per_s / 1000:.1f} sessions busy on average" if per_s >= 1000 else f"about {per_s / 10:.2g}% of one session's time"
+            if per_s >= 0.1 else "under 0.01% of one session's time")
+    s = f"In this {span} window the top SQL ran {ran} in all: {per_s:.3g} ms of SQL per second, {busy}"
+    if load.get("commits_per_s") is not None:
+        s += f"; {load['commits_per_s']:.3g} commits/s"
+    return s + "."
+
+
+NEGLIGIBLE_MS_PER_S = 1.0  # a statement costing less database time than this per second (3.6 s an hour) ...
+NOTICEABLE_MS = 100  # ... and less than this per call costs nobody anything yet: an efficiency issue, low at most
+SQL_KINDS = ("sql_regressed", "sql_new", "sql_volume", "sql_top", "plan_change")
+
+
+def efficiency_cap(findings: list[dict], top: list[dict]) -> None:
+    """A statement finding whose statement costs the database almost nothing and no caller would notice per call is
+    an efficiency issue, however large its relative change: low, with the sentence that says so in its evidence. A
+    statement without a per-call time is left as it is: its latency is unknown."""
+    rows = {str(r.get("sql_id")): r for r in top}
+    for f in findings:
+        r = rows.get(str(f["evidence"].get("sql_id"))) if f["kind"] in SQL_KINDS else None
+        if not r or r.get("ms_per_s") is None or r.get("mean_time_ms") is None:
+            continue
+        if r["ms_per_s"] < NEGLIGIBLE_MS_PER_S and r["mean_time_ms"] < NOTICEABLE_MS:
+            if f["score"] >= 40:
+                f["score"], f["severity"] = 39, "low"
+            f["evidence"]["efficiency"] = (f"efficiency, not impact: it costs {r['ms_per_s']:.3g} ms of database time per second "
+                                           f"and {r['mean_time_ms']:.3g} ms per call")
 
 
 BAND_WINDOW_RATIO = 2  # a window this many times longer or shorter than the band's is not the same hour

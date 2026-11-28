@@ -1119,3 +1119,18 @@ def test_a_statspack_level_of_zero_is_shown_and_kept(tmp_path):
     assert app.save_target("demo", fields) == [] and app.cfg.targets["demo"].extra["statspack_level"] == 0
     form = app.target_form("demo").decode()
     assert "<option value='0' selected>0: basic statistics</option>" in form and "<option value='7' selected>" not in form
+
+
+def test_finding_card_shows_what_was_measured_beside_the_evidence(tmp_path):
+    """The measured lines and any number no tool showed sit under the model's evidence, escaped; a finding without
+    them renders as it did."""
+    st = store(tmp_path)
+    f = {"severity": "high", "kind": "other", "subject": "t", "where": "t", "summary": "Spike", "impact": "i",
+         "evidence": ["idx_scan from 0 to 9,876"], "fix": "look",
+         "measured": ["t in this window: idx_scan 44 (0.0122/s).", "Running totals <b>"], "not_in_data": ["9,876"]}
+    plain = {k: v for k, v in f.items() if k not in ("measured", "not_in_data")}
+    st.put_json(f"{SID}/triage.json", {"severity": "high", "title": "Spike", "source": "agent", "confidence": "low", "findings": [f, plain]})
+    card = App(config(tmp_path), st, False, None).snapshot(SID).decode().split("<ol class='flist'>")[1].split("</ol>")[0]
+    first, second = card.split("<li><div class='fh'>")[1:]
+    assert "Measured</dt><dd><ul><li>t in this window: idx_scan 44 (0.0122/s).</li><li>Running totals &lt;b&gt;</li></ul></dd>" in first
+    assert "Not in the data</dt><dd>9,876</dd>" in first and "Measured" not in second and "Not in the data" not in second

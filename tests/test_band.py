@@ -283,3 +283,17 @@ def test_compare_ids_carries_the_band_when_the_windows_match(tmp_path):
     # a week-long current interval (same-time-last-week baseline on a cumulative engine) has no hour windows to match
     assert compare_ids(st, "postgres", "pg", cur, sid_at("postgres", "pg", MONDAY - timedelta(weeks=1)))["band"] is None
     assert compare_ids(st, "postgres", "pg", cur, prev, band_weeks=0)["band"] is None
+
+
+def test_reviewer_compare_carries_the_band_for_an_interval_snapshot_without_a_baseline(tmp_path):
+    """An AWR window is its own interval: the reviewer's comparison with no baseline (the one its measured lines are
+    read from) still carries the usual band, as cli.compare_ids does."""
+    from dbtriage.agent import TriageAgent
+    from dbtriage.cli import compare_ids
+
+    st = LocalStorage(tmp_path)
+    fill(st, engine="oracle", target="ora", kind="interval")
+    sid = sid_at("oracle", "ora", MONDAY)
+    out = TriageAgent(st, backend=None, band_weeks_for=lambda name: 6)._compare("oracle", "ora", sid, None)
+    assert out["band"] and out["band"]["weeks_used"] >= 3
+    assert out["band"] == compare_ids(st, "oracle", "ora", sid, None, band_weeks=6)["band"]

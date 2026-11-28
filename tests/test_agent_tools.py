@@ -89,7 +89,7 @@ def test_run_stores_the_tool_transcript(tmp_path):
     assert calls[0]["args"] == {"snapshot_id": ids[-1], "baseline_id": ids[-2]} and all(isinstance(c["ms"], int) for c in calls)
     long = calls[1]["result"]
     assert long.startswith("[chars 0-5000 of 5500]") and long.endswith("... (5023 chars)") and len(long) < 2100
-    assert calls[2]["result"].startswith("no report 'missing.txt'") and calls[3]["result"] == "recorded"  # short results are kept whole
+    assert calls[2]["result"].startswith("no report 'missing.txt'") and calls[3]["result"].startswith("Held, not final yet")  # short results are kept whole
 
 
 def test_triage_falls_back_to_rules_when_provider_fails(tmp_path, monkeypatch, capsys):
@@ -354,7 +354,7 @@ def test_operator_answers_tool_reads_this_and_the_previous_snapshot(tmp_path):
 # ---------------------------------------------------------------- the fix as a change proposal
 def test_a_proposal_needs_a_rollback_and_must_cite_the_current_snapshot(tmp_path):
     st = _store(tmp_path)
-    agent = TriageAgent(st, backend=None)
+    agent = TriageAgent(st, backend=None, recheck=False)  # the check sheet has its own test
     ids = st.list_snapshots("postgres", "demo")
     agent.snapshot_id = ids[-1]  # what run() sets
     tools = {t.name: t for t in agent._tools("postgres", "demo")}
