@@ -270,6 +270,7 @@ aside.discuss[hidden]{display:none}
 .drow{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px}.drow button{height:32px}
 .dmsg.operator{display:flex;gap:10px;font-size:13px}.avatar.person{background:var(--card2);color:var(--fg2);border:1px solid var(--line2)}
 .dmsg.action{display:flex;gap:10px;font-size:13px}.dmsg.action .dtext{border:1px solid var(--line2);border-left:3px solid var(--accent);border-radius:8px;background:var(--card2);padding:6px 10px}.dmsg.action .dtext p{margin:2px 0 0}.avatar.act{background:var(--card2);color:var(--accent);border:1px solid var(--line2)}
+.thinking .dots{display:inline-flex;gap:3px;margin-right:8px;vertical-align:middle}.thinking .dots i{width:5px;height:5px;border-radius:50%;background:var(--accent);opacity:.3;animation:dbt-pulse 1.2s ease-in-out infinite}.thinking .dots i:nth-child(2){animation-delay:.2s}.thinking .dots i:nth-child(3){animation-delay:.4s}@keyframes dbt-pulse{0%,80%,100%{opacity:.3;transform:none}40%{opacity:1;transform:translateY(-2px)}}@media (prefers-reduced-motion:reduce){.thinking .dots i{animation:none;opacity:.7}}
 .pread{border:1px solid var(--line2);border-radius:8px;background:var(--card2);padding:8px 10px;display:flex;flex-direction:column;gap:6px}
 .plbl{font-size:11px;color:var(--mut);font-weight:500}.pread pre,.presult{margin:0;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow-y:auto}
 .prow{display:flex;gap:6px}.prow button{height:26px;font-size:12px;padding:0 10px}

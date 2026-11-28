@@ -181,12 +181,20 @@ $body
       var text = q.value.trim(); if (!text || !ready) return;
       var s = log.querySelector('.sugg'); if (s) s.remove();
       msg('user', text); q.value = ''; send.disabled = true; inflight++;
-      var wait = msg('assistant', '<p class=mut>thinking…</p>');
+      // the answer can take minutes when the model looks a lot up: show that it is still going, and for how long
+      var wait = msg('assistant', "<p class='mut thinking' role=status><span class=dots aria-hidden=true><i></i><i></i><i></i></span>"
+                     + "thinking<span class=secs aria-hidden=true></span><span class=slow></span></p>");
+      var t0 = Date.now(), secs = wait.querySelector('.secs'), slow = wait.querySelector('.slow');
+      var tick = setInterval(function () {
+        var n = Math.floor((Date.now() - t0) / 1000);
+        secs.textContent = ' · ' + (n < 60 ? n + 's' : Math.floor(n / 60) + 'm ' + ('0' + n % 60).slice(-2) + 's');
+        if (n >= 30 && !slow.textContent) slow.textContent = ' · still working: it reads the stored evidence step by step, which can take a few minutes';
+      }, 1000);
       fetch(box.getAttribute('data-base') + key, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
                        body: JSON.stringify({ question: text }) })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-        .then(function (x) { wait.remove(); if (x.ok) { (x.j.actions || []).forEach(function (a) { msg('action', a.html); }); msg('assistant', x.j.html, x.j.footer); } else { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = x.j.error || 'failed'; } })
-        .catch(function (err) { wait.remove(); msg('assistant', '<p class=err></p>').querySelector('.err').textContent = err.message; })
+        .then(function (x) { clearInterval(tick); wait.remove(); if (x.ok) { (x.j.actions || []).forEach(function (a) { msg('action', a.html); }); msg('assistant', x.j.html, x.j.footer); } else { msg('assistant', '<p class=err></p>').querySelector('.err').textContent = x.j.error || 'failed'; } })
+        .catch(function (err) { clearInterval(tick); wait.remove(); msg('assistant', '<p class=err></p>').querySelector('.err').textContent = err.message; })
         .then(function () { inflight--; send.disabled = !ready; q.focus(); });
     });
     q.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
