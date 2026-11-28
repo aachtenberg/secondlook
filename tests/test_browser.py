@@ -332,6 +332,30 @@ def test_target_dock_waits_out_the_refresh_and_keeps_its_thread(page, tmp_path, 
         srv.server_close()
 
 
+def test_the_wait_for_an_answer_shows_it_is_still_going(page, web_server, fake_llm):
+    """A model that looks a lot up can take minutes. A still "thinking…" looked hung: now dots pulse, a timer
+    counts, and after half a minute a line says it is still working. All of it goes when the answer comes."""
+    page.clock.install()
+    fake_llm.delay = 2.0
+    try:
+        page.goto(web_server + "/t/demo")
+        page.locator("#discuss-open").click()
+        page.locator("#chat-q").fill("how is it doing?")
+        page.locator("#chat-q").press("Enter")
+        thinking = page.locator("#chat-log .thinking")
+        expect(thinking).to_be_visible()
+        assert thinking.locator(".dots i").count() == 3 and thinking.get_attribute("role") == "status"
+        page.clock.run_for(5000)
+        expect(thinking).to_contain_text(re.compile(r"thinking · [45]s"))
+        expect(thinking).not_to_contain_text("still working")
+        page.clock.run_for(60000)
+        expect(thinking).to_contain_text(re.compile(r"thinking · 1m 0[45]s · still working"))
+        expect(page.locator("#chat-log .dmsg.assistant .dtext").last).to_contain_text("Fake answer to: how is it doing?")
+        expect(thinking).to_have_count(0)
+    finally:
+        fake_llm.delay = 0.0
+
+
 def test_ask_ai_changes_the_schedule_and_shows_what_it_did(page, web_server):
     page.goto(web_server + "/t/demo")
     page.locator("#discuss-open").click()
