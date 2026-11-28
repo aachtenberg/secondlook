@@ -141,7 +141,7 @@ class TriageAgent:
         margin = self.storage.get_json(f"{snapshot_id}/manifest.json").get("correlate_minutes")
         margin = cmp.CORRELATE_MINUTES if margin in (None, "") else int(margin)  # an explicit 0 is a choice, not a blank
         weeks = self.band_weeks_for(target)
-        usual = band.usual_band(self.storage, engine, target, snapshot_id, weeks=weeks, baseline=baseline_id) if weeks and baseline_id else None
+        usual = band.usual_band(self.storage, engine, target, snapshot_id, weeks=weeks, baseline=baseline_id) if weeks else None
         return cmp.compare(cur, base, self._summary(before) if before else None,
                            changes=self._stored_changes(snapshot_id), correlate_minutes=margin, band=usual)
 
