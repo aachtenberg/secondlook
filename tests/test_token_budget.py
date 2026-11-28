@@ -69,13 +69,15 @@ def test_review_over_http_within_and_at_the_budget(tmp_path, fake_llm):
                  agent={"provider": "ollama", "model": "fake-model", "base_url": fake_llm.url}, base_dir=str(tmp_path))
     n0 = len(fake_llm.requests)
     result, comparison = triage(cfg, st, DEMO, DEMO_BASE, "incident", True)
-    assert result["source"] == "agent" and len(fake_llm.requests) - n0 == 2  # compare, submit: no third call
+    assert result["source"] == "agent" and len(fake_llm.requests) - n0 == 3  # compare, submit, submit after the check: no fourth
+    assert result["rechecked"] is True
     assert result["usage"]["token_budget"] == llm.DEFAULT_TOKEN_BUDGET and not result["usage"]["budget_reached"]
 
     cfg.agent["token_budget"] = 150  # 120 per call: the second call is the last, told to submit
     n0 = len(fake_llm.requests)
     result, comparison = triage(cfg, st, DEMO, DEMO_BASE, "incident", True)
     assert result["source"] == "agent" and result["usage"]["budget_reached"] and len(fake_llm.requests) - n0 == 2
+    assert result["rechecked"] is False  # the budget's last call submitted it: the held review stands, unchecked
     assert "token budget for this review is used up" in json.dumps(fake_llm.requests[-1]["messages"][-1])
     assert "token budget 150 reached" in render_markdown(result, comparison)
 

@@ -105,7 +105,11 @@ saying the budget ran out. A review that reached its budget says so in its foote
 same budget, each answer on its own. For scale, the lab's reviews used about 90k tokens on Postgres, 217k on MySQL
 and 669k on Oracle, where the model pages through the AWR text.
 
-A review also ends as soon as the model submits it, rather than making one more call just to acknowledge it.
+A review also ends as soon as the model submits it, rather than making one more call just to acknowledge it. A
+review with findings takes one model call more than that: its first submission comes back with what Second Look
+measured for each finding, and the model checks against it and submits again (see
+[Grounded in what was measured](operations.md#grounded-in-what-was-measured)). On a run that has used its budget,
+the first submission stands.
 
 Scheduled snapshots can use a **cheaper or local model** than the one you review incidents with. Set
 `scheduled_provider` and `scheduled_model` in `[agent]` (or under *Scheduled runs* on the Settings page), plus

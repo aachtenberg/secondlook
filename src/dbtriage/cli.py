@@ -168,7 +168,7 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
             agent = agent_for(cfg.agent, source)  # a scheduled run may use [agent] scheduled_model
             result = TriageAgent(store, make_backend(agent)).run(
                 engine, target, sid, baseline, mode, max_iterations=int(agent.get("max_iterations") or 25),
-                notes=(t.extra.get("notes") if t else None), band_weeks=weeks)
+                notes=(t.extra.get("notes") if t else None), band_weeks=weeks, comparison=comparison)
         except (Exception, SystemExit) as exc:  # noqa: BLE001 - an outage or a missing key must not lose the run: use the rules
             from dbtriage.awscred import note_from_error
 

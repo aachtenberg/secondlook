@@ -110,7 +110,8 @@ class FakeLLM:
                 if base and not base[1].startswith("none"):
                     return self._msg(calls=[("compare_snapshots", {"snapshot_id": cur, "baseline_id": base[1]})])
                 return self._msg(calls=[("get_report", {"snapshot_id": cur, "section": "load_profile"})])
-            if done_tools == 1:
+            held = done_tools == 2 and str(msgs[-1].get("content") or "").startswith("Held, not final")
+            if done_tools == 1 or held:  # submit, and once more after the check sheet, as a model that agrees with it
                 return self._msg(calls=[("submit_review", {
                     "findings": [{"severity": "medium", "kind": "other", "subject": "", "where": "fake finding", "summary": "Fake model saw the comparison",
                                   "impact": "None, this is a test.", "evidence": ["one tool call before submitting"], "fix": "Nothing to fix."}],

@@ -79,6 +79,10 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
             lines.append(f"   - **Impact:** {f['impact']}")
         for e in f.get("evidence", [])[:4]:
             lines.append(f"   - **Evidence:** {e}")
+        for m in f.get("measured", [])[:3]:  # what Second Look computed for the subject, beside the model's reading
+            lines.append(f"   - **Measured:** {m}")
+        if f.get("not_in_data"):  # numbers the model cited that no tool result showed
+            lines.append(f"   - **Not in the data:** {', '.join(f['not_in_data'])}")
         if f.get("fix"):
             lines.append(f"   - **Fix:** {f['fix']}")
         lines += proposal_lines(f.get("proposal"), indent="   ")

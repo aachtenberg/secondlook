@@ -279,6 +279,37 @@ The reviewer's tools are `get_report`, `get_raw_report` (pages through the AWR t
 `submit_review`. Reports are never pasted into the prompt; the model asks for what it needs, so the numbers stay
 exact.
 
+## Grounded in what was measured
+
+The model can still misread a tool. The classic case is a running total taken for a change. On Postgres and MySQL,
+`get_report` shows counters since the statistics were last reset, while `compare_snapshots` shows what happened in
+the window. A chunk with 2,127 index scans in all but 44 in the hour once came back as "idx_scan increased from 0
+to 2127", rated high. So a review is checked against the data before it is recorded:
+
+- The first `submit_review` with findings is held, not recorded. It comes back with a check sheet that sets each
+  finding's evidence beside what Second Look measured for its `subject`, using `grounding.py`. For a table, that is
+  the window's counts and rates, and the running totals at both ends, labelled as totals. For a statement, it is its
+  calls, time, per-call time and share of SQL time, now and in the reference window. Wait classes, parameters,
+  load metrics and sessions get the same treatment. The sheet also lists any number in the evidence that no tool
+  result showed, and gives one line on how busy the database was. The model corrects the review and submits once
+  more, which records it (`rechecked: true`). A run that ends first, on its budget or its iterations, keeps the held
+  review (`rechecked: false`).
+- Each recorded finding carries those lines as `measured`. The markdown shows them as **Measured** and the snapshot
+  page lists them under Evidence. The model cannot write this field, so the reader sees the measured numbers beside
+  the claim whatever the model did with them.
+
+Severity follows impact on the database, not the size of a change. `compare_snapshots` has a `load` block: the top
+SQL's time per second (1000 ms/s is one session busy all window), commits per second, and a sentence. Each statement
+carries `ms_per_s`, the database time it costs per second. A changed statement also carries `added_ms_per_s`, what
+its change added. The model is told that a finding is impacting when callers are affected now: a per-call time a
+request would notice, a large share of a busy database's time, or a resource near its limit. A change that costs the
+database almost nothing, such as a query doubling on an idle database, is an efficiency issue: low, or not a finding.
+
+The rules apply the same test. A statement finding (`sql_regressed`, `sql_new`, `sql_volume`, `sql_top`,
+`plan_change`) whose statement costs under 1 ms of database time per second (3.6 s an hour) and under 100 ms per
+call is capped at low. Its evidence and impact say it is an efficiency issue (`NEGLIGIBLE_MS_PER_S` and
+`NOTICEABLE_MS` in `compare.py`). A statement with no per-call time is left as it is, since its latency is unknown.
+
 ## The fix as a change proposal
 
 When a finding's fix is a concrete change, the finding also carries a `proposal`: the exact `statement` (a
