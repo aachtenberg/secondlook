@@ -214,8 +214,9 @@ def apply(ledger: dict, snapshot_id: str, captured_at: str | None, rules_finding
     # what is present this run, with the review's finding first where it matched (title and severity come from it).
     # A review finding without a kind was stored before kinds existed; it has no identity, so it is not presence
     # (otherwise every such finding would collapse into one phantom ("other", "") entry on a rebuild).
+    # A finding the judges disputed (dbtriage.judge) is not presence either: it is kept on the review, not tracked.
     present: dict[tuple[str, str], dict] = {}
-    for f in [f for f in review_findings if tracked(f)] + list(rules_findings or []):
+    for f in [f for f in review_findings if tracked(f) and not f.get("disputed")] + list(rules_findings or []):
         present.setdefault(identity(f), f)
 
     for ident, f in present.items():
@@ -265,8 +266,11 @@ def apply(ledger: dict, snapshot_id: str, captured_at: str | None, rules_finding
     reviewed = set()
     life = []
     for f in review_findings:
-        if not tracked(f):  # legacy finding: life stays parallel to the findings, but says nothing and never fires
-            life.append({"state": "untracked", "first_seen": None, "first_seen_at": None, "misses": 0, "returns": 0, "period_s": None, "tickets": {}})
+        if not tracked(f) or f.get("disputed"):  # legacy or disputed: life stays parallel to the findings, but never fires
+            if tracked(f):  # nor through still_open, when the rules raised the same thing
+                reviewed.add(identity(f))
+            life.append({"state": "disputed" if f.get("disputed") and tracked(f) else "untracked", "first_seen": None, "first_seen_at": None,
+                         "misses": 0, "returns": 0, "period_s": None, "tickets": {}})
             continue
         ident = identity(f)
         reviewed.add(ident)

@@ -181,6 +181,13 @@ def triage(cfg: Config, store: Storage, sid: str, baseline: str | None, mode: st
             result["agent_error"] = agent_error
         if comparison is None:
             result["summary"] = not_comparable or "First snapshot for this target; nothing to compare against yet."
+    if use_llm and (result.get("source") == "agent" or comparison is not None):  # a rules "first snapshot" has nothing to judge
+        from dbtriage.judge import judge_review
+
+        try:
+            judge_review(result, store, engine, target, sid, baseline, mode, comparison, cfg.agent, band_weeks=weeks)
+        except Exception as exc:  # noqa: BLE001 - the judges are a second opinion: never the reason a run is lost
+            print(f"judges failed ({type(exc).__name__}: {str(exc)[:300]}); the review stands unjudged", file=sys.stderr)
     result.update({"snapshot": sid, "baseline": baseline, "target": target, "engine": engine, "mode": mode,
                    "baseline_policy": how[0] if how else None, "baseline_reason": how[1] if how else None,
                    "ts": int(time.time()), "heuristics": (comparison or {}).get("findings", [])})

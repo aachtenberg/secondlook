@@ -140,10 +140,11 @@ def scheduled_problem(cfg: dict[str, Any]) -> str | None:
     return None
 
 
-def make_backend(cfg: dict[str, Any]) -> Backend:
+def make_backend(cfg: dict[str, Any], env: bool = True) -> Backend:
+    """env: DBTRIAGE_PROVIDER and DBTRIAGE_MODEL override the provider and model (the reviewer's); a judge passes False."""
     cfg = dict(cfg)
-    cfg["provider"] = os.environ.get("DBTRIAGE_PROVIDER") or cfg.get("provider", "anthropic")
-    cfg["model"] = os.environ.get("DBTRIAGE_MODEL") or cfg.get("model") or ("claude-opus-5-5" if cfg["provider"] in ANTHROPIC_PROVIDERS else None)
+    cfg["provider"] = (os.environ.get("DBTRIAGE_PROVIDER") if env else None) or cfg.get("provider", "anthropic")
+    cfg["model"] = (os.environ.get("DBTRIAGE_MODEL") if env else None) or cfg.get("model") or ("claude-opus-5-5" if cfg["provider"] in ANTHROPIC_PROVIDERS else None)
     if cfg["provider"] in ANTHROPIC_PROVIDERS:
         from dbtriage.llm.anthropic_backend import AnthropicBackend
 

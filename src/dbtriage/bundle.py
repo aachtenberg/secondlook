@@ -40,6 +40,7 @@ KNOWN = {
     "triage.json": "the review: findings with agreement marks and life, heuristics, model, token usage, tool-call count, delivery",
     "triage.md": "the review as delivered",
     "tools.json": "every tool call the model made, with its arguments and the first 2000 characters of each result",
+    "judges.json": "each judge's verdict on the review and its tool calls, when judges are set",
     "changes.json": "the deploys and changes read from the target's feed for the window",
     "awr.txt": "Oracle AWR report (literals masked)",
     "statspack.txt": "Oracle Statspack summary built by Second Look from the PERFSTAT tables (literals masked)",
@@ -48,7 +49,7 @@ KNOWN = {
 OWN = ("README.md", "checksums.txt")  # written by build(), never read from the store
 MARK_LABEL = {"both": "both", "model_only": "model only", "rules_only": "rules only"}
 LIFE_LABEL = {"new": "new", "still_open": "still open", "worse": "worse", "quiet": "quiet", "returned": "returned",
-              "recurring": "recurring", "gone": "gone", "untracked": "untracked"}
+              "recurring": "recurring", "gone": "gone", "untracked": "untracked", "disputed": "disputed"}
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)  # the zip epoch: the bundle's date is in its README, not in its members
 ZIP_SYSTEM = 3  # "Unix" in every member header whatever the exporting host, so Windows and Linux exports match
 

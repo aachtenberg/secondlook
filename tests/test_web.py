@@ -970,7 +970,7 @@ def test_files_max_tokens_and_fallback_models_on_the_cards(tmp_path, monkeypatch
     app = App(config(tmp_path), store(tmp_path), False, None, allow_edit=True)
     base = {**DEFAULTS, **app.seed.web}
     s = app.settings_page().decode()
-    assert 'name="files" value="triage.md, compare.json, summary.json, manifest.json, raw.json, tools.json, changes.json, awr.txt, addm.txt, statspack.txt"' in s
+    assert 'name="files" value="triage.md, compare.json, summary.json, manifest.json, raw.json, tools.json, judges.json, changes.json, awr.txt, addm.txt, statspack.txt"' in s
     assert 'name="max_tokens" type="number" min="1" step="1000" value=""' in s and 'name="fallback_models" value=""' in s and "$files" not in s
     app.settings.put_web({"files": "triage.md, awr.txt"}, base=base); app.reload()
     assert app.web["files"] == ["triage.md", "awr.txt"] and app.snapshot_detail(SID)["files"] == ["triage.md", "awr.txt"]

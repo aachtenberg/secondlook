@@ -62,6 +62,10 @@ document.addEventListener('change', function (e) {  // delegated: schedule rows 
 <label>Base URL <input name="scheduled_base_url" value="$a_scheduled_base_url" placeholder="http://ollama.lan:11434/v1"></label>
 <label>API key env var <input name="scheduled_api_key_env" value="$a_scheduled_api_key_env" placeholder="the name, never the key"></label>
 </fieldset>
+<fieldset class="chan"><legend>Judges (optional: other models that check every review)</legend>
+<label>Judges <textarea name="judges" rows="3" placeholder="openrouter anthropic/claude-sonnet-5.5&#10;openrouter z-ai/glm-5.3" autocomplete="off">$a_judges</textarea><small class="mut">One per line: provider, model, then a base URL or key variable name if it needs one. Blank: no judges.</small></label>
+<label>Quorum <input name="quorum" type="number" min="0" value="$a_quorum" placeholder="blank: a majority"><small class="mut">Judges that must agree for a finding to stand. One that falls short is kept, marked disputed, and does not alert.</small></label>
+</fieldset>
 <div class="row">$agent_buttons</div>
 </form>
 <p class="mut" id="aws-status">$aws_status</p>

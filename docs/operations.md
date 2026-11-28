@@ -310,6 +310,38 @@ The rules apply the same test. A statement finding (`sql_regressed`, `sql_new`, 
 call is capped at low. Its evidence and impact say it is an efficiency issue (`NEGLIGIBLE_MS_PER_S` and
 `NOTICEABLE_MS` in `compare.py`). A statement with no per-call time is left as it is, since its latency is unknown.
 
+## Judges
+
+A second opinion, off unless you list judges. These are other models, ideally stronger than the reviewer, that check
+every review before it is stored. That includes the rules' reviews and clean ones, so a judge can catch a missed
+problem as well as an unsupported finding. Set them in `[agent]` or under *Judges* on the Agent card, one per line:
+
+```toml
+[agent]
+judges = [{ provider = "openrouter", model = "anthropic/claude-sonnet-5.5" },
+          { provider = "openrouter", model = "z-ai/glm-5.3" }]
+quorum = 2   # judges that must agree for a finding to stand; unset or 0: a majority
+```
+
+Each judge names its own provider, model and, if needed, `base_url` and `api_key_env`. Nothing of the main provider
+carries over except `token_budget` and `max_iterations`, and `DBTRIAGE_PROVIDER` / `DBTRIAGE_MODEL` never apply
+to a judge. The judges run at the same time, each with the reviewer's read-only tools. Each gets the review, what
+Second Look measured for each finding, how busy the database was, and the rules' findings. Each returns `agree` or
+`dispute` per finding with a severity and a reason, plus up to three things the review missed (`judge.py`).
+
+- **A finding short of the quorum** is kept, marked **disputed** with the judges' reasons, and does not alert. The
+  ledger does not track it, delivery does not fire on it, and the review's severity is that of what still stands. A
+  review whose only finding is disputed is `info`.
+- **A miss named by the quorum** (the same kind and subject) is added as a finding, marked *added by the judges*, at
+  the most cautious of their severities. Its numbers are checked like the reviewer's. A miss short of the quorum is
+  listed under *Judges also noted* and does not alert.
+- **A judge that fails** is recorded with its error. When fewer than `quorum` judges answer, the review stands as
+  written and says it was not judged. Judges never cost a run its review.
+
+Each judge's tool calls are stored as `judges.json` beside `tools.json`. Every review costs one more model loop per
+judge, so a frontier judge on an hourly schedule is the expensive part of a setup: see
+[Keeping the bill down](models.md#keeping-the-bill-down).
+
 ## The fix as a change proposal
 
 When a finding's fix is a concrete change, the finding also carries a `proposal`: the exact `statement` (a

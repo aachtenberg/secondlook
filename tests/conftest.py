@@ -103,6 +103,16 @@ class FakeLLM:
         done_tools = sum(1 for m in msgs if m["role"] == "tool")
         if not tools:
             return self._msg("OK")
+        if "submit_verdict" in tools:  # a judge: read the comparison, then dispute the first finding, agree with the rest
+            cur = re.search(r"Current snapshot: (\S+)", text)[1]
+            base = re.search(r"Baseline snapshot: (\S+)", text)[1]
+            if done_tools == 0 and base != "none":
+                return self._msg(calls=[("compare_snapshots", {"snapshot_id": cur, "baseline_id": base})])
+            n = len(re.findall(r"^Finding \d+ ·", text, re.M))
+            return self._msg(calls=[("submit_verdict", {
+                "verdicts": [{"finding": i, "verdict": "dispute" if i == 1 else "agree", "severity": "low",
+                              "reason": "Fake judge: the evidence does not hold." if i == 1 else "Fake judge: it holds."} for i in range(1, n + 1)],
+                "missed": [], "note": "Fake judge checked the review."})])
         if "submit_review" in tools:  # a review
             cur = re.search(r"Current snapshot: (\S+)", text)[1]
             base = re.search(r"Baseline snapshot: (\S+)", text)
