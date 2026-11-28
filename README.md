@@ -20,7 +20,7 @@ looks: Slack, Teams, email, a ticket, or the built-in web view.
    a jump in a wait class, blocking, stale statistics.
 4. **Review.** An AI model reads the comparison and writes up the findings, most severe first, each with its
    impact, the evidence and a fix. With no model configured, the rules write the review instead, so you always
-   get a result.
+   get a result. A model's review is [checked](#how-a-review-is-checked) before it is stored.
 5. **Deliver.** The review goes to the channels you picked. Quiet results can stay quiet.
 
 ## What the reviewer can see
@@ -33,6 +33,20 @@ stored snapshot, through a few read-only tools, and it is told to take every num
 You can also **discuss a review** with the model in the web view: ask why a finding matters or what a query is
 doing. Those answers use the same read-only tools. If a question needs the live database, the model tells you
 what to run, and the discussion never feeds into the next review.
+
+## How a review is checked
+
+A model can misread a number, for example by taking a running total for a change. So a review is checked before it
+is stored:
+
+- **Against the data.** Each finding the model writes is set beside what Second Look measured for it, and the
+  model corrects the review once. The measured numbers stay next to the finding, so you can check the claim yourself.
+- **By other models, if you want.** List one or more *judges*, ideally stronger models than the reviewer. Each
+  checks the review with the same read-only tools. A finding they don't agree with stays in the review, marked
+  **disputed** with their reasons, and doesn't alert. A problem they agree was missed is added.
+
+Details: [Grounded in what was measured](docs/operations.md#grounded-in-what-was-measured) and
+[Judges](docs/operations.md#judges).
 
 ## What a review looks like
 
@@ -103,7 +117,7 @@ wait in the spool, settings run on the last good copy, and `/health` reports the
 | [Storage](docs/storage.md) | every storage option, sharing settings, moving data, outage behaviour in detail |
 | [Web view](docs/web.md) | pages, branding, who can see it, the JSON API, discussing a review, scheduling |
 | [MCP server](docs/mcp.md) | let Claude Code, Claude Desktop or another MCP client read the stored reviews (off by default) |
-| [Running it](docs/operations.md) | all commands, keeping the web view running, triggers from cron, alerts and clouds, delivery channels, safety rules, code layout, testing, what's next |
+| [Running it](docs/operations.md) | all commands, keeping the web view running, triggers from cron, alerts and clouds, delivery channels, how reviews are checked, judges, safety rules, code layout, testing, what's next |
 
 ## Safety in one paragraph
 
