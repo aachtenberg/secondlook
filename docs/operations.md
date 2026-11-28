@@ -215,6 +215,7 @@ finding, what its life is:
 | **returned** | back after being absent, or after being reported gone within the last seven days; delivery fires, and an existing ticket gets a comment instead of a new issue |
 | **recurring** | returned at about the same interval as last time: the nightly batch, the Monday job. Shown with "about every 24h"; nothing is posted unless it is worse |
 | **gone** | absent for `gone_after_runs` times its own period, or that many runs when it has no period yet (default 3); said once, its ticket told, then kept as a tombstone for seven days |
+| **disputed** | too few [judges](#judges) agreed it holds; kept on the review with their reasons, not tracked, and never alerts |
 
 Two findings are the same finding when they share a `kind` and a `subject` (the sql_id, table, wait class or
 parameter named), whatever the wording. Presence comes from the rules, which run on every snapshot, so the model
@@ -312,34 +313,57 @@ call is capped at low. Its evidence and impact say it is an efficiency issue (`N
 
 ## Judges
 
-A second opinion, off unless you list judges. These are other models, ideally stronger than the reviewer, that check
-every review before it is stored. That includes the rules' reviews and clean ones, so a judge can catch a missed
-problem as well as an unsupported finding. Set them in `[agent]` or under *Judges* on the Agent card, one per line:
+A second opinion from other models, off unless you list judges. The reviewer can be a small local model; the judges
+are usually stronger ones. They check every review before it is stored: the model's, the rules', and clean ones, so
+a judge can catch a missed problem as well as a wrong one.
+
+### Turning them on
+
+List them under *Judges* on the Agent card, one per line: provider, model, then a base URL or key variable if it
+needs one. Or set them in `[agent]`:
 
 ```toml
 [agent]
-judges = [{ provider = "openrouter", model = "anthropic/claude-sonnet-5.5" },
-          { provider = "openrouter", model = "z-ai/glm-5.3" }]
-quorum = 2   # judges that must agree for a finding to stand; unset or 0: a majority
+judges = [{ provider = "openrouter", model = "z-ai/glm-5.3" }]
+# quorum = 2   # how many judges must agree for a finding to stand; unset or 0: a majority
 ```
 
-Each judge names its own provider, model and, if needed, `base_url` and `api_key_env`. Nothing of the main provider
-carries over except `token_budget`, `max_iterations` and `max_tokens`, and `DBTRIAGE_PROVIDER` / `DBTRIAGE_MODEL` never apply
-to a judge. The judges run at the same time, each with the reviewer's read-only tools. Each gets the review, what
-Second Look measured for each finding, how busy the database was, and the rules' findings. Each returns `agree` or
-`dispute` per finding with a severity and a reason, plus up to three things the review missed (`judge.py`).
+A majority of one judge is 1, of two is 2, of three is 2.
 
-- **A finding short of the quorum** is kept, marked **disputed** with the judges' reasons, and does not alert. The
-  ledger does not track it, delivery does not fire on it, and the review's severity is that of what still stands. A
-  review whose only finding is disputed is `info`.
-- **A miss named by the quorum** (the same kind and subject) is added as a finding, marked *added by the judges*, at
-  the most cautious of their severities. Its numbers are checked like the reviewer's. A miss short of the quorum is
-  listed under *Judges also noted* and does not alert.
-- **A judge that fails** is recorded with its error. When fewer than `quorum` judges answer, the review stands as
-  written and says it was not judged. Judges never cost a run its review.
+Each judge names its own provider, model and, if needed, `base_url` and `api_key_env`. Only the limits carry over
+from the main provider (`token_budget`, `max_iterations`, `max_tokens`), unless the judge sets its own.
+`DBTRIAGE_PROVIDER` and `DBTRIAGE_MODEL` never apply to a judge, and a judge cannot use `api_key_cmd`. In
+`targets.toml` a judge can also take `region`, `aws_profile`, `project_id`, `resource` and `effort`; the Agent card
+keeps them when you save.
 
-Each judge's tool calls are stored as `judges.json` beside `tools.json`. Every review costs one more model loop per
-judge, so a frontier judge on an hourly schedule is the expensive part of a setup: see
+### What a judge does
+
+Each judge gets the review, what Second Look measured for each finding, how busy the database was, and the rules'
+findings. It has the reviewer's read-only tools, so it can look for itself. For each finding it answers *agree* or
+*dispute*, with a severity and a reason, and it can name up to three problems the review missed. The judges run at
+the same time (`judge.py`).
+
+### What happens to the review
+
+| Case | Result |
+|---|---|
+| Enough judges agree with a finding | It stands. A judge who disagrees is shown under it as a dissent. |
+| Too few agree | The finding stays, marked **disputed** with the judges' reasons. It doesn't alert and the ledger doesn't track it. The review's severity comes from what still stands, so a review whose only finding is disputed becomes `info`. |
+| Enough judges name the same miss (same kind and subject) | It is added as a finding, marked *added by the judges*, at the most cautious of their severities. Its numbers are checked like the reviewer's. |
+| Too few name a miss | It is listed under *Judges also noted*, with no alert. |
+| A judge fails, or too few answer | The review stands as written and says it was not judged. Judges never cost a run its review. |
+
+The review says who judged it and what came of it, for example *Judged by openrouter:z-ai/glm-5.3: quorum 1, 1
+disputed.* Each judge's tool calls are stored as `judges.json` beside `tools.json`.
+
+In the lab, a small scheduled model rated a TimescaleDB chunk high for "idx_scan increased from 0 to 2127". Sonnet
+5.5 and GLM 5.3 both disputed it: 2,127 was the running total, and the hour added 44 scans. The review dropped to
+`info` and nothing alerted.
+
+### Cost
+
+Each judge adds about one review's worth of tokens to every run. In the lab, judging one Postgres review took Sonnet
+5.5 about 41k tokens and 7 s, and GLM 5.3 about 83k tokens and 90 s. Start with one judge: see
 [Keeping the bill down](models.md#keeping-the-bill-down).
 
 ## The fix as a change proposal
@@ -373,21 +397,33 @@ src/dbtriage/
   collectors/     base.py (the shared snapshot shape), postgres.py, oracle.py, mysql.py (MySQL and MariaDB), sqlserver.py
   dbsnap.py       opt-in snapshots on the database (an AWR or a Statspack snapshot), and the entry point for more
   storage.py      disk, S3, Azure Blob and Postgres stores, and the outage spool
+  locks.py        one lock per database in a process, shared by the run and the store
   envfile.py      reading .env and noticing edits
+  egress.py       the corporate proxy and CA bundle for every HTTPS client
+  awscred.py, cloudauth.py   cloud credentials: AWS keys and roles; Gemini and Azure OpenAI without a pasted key
   redact.py       masking values in SQL and report text
+  sqlnorm.py      a statement's shape without its literals, so the same SQL matches across replicas
   pgstore.py      the Postgres connection used by storage and settings
+  changes.py, inbox.py   the change feed, and the webhook inbox a pipeline posts deploys to
   baseline.py     picking the baseline
+  band.py         the usual band for this weekday and hour
   compare.py      periods, differences and the rules
   agent.py        the AI reviewer and its tools, and the rules-only review
+  grounding.py    what Second Look measured for each finding, to check a review against
+  judge.py        judges: other models that check a review before it is stored
   llm/            one module per model provider family
-  chat.py         discussing a review
+  chat.py, chat_actions.py   discussing a review, and what the discussion may do as the person asking
   scheduler.py    schedules
   report.py       turning a review into text
   findings.py     what makes two findings the same finding (kind and subject)
-  ledger.py       the per-database ledger of open findings: new, still open, worse, quiet, gone
+  ledger.py       the per-database ledger of open findings: new, still open, worse, quiet, gone, disputed
   deliver.py      the delivery channels, and the finding-level gate
+  fleet.py        the fleet digest
+  bundle.py       one snapshot as a zip for a postmortem or an auditor
   triggers.py     webhook receiver and Lambda handler
   mcp_server.py   the MCP server (off unless [mcp] enabled = true)
+  access.py       who opened the web view, when a reverse proxy says so
+  diagnosis.py    the diagnosis card on a database's page
   web.py, charts.py, templates/   the web view
 compose/          lab database setup (users, grants, sample data)
 examples/         trigger wiring, branding, the Azure and Google Cloud budget caps

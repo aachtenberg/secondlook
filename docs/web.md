@@ -26,6 +26,9 @@ It uses only the Python standard library and loads no outside scripts or fonts, 
   link that exports the snapshot as one zip for a postmortem or an auditor (operations.md, "The record you can hand someone").
   A finding with a change proposal shows it under the fix: the statement with a **Copy** button, its undo, who
   runs it and when, and links to the snapshots that justify it. Nothing on the page applies a change.
+  With [judges](operations.md#judges) set, a line under the summary says who judged the review. A disputed finding
+  has a dashed border, a **disputed** mark and each judge's reason; one the judges added is marked *added by the
+  judges*.
 - **Compare.** Any two snapshots of a database side by side, with the parameters that changed between them in
   their own table (each one is also a low `setting_changed` finding, and its name is written into the evidence of
   any SQL regression, plan change or wait shift in the same window).
@@ -94,6 +97,7 @@ of an environment variable, and the value is read from the process at run time.
 | `[agent]` | `max_tokens` | Settings › Agent: Max tokens per model call |
 | `[agent]` | `fallback_models` | Settings › Agent: Fallback models (comma-separated; `none` turns the chain off) |
 | `[agent]` | `scheduled_provider`, `scheduled_model`, `scheduled_base_url`, `scheduled_api_key_env` | Settings › Agent › Scheduled runs |
+| `[agent]` | `judges`, `quorum` | Settings › Agent › Judges: one per line (provider, model, then a base URL or key variable), and Quorum. A judge's region, profile, project, resource, effort and limits are targets.toml only; a save keeps them |
 | `[agent.extra]` | any | targets.toml only: free-form request fields passed to the provider unchanged |
 | `[delivery]` | `channels` | Settings › Delivery: Enabled channels |
 | `[delivery]` | `min_severity` | Settings › Delivery: Below this severity only stdout fires |
