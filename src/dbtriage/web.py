@@ -63,16 +63,17 @@ from dbtriage.config import Config, Target, load_config, top_n_of
 from dbtriage.findings import SEVERITY_RANK, dropped, rules_dropped
 from dbtriage import diagnosis, ledger
 from dbtriage.ledger import describe_period
+from dbtriage.report import judges_line
 from dbtriage.storage import StorageUnavailable
 from dbtriage.settings import AGENT_FIELDS, AGENT_PROVIDERS, CHANNEL_FIELDS, ENGINES, SCHEDULE_FIELDS, SEVERITIES, WEB_FIELDS, Settings, mask_dsn, probe
-from dbtriage.settings import CHANGES_FIELDS, CHANGES_NUMBERS, SettingsUnavailable, agent_value, changes_value
+from dbtriage.settings import CHANGES_FIELDS, CHANGES_NUMBERS, SettingsUnavailable, agent_value, changes_value, judges_text
 from dbtriage.settings import ORACLE_SOURCES, STATSPACK_LEVELS, TOP_SQL_SOURCES
 from dbtriage.storage import Storage, StorageUnavailable, describe as describe_store, key_ok
 
 DEFAULTS = {
     "title": "dbtriage", "brand": "dbtriage", "logo": None, "accent": "#3dd68c", "theme": "auto",
     "refresh_seconds": 30, "page_size": 50, "footer": "", "custom_css": None, "templates_dir": None,
-    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "changes.json", "awr.txt", "addm.txt", "statspack.txt"],
+    "files": ["triage.md", "compare.json", "summary.json", "manifest.json", "raw.json", "tools.json", "judges.json", "changes.json", "awr.txt", "addm.txt", "statspack.txt"],
     "severity_colors": {"high": "#c42f2f", "medium": "#a8540a", "low": "#8a6a00", "info": "#17804a"},
 }
 
@@ -232,6 +233,7 @@ button.ai,.btn.ai{background:var(--ai);border-color:transparent;color:#fff;font-
 .proposal dl{margin:0}.proposal .ids{display:flex;flex-wrap:wrap;gap:4px 10px}.proposal p{margin:0;font-size:12px}
 .checked{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--mut)}.checked .lbl{font-weight:500;color:var(--fg2)}
 .mark{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line2);color:var(--fg2);white-space:nowrap}.mark.both{border-color:var(--info);color:var(--info)}.mark.model_only{border-color:var(--ai);color:var(--ai)}.mark.rules_only{border-color:var(--medium);color:var(--medium)}
+.mark.disputed{border-color:var(--high);color:var(--high)}.mark.added{border-color:var(--ai);color:var(--ai)}.flist>li.disputed{border-style:dashed}.judged{font-size:12px;color:var(--mut)}
 .dropped{font-size:13px;color:var(--fg2);padding-top:10px;border-top:1px solid var(--line)}.dropped .lbl{font-weight:500;color:var(--fg2)}.dropped>.lbl{display:block;margin-bottom:6px}.dropped .agree{font-size:12px;color:var(--mut)}
 .dropped ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}.dropped li{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.dropped details{font-size:12px;color:var(--mut);margin-top:6px}.dropped summary{cursor:pointer}
 .life{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mut)}.life .state{padding:2px 8px;border-radius:999px;border:1px solid var(--line2);color:var(--fg2);font-weight:500}
@@ -577,6 +579,32 @@ def life_badge(life: dict | None) -> str:
         else:
             bits.append(f"<code class='ticket' title='{html.escape(name)} ticket'>{key_}</code>")
     return "<span class='life'>" + "".join(bits) + "</span>"
+
+
+def judges_html(f: dict, link_ids) -> str:
+    """Each judge's verdict on a finding (dbtriage.judge), as a definition row; empty for an unjudged review."""
+    votes = f.get("judges") or []
+    if not votes and not f.get("added_by"):
+        return ""
+    rows = []
+    if f.get("added_by"):
+        rows.append(f"<li>added by {html.escape(', '.join(f['added_by']))}: the review left it out</li>")
+    for v in votes:
+        rows.append(f"<li><b>{html.escape(str(v.get('judge', '')))}</b> {html.escape(str(v.get('verdict', '')))}s"
+                    f" ({html.escape(str(v.get('severity', '')))}): {link_ids(str(v.get('reason', '')))}</li>")
+    return f"<dt title='Other models that checked the review against the same data'>Judges</dt><dd><ul>{''.join(rows)}</ul></dd>"
+
+
+def judges_noted_html(tr: dict, link_ids) -> str:
+    """What a judge said the review missed that fell short of the quorum: shown, never alerted on."""
+    noted = (tr.get("judges") or {}).get("noted") or []
+    if not noted:
+        return ""
+    items = "".join(f"<li>{sev(n.get('severity'))}<code class='where'>{html.escape(f'{n.get('kind') or ''} {n.get('subject') or ''}'.strip())}</code>"
+                    f"<span>{link_ids(str(n.get('summary') or ''))}</span><span class='judged'>{html.escape(', '.join(n.get('judges') or []))}</span></li>"
+                    for n in noted)
+    return (f"<section class='stillopen' aria-labelledby='noted-h'><h3 id='noted-h'>Judges also noted (short of the quorum, no alert)</h3>"
+            f"<ul>{items}</ul></section>")
 
 
 def still_open_html(tr: dict) -> str:
@@ -1160,6 +1188,8 @@ class App:
             body = []
             if tr.get("summary"):
                 body.append(f"<p>{link_ids(tr['summary'])}</p>")
+            if judged := judges_line(tr):
+                body.append(f"<p class='judged'>{html.escape(judged)}</p>")
             if "findings" in tr:
                 items, marks = [], agreement_marks(tr)
                 lifes = tr.get("life") if isinstance(tr.get("life"), list) else []  # reviews stored before the ledger have none
@@ -1176,13 +1206,17 @@ class App:
                           + (f"<dt title='Computed by Second Look from the snapshots, not written by the model'>Measured</dt><dd><ul>{ms}</ul></dd>" if ms else "")
                           + (f"<dt title='Numbers in the evidence that no tool result showed'>Not in the data</dt><dd>{html.escape(', '.join(map(str, f['not_in_data'])))}</dd>"
                              if f.get("not_in_data") else "")
+                          + judges_html(f, link_ids)
                           + (f"<dt>Fix</dt><dd>{link_ids(f['fix'])}</dd>" if f.get("fix") else "")
                           + proposal_html(f.get("proposal"), i, link_ids))
-                    items.append(f"<li><div class='fh'><span class='n'>{i}</span>{sev(f.get('severity'))}{marks.get(i - 1, '')}"
+                    jmark = ("<span class='mark disputed' title='Short of the judges&#39; quorum: kept, not alerted on'>disputed</span>" if f.get("disputed") else "") \
+                        + ("<span class='mark added' title='The review left it out; the judges added it'>added by the judges</span>" if f.get("added_by") else "")
+                    items.append(f"<li{' class=disputed' if f.get('disputed') else ''}><div class='fh'><span class='n'>{i}</span>{sev(f.get('severity'))}{marks.get(i - 1, '')}{jmark}"
                                  f"<code class='where'>{link_ids(f.get('where', ''))}</code><span class='fs'>{link_ids(f.get('summary', ''))}</span>{badge}{disc}</div>"
                                  + (f"<dl>{dl}</dl>" if dl else "") + "</li>")
                 if items:
                     body.append(f"<ol class='flist'>{''.join(items)}</ol>")
+                body.append(judges_noted_html(tr, link_ids))  # what a judge said was missed, short of the quorum
                 body.append(still_open_html(tr))  # empty for a review without a ledger
                 body.append(dropped_html(tr))  # the rules findings the model left out; its own block (see dropped_html)
             else:  # older stores: only the rendered Markdown
@@ -1627,6 +1661,8 @@ class App:
         fields["a_token_budget"] = llm.token_budget(a)  # 0 is a real value here: no limit
         chain = a.get("fallback_models")  # a list in the file; [] (off) shows as the word the card accepts for it
         fields["a_fallback_models"] = html.escape("none" if chain == [] else ", ".join(m if isinstance(m, str) else m.get("model", "") for m in chain or []))
+        fields["a_judges"] = html.escape(judges_text(a.get("judges")))
+        fields["a_quorum"] = int(a["quorum"]) if str(a.get("quorum") or "").isdigit() and int(a["quorum"]) else ""
         return {**fields, "provider_opts": opt(a.get("provider", "anthropic"), AGENT_PROVIDERS),
                 "sched_provider_opts": opt(a.get("scheduled_provider") or "", ("", *AGENT_PROVIDERS)).replace(">(default)<", ">(same as above)<"),
                 "effort_opts": opt(a.get("effort", "high") or "", ("", "low", "medium", "high")),

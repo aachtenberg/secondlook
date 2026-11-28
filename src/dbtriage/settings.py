@@ -54,7 +54,8 @@ CHANGES_REQUIRED = {"file": "path", "github": "repo", "gitlab": "project"}
 CHANGES_NUMBERS = {"lookback_hours": (1, 8760), "correlate_minutes": (0, 1440)}
 WEB_FIELDS = ("title", "brand", "logo", "accent", "theme", "refresh_seconds", "page_size", "footer", "files")
 AGENT_FIELDS = ("provider", "model", "region", "aws_profile", "project_id", "resource", "base_url", "api_key_env", "effort", "max_tokens", "max_iterations",
-                "token_budget", "fallback_models", "scheduled_provider", "scheduled_model", "scheduled_base_url", "scheduled_api_key_env")
+                "token_budget", "fallback_models", "scheduled_provider", "scheduled_model", "scheduled_base_url", "scheduled_api_key_env",
+                "judges", "quorum")
 # api_key_cmd runs a command on the server, so it can only be set in targets.toml, never from the web view or its API
 AGENT_PROVIDERS = ("anthropic", "bedrock", "vertex", "foundry", "bedrock-converse",
                    "openai", "openrouter", "groq", "ollama", "ollama-cloud", "vllm", "azure-openai", "vertex-gemini")
@@ -449,6 +450,13 @@ class Settings:
                         raise ValueError
                 except (TypeError, ValueError):  # an API body can carry anything: refuse it, never crash
                     problems.append(f"{k}: a whole number, at least {AGENT_NUMBERS[k]}"); continue
+            if k == "judges":
+                v, bad = judges_value(v)
+                if bad:
+                    problems.append(bad); continue
+                v = judges_kept(v, agent.get("judges", file.get("judges")))  # what the card cannot show survives a save
+                if judge_rows(v) == judge_rows(file.get("judges")):
+                    v = file.get("judges")  # the file's list, unchanged: it keeps feeding through
             if k == "fallback_models":
                 if not isinstance(v, (str, list)):
                     problems.append("fallback_models: model ids separated by commas"); continue
@@ -654,8 +662,8 @@ class Settings:
 # ---------------------------------------------------------------- what the overlay stores
 AGENT_DEFAULTS = {"provider": "anthropic", "effort": "high", "max_iterations": 25,  # what the Agent card shows unset
                   "token_budget": DEFAULT_TOKEN_BUDGET}
-AGENT_NUMBERS = {"max_tokens": 1, "max_iterations": 1, "token_budget": 0}  # smallest allowed; a token_budget of 0 = no limit
-AGENT_REQUIRED = ("provider", "model", "resource", "max_tokens", "max_iterations", "token_budget", "fallback_models")  # blank = use targets.toml's
+AGENT_NUMBERS = {"max_tokens": 1, "max_iterations": 1, "token_budget": 0, "quorum": 0}  # smallest allowed; token_budget 0 = no limit, quorum 0 = a majority
+AGENT_REQUIRED = ("provider", "model", "resource", "max_tokens", "max_iterations", "token_budget", "fallback_models", "quorum")  # blank = use targets.toml's
 
 
 def _empty(v) -> bool:
@@ -753,6 +761,67 @@ def agent_value(key: str, v):
             return []
         return list_value(v)
     return v
+
+
+JUDGE_SHOWN = ("provider", "model", "base_url", "api_key_env")  # what a judge's line on the card holds
+
+
+def judges_value(v) -> tuple[list[dict], str]:
+    """[agent] judges as stored, and a problem when there is one. The card posts one judge per line, `provider model`,
+    optionally followed by a base URL and the name of its key variable (`openrouter z-ai/glm-5.3`, `ollama gpt-oss:20b
+    http://llm.lan:11434/v1`); the API may send that text or a list of {provider, model, base_url, api_key_env}. Only
+    those four fields are kept, so the web view cannot give a judge api_key_cmd. Blank means none."""
+    rows: list[dict] = []
+    if isinstance(v, str):
+        for line in v.splitlines():
+            parts = line.split()
+            if not parts or parts[0].startswith("#"):
+                continue
+            row = {"provider": parts[0], "model": parts[1] if len(parts) > 1 else ""}
+            for extra in parts[2:]:
+                row["base_url" if "://" in extra else "api_key_env"] = extra
+            rows.append(row)
+    elif isinstance(v, list):
+        rows = [{k: str(j[k]) for k in JUDGE_SHOWN if isinstance(j, dict) and j.get(k)} for j in v]
+    else:
+        return [], "judges: one judge per line, provider then model"
+    for n, j in enumerate(rows, 1):
+        if j.get("provider") not in AGENT_PROVIDERS:
+            return [], f"judges, line {n}: the provider is one of {', '.join(AGENT_PROVIDERS)}"
+        if not j.get("model"):
+            return [], f"judges, line {n}: give the model after the provider"
+        if j.get("api_key_env") and not ENV_NAME.match(j["api_key_env"]):
+            return [], f"judges, line {n}: {j['api_key_env']!r} is not an environment variable name (a URL needs its ://)"
+    return rows, ""
+
+
+
+
+def judge_rows(js) -> list[dict]:
+    """Judges as dbtriage.judge reads them: dicts with only the fields a judge may carry (never api_key_cmd)."""
+    from dbtriage.judge import JUDGE_KEYS
+
+    return [{k: j[k] for k in JUDGE_KEYS if j.get(k) not in (None, "")} for j in js or [] if isinstance(j, dict)]
+
+
+def judges_kept(rows: list[dict], current) -> list[dict]:
+    """The posted judges, each with the fields of the current judge it matches on what the card shows (a region, its
+    own token_budget, set in targets.toml), so saving the card does not strip them."""
+    shown = lambda j: tuple(str(j.get(k) or "") for k in JUDGE_SHOWN)  # noqa: E731
+    pool = judge_rows(current)
+    out = []
+    for r in rows:
+        match = next((c for c in pool if shown(c) == shown(r)), None)
+        if match is not None:
+            pool.remove(match)  # two identical lines keep one stored row each
+        out.append(match if match is not None else r)
+    return out
+
+
+def judges_text(v) -> str:
+    """[agent] judges as the card shows them: one line per judge."""
+    return "\n".join(" ".join(str(j[k]) for k in JUDGE_SHOWN if j.get(k))
+                     for j in v or [] if isinstance(j, dict))
 
 
 def _channel_value(kind: str, v, default):

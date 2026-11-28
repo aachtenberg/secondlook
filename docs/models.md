@@ -111,6 +111,10 @@ measured for each finding, and the model checks against it and submits again (se
 [Grounded in what was measured](operations.md#grounded-in-what-was-measured)). On a run that has used its budget,
 the first submission stands.
 
+**Judges** ([Judges](operations.md#judges)) check every review, so each one adds a review's worth of tokens per
+judge. That cost recurs on every scheduled run. A frontier judge on an hourly schedule across a dozen databases is
+hundreds of reviews a day. Start with one judge and a quorum of 1.
+
 Scheduled snapshots can use a **cheaper or local model** than the one you review incidents with. Set
 `scheduled_provider` and `scheduled_model` in `[agent]` (or under *Scheduled runs* on the Settings page), plus
 `scheduled_base_url` and `scheduled_api_key_env` if that provider needs them. Only runs the schedule starts use

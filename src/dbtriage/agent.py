@@ -339,8 +339,9 @@ class TriageAgent:
 
         return [get_report, get_raw_report, compare_snapshots, get_sql_history, get_recent_changes, get_operator_answers, submit_review]
 
-    def tool_specs(self, engine: str, target: str) -> list[ToolSpec]:
-        """Provider-neutral tool descriptions for any backend ($ref-free: not every provider resolves $defs).
+    def tool_specs(self, engine: str, target: str, tools: list | None = None) -> list[ToolSpec]:
+        """Provider-neutral tool descriptions for any backend ($ref-free: not every provider resolves $defs). `tools`:
+        the beta tools to describe, the reviewer's own by default (a judge swaps submit_review for its verdict).
 
         Each tool is wrapped so the call lands in self.tool_log: the backends only ever call ToolSpec.fn, so recording
         here keeps the transcript out of all three of them. The chat and MCP server build specs on a throwaway agent,
@@ -369,7 +370,7 @@ class TriageAgent:
             return fn
 
         specs = []
-        for t in self._tools(engine, target):
+        for t in tools if tools is not None else self._tools(engine, target):
             d = t.to_dict()
             specs.append(ToolSpec(name=d["name"], description=d["description"], input_schema=_inline_refs(d["input_schema"]),
                                   fn=recorded(d["name"], t.call)))

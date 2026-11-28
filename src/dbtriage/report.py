@@ -54,7 +54,56 @@ def count_line(findings: list[dict]) -> str:
         return "✅ **No significant change.**"
     counts = {s: sum(1 for f in findings if f["severity"] == s) for s in ("high", "medium", "low")}
     parts = ", ".join(f"{n} {s}" for s, n in counts.items() if n)
-    return f"**{len(findings)} finding{'s' if len(findings) != 1 else ''}**: {parts}"
+    disputed = sum(1 for f in findings if f.get("disputed"))
+    return f"**{len(findings)} finding{'s' if len(findings) != 1 else ''}**: {parts}" + (f" ({disputed} disputed)" if disputed else "")
+
+
+def judge_lines(f: dict, indent: str = "   ") -> list[str]:
+    """What the judges said about one finding (dbtriage.judge): who added it, why it is disputed or who dissents,
+    and the severities of judges who agree with it at another level. Empty for an unjudged review."""
+    votes = f.get("judges") or []
+    out = []
+    if f.get("added_by"):
+        out.append(f"{indent}- **Added by the judges:** {', '.join(f['added_by'])}; the review left it out.")
+    against = [v for v in votes if v.get("verdict") == "dispute"]
+    reasons = [f"{indent}  - {v['judge']}: {v.get('reason', '')}" for v in against]  # one line per judge
+    if f.get("disputed"):
+        out += [f"{indent}- **Disputed** (no alert):", *reasons]
+    elif against:
+        out += [f"{indent}- **Dissent:**", *reasons]
+    if other := [v for v in votes if v.get("verdict") == "agree" and v.get("severity") != f.get("severity")]:
+        out.append(f"{indent}- **Judges' severity:** " + "; ".join(f"{v['judge']} would rate it {v['severity']}" for v in other))
+    return out
+
+
+def judges_line(review: dict) -> str:
+    """One line for the markdown and the page: who judged and what came of it, or why the review was not judged."""
+    j = review.get("judges") or {}
+    if not j.get("judges"):
+        return ""
+    names = ", ".join(x["judge"] + (" (failed)" if x.get("error") else "") for x in j["judges"])
+    if not j.get("judged"):
+        return f"Not judged: {j.get('note', '')}. Judges: {names}."
+    bits = [f"quorum {j.get('quorum')}"]
+    if j.get("disputed"):
+        bits.append(f"{j['disputed']} disputed")
+    if j.get("added"):
+        bits.append(f"{j['added']} added")
+    if not j.get("disputed") and not j.get("added"):
+        bits.append("the review stands" if review.get("findings") else "nothing missed")
+    return f"Judged by {names}: " + ", ".join(bits) + "."
+
+
+def judges_noted_lines(triage: dict) -> list[str]:
+    """What a judge said the review missed that fell short of the quorum: shown, never alerted on."""
+    noted = (triage.get("judges") or {}).get("noted") or []
+    if not noted:
+        return []
+    lines = ["**Judges also noted** (short of the quorum, no alert):"]
+    for n in noted:
+        what = f"{n.get('kind', '')} {n.get('subject', '')}".strip()
+        lines.append(f"- {ICON.get(n.get('severity'), n.get('severity', ''))} · `{what}`: {n.get('summary', '')} — _{', '.join(n.get('judges') or [])}_")
+    return lines + [""]
 
 
 def render_markdown(triage: dict, comparison: dict | None = None) -> str:
@@ -65,6 +114,8 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
         lines += [triage["summary"], ""]
     if usual := band_line(comparison):
         lines += [usual, ""]
+    if judged := judges_line(triage):
+        lines += [f"_{judged}_", ""]
     if triage.get("agent_error"):
         from dbtriage.egress import plain_provider_error
 
@@ -74,7 +125,8 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
     life = triage.get("life") or []
     for i, f in enumerate(findings, 1):
         note = life_note(life[i - 1]) if i <= len(life) else ""
-        lines.append(f"{i}. {ICON.get(f['severity'], f['severity'])} · `{f.get('where', '')}`: {f['summary']}" + (f" — _{note}_" if note else ""))
+        mark = " · disputed" if f.get("disputed") else ""
+        lines.append(f"{i}. {ICON.get(f['severity'], f['severity'])}{mark} · `{f.get('where', '')}`: {f['summary']}" + (f" — _{note}_" if note else ""))
         if f.get("impact"):
             lines.append(f"   - **Impact:** {f['impact']}")
         for e in f.get("evidence", [])[:4]:
@@ -83,10 +135,12 @@ def render_markdown(triage: dict, comparison: dict | None = None) -> str:
             lines.append(f"   - **Measured:** {m}")
         if f.get("not_in_data"):  # numbers the model cited that no tool result showed
             lines.append(f"   - **Not in the data:** {', '.join(f['not_in_data'])}")
+        lines += judge_lines(f)
         if f.get("fix"):
             lines.append(f"   - **Fix:** {f['fix']}")
         lines += proposal_lines(f.get("proposal"), indent="   ")
         lines.append("")
+    lines += judges_noted_lines(triage)
     lines += still_open_lines(triage)
     if triage.get("checked"):
         lines += [f"**Checked:** {triage['checked']}", ""]
